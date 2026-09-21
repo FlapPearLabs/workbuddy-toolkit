@@ -9,9 +9,9 @@
 
 ---
 
-## 🤖 复制发给你的 AI Agent：一键全自动安装部署
+## 🤖 复制发给你的 AI Agent：一键全自动安装与自适应调度
 
-> **只需将下方指令复制并发送给你的终端 AI Coding Agent（如 Antigravity、Claude Code、Hermes、OpenCode、Codex 或 Cursor），Agent 将全自动为你拉取仓库、执行安装、打上补丁并输出使用报告：**
+> **只需将下方提示词直接复制并发送给你的终端 AI Coding Agent（如 Antigravity、WorkBuddy、Claude Code、Hermes、OpenCode、Codex 或 Cursor），Agent 将全自动为你拉取仓库、安装配置、智能探测自身的 `schedule` 调度能力并向你输出交付报告：**
 
 ```text
 请帮我安装并配置 WorkBuddy 多账号管理与自动化签到工具包 (workbuddy-toolkit)：
@@ -20,8 +20,16 @@
 2. 进入目录并执行一键安装脚本：
    cd ~/.workbuddy/toolkit && ./install.sh
 3. 执行 `workbuddy init` 确保全域工作区打通触发器已激活；
-4. 执行 `workbuddy status` 检查当前账号状态与凭证库；
-5. 向我汇报安装结果，并告诉我如何使用 `wb-switch`（免扫码切换账号）和 `wb-checkin`（自动领积分），以及如何通过 `workbuddy save <别名>` 保存当前登录态。
+4. 执行 `workbuddy status` 检查当前账号状态与已存凭证库；
+5. 智能探测你自身（当前 AI Agent）是否拥有内置的 `schedule` / cron 调度功能：
+   - 【若拥有 schedule 功能】（如 Antigravity、WorkBuddy 等内置调度器）：
+     默认使用你的 schedule 工具注册一个每日定时任务（Cron: 0 9 * * *, 执行 /bin/workbuddy checkin 并在触发时向我汇总汇报收益）。
+     同时询问我：“已为您默认配置每天早晨 09:00 自动打卡并汇报，请问您是否需要调整打卡时间或汇报偏好？”
+   - 【若没有 schedule 功能】（如部分普通 CLI Agent）：
+     如实告诉我当前环境没有内置 Agent 调度能力，并请我选择签到方式：
+     ① 采用安装脚本已配置的系统原生 launchd 后台定时打卡（无需 Agent 介入，每天 09:00 静默打卡写入 ~/.workbuddy/logs/checkin.log）；
+     ② 完全关闭后台自动打卡，后续每次由我手动在终端输入 `wb-checkin` 随时打卡。
+6. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-switch`（免扫码秒切账号）以及如何用 `workbuddy save <别名>` 保存当前登录态。
 ```
 
 ---
@@ -44,7 +52,7 @@
   - [2. SQLite 触发器穿透与全域共享机制](#2-sqlite-触发器穿透与全域共享机制)
   - [3. 免扫码凭证轮换与双向 Token 同步](#3-免扫码凭证轮换与双向-token-同步)
   - [4. 每日签到协议逆向与幂等领取架构](#4-每日签到协议逆向与幂等领取架构)
-  - [5. 双引擎后台定时调度设计](#5-双引擎后台定时调度设计)
+  - [5. 双引擎后台定时调度与自适应探测](#5-双引擎后台定时调度与自适应探测)
 - [三、快速上手与安装](#三快速上手与安装)
 - [四、命令行工具使用手册](#四命令行工具使用手册)
 - [五、安全与隐私承诺 (Zero-Leakage)](#五安全与隐私承诺-zero-leakage)
@@ -179,35 +187,29 @@ User-Agent: WorkBuddy/5.5.3
 
 ---
 
-### 5. 双引擎后台定时调度设计
+### 5. 双引擎后台定时调度与自适应探测
 
-为了让每日签到做到真正的“零打扰、免记挂”，项目实现了两套互为补充的调度层：
+为了让每日签到做到真正的“零打扰、免记挂”，项目实现了分层的调度架构，并支持 Agent 运行时的**自适应能力探测 (Capability Probing)**：
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                   系统定时调度中心 (09:00 AM)             │
-└──────────────┬────────────────────────────┬──────────────┘
-               ▼                            ▼
-   ┌───────────────────────┐    ┌───────────────────────┐
-   │  macOS LaunchAgent    │    │  Antigravity Sidecar  │
-   │  (系统级后台静默打卡)   │    │  (AI Agent 唤醒汇报)  │
-   └───────────┬───────────┘    └───────────┬───────────┘
-               └─────────────┬──────────────┘
-                             ▼
-               ┌───────────────────────────┐
-               │    /bin/workbuddy checkin │
-               └─────────────┬─────────────┘
-                             ▼
-               ┌───────────────────────────┐
-               │ 遍历 auth_profiles 全部账号 │
-               │ 先查状态 -> 自动领取积分   │
-               └───────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│              Agent 自适应能力探测 (Schedule Probing)              │
+└──────────────┬───────────────────────────────────┬──────────────┘
+               ▼                                   ▼
+   [具备 schedule 工具]                    [无内置 schedule 工具]
+         │                                       │
+         ▼                                       ▼
+ 自动注册 Agent 内置定时任务              用户自由二选一方案：
+ (每日 09:00 自动唤醒对话并汇报战报)        ① 采用系统级 launchd 守护进程静默打卡
+                                         ② 无需定时打卡，随时手动输入 wb-checkin
 ```
 
-1. **macOS `launchd` 守护服务**：
-   位于 `~/Library/LaunchAgents/com.workbuddy.dailycheckin.plist`，系统原生支持，机器锁屏或合盖休眠唤醒后会自动补跑，日志持久化于 `~/.workbuddy/logs/checkin.log`。
-2. **Antigravity 2.0 任务伴随体 (Sidecar)**：
-   位于 `~/.gemini/config/sidecars/workbuddy-checkin/sidecar.json`，在现代 AI IDE 中以图形化 Scheduled Task 展示，并可联动 `agentapi` 自动生成日常汇报卡片。
+1. **Agent 内置调度层（如有）**：
+   对于具备内置 `schedule` 工具的 Agent（如 Antigravity、WorkBuddy 等），可在会话中注册常驻 cron（`0 9 * * *`），每天早晨自动唤醒、拉起签到，并在对话窗口中向用户发送美观的收益战报。
+2. **macOS `launchd` 系统守护层**：
+   位于 `~/Library/LaunchAgents/com.workbuddy.dailycheckin.plist`，系统原生底层支持，机器锁屏或合盖休眠唤醒后会自动补跑，日志持久化于 `~/.workbuddy/logs/checkin.log`，无需任何 Agent 保持在线。
+3. **手动模式**：
+   若用户不希望后台常驻任何定时任务，只需执行 `wb-checkin` 即可在 0.5 秒内完成手工打卡。
 
 ---
 
@@ -217,8 +219,8 @@ User-Agent: WorkBuddy/5.5.3
 克隆本项目并执行自动化安装脚本：
 
 ```bash
-git clone https://github.com/FlapPearLabs/workbuddy-toolkit.git
-cd workbuddy-toolkit
+git clone https://github.com/FlapPearLabs/workbuddy-toolkit.git ~/.workbuddy/toolkit
+cd ~/.workbuddy/toolkit
 ./install.sh
 ```
 
