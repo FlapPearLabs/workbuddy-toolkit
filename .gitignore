@@ -1,0 +1,42 @@
+# Authentication and credentials (STRICT: NEVER COMMIT)
+*.info
+*.token
+*.key
+*.secret
+*.auth
+auth_profiles/
+workbuddy-desktop.info
+*.logout-marker
+
+# SQLite databases & backups
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db.bak*
+
+# Runtime logs & data
+*.log
+logs/
+sidecar_data/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.swo
+*~

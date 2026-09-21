@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+WorkBuddy Multi-Account Manager & Automation Toolkit (workbuddy CLI)
+https://github.com/FlapPearLabs/workbuddy-toolkit
+
+Features:
+- Zero-Scan Account Switcher: Switch between multiple saved accounts without WeChat QR re-scanning.
+- Shared Workspace & Session Sync: Keeps workspace trees and chat histories universal across accounts.
+- Automated Daily Check-in: Headless status probe and credit claims via Tencent backend endpoints.
+- Auto Profile Discovery: Automatically detects and registers newly logged-in accounts.
+"""
+
+import os
+import sys
+import json
+import time
+import sqlite3
+import subprocess
+import urllib.request
+import urllib.error
+import re
+from datetime import datetime
+
+AUTH_FILE = os.path.expanduser("~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info")
+PROFILES_DIR = os.path.expanduser("~/.workbuddy/auth_profiles")
+DB_FILE = os.path.expanduser("~/.workbuddy/workbuddy.db")
+
+COLOR_GREEN = "\033[92m"
+COLOR_YELLOW = "\033[93m"
+COLOR_CYAN = "\033[96m"
+COLOR_RED = "\033[91m"
+COLOR_BOLD = "\033[1m"
+COLOR_RESET = "\033[0m"
+
+def get_active_account():
+    if not os.path.exists(AUTH_FILE):
+        return None
+    try:
+        with open(AUTH_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def get_profiles():
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    profiles = {}
+    for fname in sorted(os.listdir(PROFILES_DIR)):
+        if fname.endswith(".info"):
+            name = fname[:-5]
+            fpath = os.path.join(PROFILES_DIR, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    profiles[name] = {
+                        "path": fpath,
+                        "data": data,
+                        "uid": data.get("account", {}).get("uid", ""),
+                        "nickname": data.get("account", {}).get("nickname", name),
+                        "uin": data.get("account", {}).get("uin", ""),
+                        "expiresAt": data.get("auth", {}).get("expiresAt", 0),
+                        "refreshExpiresAt": data.get("auth", {}).get("refreshExpiresAt", 0)
+                    }
+            except Exception:
+                pass
+    return profiles
+
+def format_timestamp(ts):
+    if not ts:
+        return "未知"
+    try:
+        dt = datetime.fromtimestamp(ts / 1000)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(ts)
+
+def sync_active_token_to_profiles():
+    active_data = get_active_account()
+    if not active_data:
+        return
+    active_uid = active_data.get("account", {}).get("uid")
+    if not active_uid:
+        return
+
+    profiles = get_profiles()
+    for name, p in profiles.items():
+        if p["uid"] == active_uid:
+            try:
+                with open(p["path"], "w", encoding="utf-8") as f:
+                    json.dump(active_data, f, indent=2, ensure_ascii=False)
+                os.chmod(p["path"], 0o600)
+            except Exception:
+                pass
+
+def init_shared_workspace():
+    """Inject SQLite triggers so all accounts share workspace sessions seamlessly."""
+    if not os.path.exists(DB_FILE):
+        print(f"{COLOR_RED}错误: 未找到 WorkBuddy 数据库 ({DB_FILE}){COLOR_RESET}")
+        return False
+
+    print(f"正在配置数据库以支持多账号工作区互通...")
+    try:
+        con = sqlite3.connect(DB_FILE)
+        cur = con.cursor()
+        
+        # 1. 统一历史会话 user_id 为 ''
+        cur.execute("UPDATE sessions SET user_id = '' WHERE user_id IS NOT NULL AND user_id != '';")
+        
+        # 2. 建立共享触发器
+        cur.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_sessions_force_shared_insert
+        AFTER INSERT ON sessions
+        BEGIN
+            UPDATE sessions SET user_id = '' WHERE id = NEW.id;
+        END;
+        """)
+        cur.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_sessions_force_shared_update
+        AFTER UPDATE OF user_id ON sessions
+        WHEN NEW.user_id != '' AND NEW.user_id IS NOT NULL
+        BEGIN
+            UPDATE sessions SET user_id = '' WHERE id = NEW.id;
+        END;
+        """)
+        con.commit()
+        con.close()
+        print(f"{COLOR_GREEN}✔ 全域会话共享触发器已成功激活！所有账号将共享相同的工作区和历史记录。{COLOR_RESET}")
+        return True
+    except Exception as e:
+        print(f"{COLOR_RED}配置失败: {e}{COLOR_RESET}")
+        return False
+
+def rollback_shared_workspace(restore_uid=None):
+    """Remove SQLite triggers and optionally re-isolate sessions."""
+    if not os.path.exists(DB_FILE):
+        return False
+    try:
+        con = sqlite3.connect(DB_FILE)
+        cur = con.cursor()
+        cur.execute("DROP TRIGGER IF EXISTS trg_sessions_force_shared_insert;")
+        cur.execute("DROP TRIGGER IF EXISTS trg_sessions_force_shared_update;")
+        if restore_uid:
+            cur.execute("UPDATE sessions SET user_id = ? WHERE user_id = '';", (restore_uid,))
+        con.commit()
+        con.close()
+        print(f"{COLOR_GREEN}✔ 共享触发器已移除，已恢复单账号数据隔离。{COLOR_RESET}")
+        return True
+    except Exception as e:
+        print(f"{COLOR_RED}回滚失败: {e}{COLOR_RESET}")
+        return False
+
+def show_status():
+    active_data = get_active_account()
+    profiles = get_profiles()
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 账号状态 ==={COLOR_RESET}")
+    if not active_data:
+        print(f"{COLOR_YELLOW}当前未检测到活跃的登录凭证。{COLOR_RESET}")
+    else:
+        acc = active_data.get("account", {})
+        auth = active_data.get("auth", {})
+        uid = acc.get("uid", "")
+        nickname = acc.get("nickname", "未命名")
+        expires = format_timestamp(auth.get("expiresAt", 0))
+        refresh_expires = format_timestamp(auth.get("refreshExpiresAt", 0))
+        
+        match_name = None
+        for name, p in profiles.items():
+            if p["uid"] == uid:
+                match_name = name
+                break
+        
+        display_name = f"{nickname} ({match_name})" if match_name else nickname
+        print(f"当前活跃账号: {COLOR_BOLD}{COLOR_GREEN}{display_name}{COLOR_RESET}")
+        print(f"账号 UID    : {uid}")
+        print(f"Token 有效期: {expires}")
+        print(f"刷新令牌过期: {refresh_expires}")
+
+    print(f"\n已保存的账号凭证库 ({len(profiles)} 个):")
+    for name, p in profiles.items():
+        is_active = active_data and active_data.get("account", {}).get("uid") == p["uid"]
+        tag = f"{COLOR_GREEN}[当前活动]{COLOR_RESET}" if is_active else "         "
+        masked_uid = f"{p['uid'][:8]}..." if len(p["uid"]) > 8 else p["uid"]
+        print(f" {tag} • {COLOR_BOLD}{name:<12}{COLOR_RESET} 昵称: {p['nickname']} (UID: {masked_uid}) 有效期至: {format_timestamp(p['expiresAt'])}")
+    print()
+
+def restart_workbuddy():
+    print(f"{COLOR_YELLOW}正在重启 WorkBuddy 客户端以生效凭证...{COLOR_RESET}")
+    try:
+        subprocess.run(["osascript", "-e", 'quit app "WorkBuddy"'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    except Exception:
+        pass
+    time.sleep(1.5)
+
+    res = subprocess.run(["pgrep", "-f", "WorkBuddy.app"], stdout=subprocess.PIPE, text=True)
+    if res.stdout.strip():
+        subprocess.run(["pkill", "-f", "WorkBuddy.app"], stderr=subprocess.DEVNULL)
+        time.sleep(1)
+
+    subprocess.run(["open", "-a", "WorkBuddy"])
+    print(f"{COLOR_GREEN}✔ WorkBuddy 已成功重启！{COLOR_RESET}")
+
+def switch_to_profile(target_name, auto_restart=True):
+    profiles = get_profiles()
+    target = None
+    for name, p in profiles.items():
+        if name.lower() == target_name.lower() or p["nickname"].lower() == target_name.lower() or p["uid"].startswith(target_name):
+            target = p
+            target_name = name
+            break
+
+    if not target:
+        print(f"{COLOR_RED}错误: 未找到名为 '{target_name}' 的账号凭证。{COLOR_RESET}")
+        print(f"可用账号列表: {', '.join(profiles.keys())}")
+        return False
+
+    active_data = get_active_account()
+    if active_data and active_data.get("account", {}).get("uid") == target["uid"]:
+        print(f"{COLOR_GREEN}当前已处于账号 '{target_name}' ({target['nickname']})，无需切换。{COLOR_RESET}")
+        return True
+
+    print(f"1. 正在同步当前账号最新 Token 到本地备份库...")
+    sync_active_token_to_profiles()
+
+    print(f"2. 正在激活账号: {COLOR_BOLD}{COLOR_GREEN}{target_name} ({target['nickname']}){COLOR_RESET} ...")
+    os.makedirs(os.path.dirname(AUTH_FILE), exist_ok=True)
+    tmp_file = AUTH_FILE + ".tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        json.dump(target["data"], f, indent=2, ensure_ascii=False)
+    os.chmod(tmp_file, 0o600)
+    os.replace(tmp_file, AUTH_FILE)
+
+    marker_file = os.path.join(os.path.dirname(AUTH_FILE), "workbuddy-desktop.logout-marker")
+    if os.path.exists(marker_file):
+        try:
+            os.remove(marker_file)
+        except Exception:
+            pass
+
+    if os.path.exists(DB_FILE):
+        try:
+            con = sqlite3.connect(DB_FILE)
+            cur = con.cursor()
+            cur.execute("UPDATE automations SET owner_user_id = ? WHERE deleted_at IS NULL;", (target["uid"],))
+            con.commit()
+            con.close()
+        except Exception:
+            pass
+
+    print(f"{COLOR_GREEN}✔ 凭证已成功切换至: {target_name} ({target['nickname']}){COLOR_RESET}")
+
+    if auto_restart:
+        restart_workbuddy()
+    else:
+        print(f"{COLOR_YELLOW}提示: 请在 WorkBuddy 窗口中按 Cmd + R 或重启客户端以加载新账号。{COLOR_RESET}")
+    return True
+
+def run_checkin(target_name=None):
+    sync_active_token_to_profiles()
+    active_data = get_active_account()
+    profiles = get_profiles()
+
+    # 自动发现：如果当前客户端登录了一个尚未保存到 profiles 的新账号，自动识别并保存入库
+    if active_data:
+        active_uid = active_data.get("account", {}).get("uid")
+        if active_uid and not any(p["uid"] == active_uid for p in profiles.values()):
+            nickname = active_data.get("account", {}).get("nickname") or active_data.get("account", {}).get("uin") or active_uid[:8]
+            clean_name = re.sub(r"[^\w\-]", "_", str(nickname)).strip("_") or active_uid[:8]
+            cand = clean_name
+            idx = 1
+            while os.path.exists(os.path.join(PROFILES_DIR, f"{cand}.info")):
+                cand = f"{clean_name}_{idx}"
+                idx += 1
+            auto_path = os.path.join(PROFILES_DIR, f"{cand}.info")
+            try:
+                with open(auto_path, "w", encoding="utf-8") as f:
+                    json.dump(active_data, f, indent=2, ensure_ascii=False)
+                os.chmod(auto_path, 0o600)
+                print(f"{COLOR_GREEN}✔ 检测到新登录账号，已自动保存 Profile: '{cand}' (昵称: {nickname}){COLOR_RESET}")
+                profiles = get_profiles()
+            except Exception:
+                pass
+
+    if not profiles:
+        print(f"{COLOR_RED}未在 ~/.workbuddy/auth_profiles 中发现任何保存的账号凭证。{COLOR_RESET}")
+        return
+
+    targets = {}
+    if target_name:
+        for name, p in profiles.items():
+            if name.lower() == target_name.lower() or p["nickname"].lower() == target_name.lower():
+                targets[name] = p
+                break
+        if not targets:
+            print(f"{COLOR_RED}未找到账号: {target_name}{COLOR_RESET}")
+            return
+    else:
+        targets = profiles
+
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 自动每日签到 ({len(targets)} 个账号) ==={COLOR_RESET}")
+
+    for name, p in targets.items():
+        data = p["data"]
+        token = data.get("auth", {}).get("accessToken")
+        uid = p["uid"]
+        nickname = p["nickname"]
+
+        if not token or not uid:
+            print(f" {COLOR_YELLOW}• {name:<12}{COLOR_RESET} [昵称: {nickname}] 缺少有效 Token，跳过")
+            continue
+
+        base_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "X-User-Id": uid,
+            "User-Agent": "WorkBuddy/5.5.3"
+        }
+
+        # 1. 幂等探测签到状态
+        status_req = urllib.request.Request(
+            "https://copilot.tencent.com/v2/billing/meter/checkin-activity-status",
+            data=b"{}",
+            headers=base_headers
+        )
+
+        try:
+            with urllib.request.urlopen(status_req, timeout=10) as resp:
+                status_res = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 查询签到状态失败: {e}")
+            continue
+
+        if status_res.get("code") != 0:
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 接口错误: {status_res.get('msg')}")
+            continue
+
+        status_data = status_res.get("data", {})
+        today_checked_in = status_data.get("today_checked_in", False)
+        streak_days = status_data.get("streak_days", 0)
+        total_credits = status_data.get("total_credits", 0)
+
+        if today_checked_in:
+            print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}今日已签到{COLOR_RESET} | 连续 {streak_days} 天 | 累计签到奖励 {total_credits} 积分")
+            continue
+
+        # 2. 执行签到领取
+        claim_req = urllib.request.Request(
+            "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
+            data=b"{}",
+            headers=base_headers
+        )
+
+        try:
+            with urllib.request.urlopen(claim_req, timeout=10) as resp:
+                claim_res = json.loads(resp.read().decode("utf-8"))
+                if claim_res.get("code") == 0:
+                    cd = claim_res.get("data", {})
+                    credit = cd.get("credit", 100)
+                    new_streak = cd.get("streak_days", streak_days + 1)
+                    print(f" {COLOR_GREEN}🎉 {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_BOLD}{COLOR_GREEN}签到成功！+{credit} 积分{COLOR_RESET} | 连续签到 {new_streak} 天")
+                else:
+                    print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {claim_res.get('msg')}")
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")
+            try:
+                err_json = json.loads(err_body)
+                msg = err_json.get("msg", err_body)
+            except Exception:
+                msg = err_body
+            if "已签到" in msg:
+                print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
+            else:
+                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到失败 ({e.code}): {msg}")
+        except Exception as e:
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}")
+
+    print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}\n")
+
+def interactive_menu():
+    profiles = get_profiles()
+    if not profiles:
+        print(f"{COLOR_RED}未在 ~/.workbuddy/auth_profiles 中发现任何保存的账号凭证。{COLOR_RESET}")
+        print(f"请登录一个账号后，在终端执行: workbuddy save <别名>")
+        return
+
+    active_data = get_active_account()
+    active_uid = active_data.get("account", {}).get("uid") if active_data else None
+
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=============================================={COLOR_RESET}")
+    print(f"{COLOR_BOLD}{COLOR_CYAN}       WorkBuddy 账号切换器 (CC Switch 风格)    {COLOR_RESET}")
+    print(f"{COLOR_BOLD}{COLOR_CYAN}=============================================={COLOR_RESET}")
+    
+    match_active = None
+    for name, p in profiles.items():
+        if p["uid"] == active_uid:
+            match_active = f"{name} ({p['nickname']})"
+            break
+    print(f"当前在线账号: {COLOR_BOLD}{COLOR_GREEN}{match_active or '未知 / 未登录'}{COLOR_RESET}")
+    print(f"\n请选择要切换的目标账号:")
+
+    keys = list(profiles.keys())
+    for idx, name in enumerate(keys, 1):
+        p = profiles[name]
+        is_cur = (p["uid"] == active_uid)
+        prefix = f"{COLOR_GREEN}▶{COLOR_RESET}" if is_cur else " "
+        cur_text = f" {COLOR_GREEN}(当前使用中){COLOR_RESET}" if is_cur else ""
+        print(f" {prefix} {COLOR_BOLD}{idx}){COLOR_RESET} {name:<12} [昵称: {p['nickname']}]{cur_text}")
+
+    print(f"\n   {COLOR_BOLD}q){COLOR_RESET} 退出 (Cancel)")
+    print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}")
+
+    try:
+        choice = input(f"{COLOR_BOLD}请输入序号 [1-{len(keys)}] 进行切换: {COLOR_RESET}").strip()
+        if not choice or choice.lower() == "q":
+            print("已取消。")
+            return
+        idx = int(choice)
+        if 1 <= idx <= len(keys):
+            target_name = keys[idx - 1]
+            switch_to_profile(target_name, auto_restart=True)
+        else:
+            print(f"{COLOR_RED}无效的序号: {choice}{COLOR_RESET}")
+    except ValueError:
+        print(f"{COLOR_RED}请输入正确的数字序号。{COLOR_RESET}")
+    except (KeyboardInterrupt, EOFError):
+        print("\n已取消。")
+
+def save_current(name):
+    active_data = get_active_account()
+    if not active_data:
+        print(f"{COLOR_RED}错误: 当前没有检测到已登录的 WorkBuddy 凭证。{COLOR_RESET}")
+        return
+    acc = active_data.get("account", {})
+    nickname = acc.get("nickname", name)
+    uid = acc.get("uid", "")
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    target_path = os.path.join(PROFILES_DIR, f"{name}.info")
+    with open(target_path, "w", encoding="utf-8") as f:
+        json.dump(active_data, f, indent=2, ensure_ascii=False)
+    os.chmod(target_path, 0o600)
+    print(f"{COLOR_GREEN}✔ 当前登录态已成功保存为 Profile: '{name}' (昵称: {nickname}, UID: {uid}){COLOR_RESET}")
+
+def print_help():
+    print(f"""
+{COLOR_BOLD}WorkBuddy 账号切换与自动化管理工具 (workbuddy CLI){COLOR_RESET}
+
+用法:
+  workbuddy switch [账号名]       切换到指定账号（省略参数则进入交互式菜单）
+  workbuddy checkin [账号名]      自动执行每日签到领积分（默认遍历所有已存账号）
+  workbuddy status              查看当前登录账号状态及 Token 有效期
+  workbuddy list                列出本地已保存的所有账号凭证
+  workbuddy save <账号别名>       将当前活跃的登录态保存为一个新账号 Profile
+  workbuddy init                一键对本地数据库打补丁，实现全账号工作区共享
+  workbuddy rollback            移除共享触发器，恢复官方默认数据隔离
+  workbuddy restart             重启 WorkBuddy 客户端
+
+快捷别名:
+  wb-switch [账号名]
+  wb-checkin [账号名]
+  workbuddy-switch [账号名]
+""")
+
+def main():
+    prog_name = os.path.basename(sys.argv[0]).lower()
+    args = sys.argv[1:]
+
+    # 如果通过快捷别名调用
+    if "checkin" in prog_name:
+        target = args[0] if args else None
+        run_checkin(target)
+        return
+    if "switch" in prog_name:
+        if args:
+            switch_to_profile(args[0], auto_restart=True)
+        else:
+            interactive_menu()
+        return
+
+    if not args:
+        interactive_menu()
+        return
+
+    cmd = args[0].lower()
+    if cmd in ["switch", "use"]:
+        if len(args) > 1:
+            switch_to_profile(args[1], auto_restart=True)
+        else:
+            interactive_menu()
+    elif cmd in ["checkin", "check-in", "sign", "signin"]:
+        target = args[1] if len(args) > 1 else None
+        run_checkin(target)
+    elif cmd in ["status", "info", "whoami"]:
+        show_status()
+    elif cmd in ["list", "ls"]:
+        show_status()
+    elif cmd in ["save", "backup"]:
+        if len(args) > 1:
+            save_current(args[1])
+        else:
+            print(f"{COLOR_RED}请提供保存的名称，例如: workbuddy save myaccount{COLOR_RESET}")
+    elif cmd in ["init", "patch"]:
+        init_shared_workspace()
+    elif cmd in ["rollback", "unpatch"]:
+        restore_uid = args[1] if len(args) > 1 else None
+        rollback_shared_workspace(restore_uid)
+    elif cmd in ["restart"]:
+        restart_workbuddy()
+    elif cmd in ["-h", "--help", "help"]:
+        print_help()
+    else:
+        profiles = get_profiles()
+        if cmd in profiles or any(p["nickname"].lower() == cmd for p in profiles.values()):
+            switch_to_profile(cmd, auto_restart=True)
+        else:
+            print(f"{COLOR_RED}未知命令或账号: {cmd}{COLOR_RESET}")
+            print_help()
+
+if __name__ == "__main__":
+    main()
