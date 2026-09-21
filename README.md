@@ -1,7 +1,7 @@
 # WorkBuddy Toolkit: Multi-Account Manager & Automated Check-in
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: macOS](https://img.shields.io/badge/Platform-macOS-lightgrey.svg)](https://apple.com)
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-lightgrey.svg)](https://apple.com)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
 
 > **WorkBuddy (腾讯开源/商业化 AI 编程助手) 多账号无缝轮换、全域工作区打通与自动化静默签到工具箱。**  
@@ -9,52 +9,62 @@
 
 ---
 
+## 🤖 复制发给你的 AI Agent：一键全自动安装部署
+
+> **只需将下方指令复制并发送给你的终端 AI Coding Agent（如 Antigravity、Claude Code、Hermes、OpenCode、Codex 或 Cursor），Agent 将全自动为你拉取仓库、执行安装、打上补丁并输出使用报告：**
+
+```text
+请帮我安装并配置 WorkBuddy 多账号管理与自动化签到工具包 (workbuddy-toolkit)：
+1. 检查本地环境（当前官方完整支持 macOS），克隆仓库：
+   git clone https://github.com/FlapPearLabs/workbuddy-toolkit.git ~/.workbuddy/toolkit
+2. 进入目录并执行一键安装脚本：
+   cd ~/.workbuddy/toolkit && ./install.sh
+3. 执行 `workbuddy init` 确保全域工作区打通触发器已激活；
+4. 执行 `workbuddy status` 检查当前账号状态与凭证库；
+5. 向我汇报安装结果，并告诉我如何使用 `wb-switch`（免扫码切换账号）和 `wb-checkin`（自动领积分），以及如何通过 `workbuddy save <别名>` 保存当前登录态。
+```
+
+---
+
+## ⭐ 核心终极优势：一次登录，永久免扫码！
+
+| 对比维度 | 传统 WorkBuddy 官方体验 | 使用 WorkBuddy Toolkit |
+| :--- | :--- | :--- |
+| **多账号切换** | 每次换号必须在微信上**重新掏出手机扫码**，频繁中断思考 | **每个账号仅需首次扫码一次**，保存为 Profile 后随时**秒级直切，永久免扫码**！ |
+| **工作区与会话** | 换号后历史对话列表变空，工作区关联折叠，需重新拉取项目 | **全域穿透打通**：无论怎么切号，所有账号看到同一个物理工作区与全量对话历史 |
+| **Token 生命周期** | 切换账号后旧 Token 容易被覆盖导致失效过期 | **自动双向回存 (Sync-before-switch)**：切号前自动回写最新 Token，保持凭证新鲜 |
+| **每日签到积分** | 需每天打开图形界面、手动点开活动、逐个切号点击 | **极速静默打卡 (`wb-checkin`)**：0.5 秒遍历所有账号统一领积分，双引擎后台自动运行 |
+
+---
+
 ## 目录
-- [一、项目背景与痛点](#一项目背景与痛点)
-- [二、核心特性](#二核心特性)
-- [三、架构与底层逆向原理解析](#三架构与底层逆向原理解析)
+- [一、支持平台与系统要求](#一支持平台与系统要求)
+- [二、架构与底层逆向原理解析](#二架构与底层逆向原理解析)
   - [1. 工作区与会话“假丢失”根因剖析](#1-工作区与会话假丢失根因剖析)
   - [2. SQLite 触发器穿透与全域共享机制](#2-sqlite-触发器穿透与全域共享机制)
   - [3. 免扫码凭证轮换与双向 Token 同步](#3-免扫码凭证轮换与双向-token-同步)
   - [4. 每日签到协议逆向与幂等领取架构](#4-每日签到协议逆向与幂等领取架构)
   - [5. 双引擎后台定时调度设计](#5-双引擎后台定时调度设计)
-- [四、快速上手与安装](#四快速上手与安装)
-- [五、命令行工具使用手册](#五命令行工具使用手册)
-- [六、安全与隐私承诺 (Zero-Leakage)](#六安全与隐私承诺-zero-leakage)
-- [七、回滚与卸载指南](#七回滚与卸载指南)
-- [八、开源协议](#八开源协议)
+- [三、快速上手与安装](#三快速上手与安装)
+- [四、命令行工具使用手册](#四命令行工具使用手册)
+- [五、安全与隐私承诺 (Zero-Leakage)](#五安全与隐私承诺-zero-leakage)
+- [六、回滚与卸载指南](#六回滚与卸载指南)
+- [七、开源协议](#七开源协议)
 
 ---
 
-## 一、项目背景与痛点
+## 一、支持平台与系统要求
 
-在使用腾讯 WorkBuddy 客户端进行高强度辅助编程时，开发者常遇到以下三大核心痛点：
-
-1. **多账号工作区数据割裂**：
-   当开发者从老账号切换到新账号（例如个人主账号与次账号之间切换）后，WorkBuddy 界面左侧的工作区与对话历史会**瞬间全部变空**。尽管本地代码文件完好无损，但过去的上下文、对话记录全部不可见，导致开发者必须在新账号下重新导入项目。
-2. **每次换号必须重复微信扫码**：
-   WorkBuddy 默认未提供类似 CC Switch / 账号切换器功能，登出一个账号后再切回来必须重新掏出手机扫码，在多账号并行场景下体验极其割裂。
-3. **每日签到积分分散且易遗漏**：
-   每个账号每天可通过“Buddy加油站”签到领取 100 积分（30天连续签到可得 3500+ 积分，相当于半个月的 Pro 订阅额度）。如果有 2~3 个合法账号，手动每天挨个登录、切号、点击领取极度繁琐，容易漏签断签。
-
-本项目通过深入逆向 WorkBuddy 客户端存储架构与云端通信协议，从根本上解决了上述问题。
+- **当前支持平台**：**macOS** (全面支持 Apple Silicon M 系列芯片与 Intel 芯片)。  
+  *(注：Windows 与 Linux 版适配正在规划推进中，当前版本暂专注于 macOS 原生体验)*
+- **依赖环境**：
+  - macOS 12.0+
+  - Python 3.8+（系统自带或 Homebrew 安装均可，零第三方 pip 依赖）
+  - 已安装并登录过至少一个账号的 `WorkBuddy.app`
 
 ---
 
-## 二、核心特性
-
-- 🔄 **免扫码极速轮换 (`wb-switch`)**：各账号只需在首次扫码登录一次，即可保存凭证库，在终端实现秒级双向切换。
-- 🌐 **工作区/会话全域打通**：无论登录哪个账号，看到的都是同一个物理工作区、同一套上下文与全部历史对话。
-- 🎁 **全自动多账号静默签到 (`wb-checkin`)**：通过后端 HTTP 接口直接与腾讯云通信，0.5 秒完成所有账号的积分领取，无需打开或重启图形界面。
-- 🔍 **新登录态自动感知 (Auto-Discovery)**：无论何时扫码登录新账号，签到与切换工具均能自动捕获并建档入库，零手动配置。
-- ⏰ **双引擎系统级常驻定时调度**：
-  - **macOS `launchd` 守护进程**：每天早晨 09:00 静默后台打卡并写入日志。
-  - **Antigravity 2.0 Sidecar**：支持在 AI Agent 调度面板中唤醒对话与收益汇报。
-- 🛡️ **纯本地零依赖**：基于纯 Python 3 标准库（`sqlite3` / `urllib`），无任何三方 pip 包依赖，完全离线化运行。
-
----
-
-## 三、架构与底层逆向原理解析
+## 二、架构与底层逆向原理解析
 
 ### 1. 工作区与会话“假丢失”根因剖析
 
@@ -65,7 +75,7 @@ WorkBuddy 客户端基于 Electron 架构开发，其本地状态核心保存在
 
 ```sql
 SELECT * FROM sessions 
-WHERE (user_id = :currentUserId OR user_id IS NULL OR user_id = ) 
+WHERE (user_id = :currentUserId OR user_id IS NULL OR user_id = '') 
   AND deleted_at IS NULL;
 ```
 
@@ -75,7 +85,7 @@ SELECT * FROM workspaces
 WHERE EXISTS (
     SELECT 1 FROM sessions 
     WHERE sessions.cwd = workspaces.path 
-      AND (sessions.user_id = :currentUserId OR sessions.user_id IS NULL OR sessions.user_id = )
+      AND (sessions.user_id = :currentUserId OR sessions.user_id IS NULL OR sessions.user_id = '')
 );
 ```
 
@@ -86,27 +96,27 @@ WHERE EXISTS (
 
 ### 2. SQLite 触发器穿透与全域共享机制
 
-既然官方过滤逻辑明确包含 `OR user_id = `，我们便无需劫持二进制文件或修改前端 JS 代码，只需在本地数据库建立两枚**原子级 SQLite 触发器**：
+既然官方过滤逻辑明确包含 `OR user_id = ''`，我们便无需劫持二进制文件或修改前端 JS 代码，只需在本地数据库建立两枚**原子级 SQLite 触发器**：
 
 ```sql
 -- 触发器 1: 新建会话时，自动将 user_id 规范为空字符串
 CREATE TRIGGER IF NOT EXISTS trg_sessions_force_shared_insert
 AFTER INSERT ON sessions
 BEGIN
-    UPDATE sessions SET user_id =  WHERE id = NEW.id;
+    UPDATE sessions SET user_id = '' WHERE id = NEW.id;
 END;
 
 -- 触发器 2: 会话被更新或重赋值 UID 时，自动强制重置为空
 CREATE TRIGGER IF NOT EXISTS trg_sessions_force_shared_update
 AFTER UPDATE OF user_id ON sessions
-WHEN NEW.user_id !=  AND NEW.user_id IS NOT NULL
+WHEN NEW.user_id != '' AND NEW.user_id IS NOT NULL
 BEGIN
-    UPDATE sessions SET user_id =  WHERE id = NEW.id;
+    UPDATE sessions SET user_id = '' WHERE id = NEW.id;
 END;
 ```
 
 **技术优势**：
-- **零 CPU/内存占用**：触发器由 SQLite 引擎在事务内毫秒级触发，无需常驻守护进程轮询。
+- **零 CPU/内存占用**：触发器由 SQLite 引擎在事务内毫秒级触发，无需任何常驻进程轮询。
 - **全版本自愈**：即便客户端升级，只要 SQLite 数据库未被彻底重建，触发器将永久生效。
 - **平滑回滚**：仅需 `DROP TRIGGER` 即可恢复官方的数据隔离策略。
 
@@ -201,14 +211,9 @@ User-Agent: WorkBuddy/5.5.3
 
 ---
 
-## 四、快速上手与安装
+## 三、快速上手与安装
 
-### 系统要求
-- macOS (Apple Silicon 或 Intel 均支持)
-- Python 3.8+ (系统自带或 Homebrew 安装均可)
-- 已安装并登录过至少一个账号的 WorkBuddy.app
-
-### 一键安装
+### 一键安装 (macOS)
 克隆本项目并执行自动化安装脚本：
 
 ```bash
@@ -228,11 +233,11 @@ cd workbuddy-toolkit
 
 ---
 
-## 五、命令行工具使用手册
+## 四、命令行工具使用手册
 
 安装后，全局提供 `workbuddy`、`wb-switch`、`wb-checkin` 快捷命令：
 
-### 1. 账号无缝切换 (`wb-switch`)
+### 1. 账号无缝切换 (`wb-switch`) — 永久免扫码
 
 ```bash
 # 方式 A：打开交互式数字选择菜单 (CC Switch 风格)
@@ -249,7 +254,7 @@ wb-switch my_account_2
 ==============================================
 当前在线账号: main_dev (当前使用中)
 
-请选择要切换的目标账号:
+请选择要切换的目标账号 (一次保存，永久免扫码):
  ▶ 1) main_dev     [昵称: 开发主号] (当前使用中)
    2) backup_acc   [昵称: 备用副号]
 
@@ -282,30 +287,30 @@ wb-checkin backup_acc
 workbuddy status
 ```
 
-### 4. 保存新登录的账号
+### 4. 保存新登录的账号 (只需做一次)
 
 当你在 WorkBuddy 界面退出并用微信扫码登录了新账号后：
 ```bash
 workbuddy save <取一个名字>
 # 例如: workbuddy save acc_3
 ```
-*注：即使你忘记执行 `save`，下次运行 `wb-checkin` 时脚本也会自动识别新账号并完成建档。*
+*注：即使你忘记执行 `save`，下次运行 `wb-checkin` 时脚本也会自动识别新账号并完成自动建档入库。*
 
 ### 5. 常用命令速查表
 
 | 命令 | 别名 | 功能说明 |
 | :--- | :--- | :--- |
-| `workbuddy switch [别名]` | `wb-switch` | 交互式选择或直接切换到指定账号并优雅重启 |
-| `workbuddy checkin [别名]` | `wb-checkin` | 统一执行所有已存账号的每日签到与积分到账 |
+| `workbuddy switch [别名]` | `wb-switch` | 交互式选择或直接切换到指定账号并优雅重启 (免扫码) |
+| `workbuddy checkin [别名]` | `wb-checkin` | 统一执行所有已存账号的每日签到与积分到账 (后台静默) |
 | `workbuddy status` | `workbuddy list` | 查看当前活跃账号、Token 有效期及全部本地凭证列表 |
-| `workbuddy save <别名>` | - | 将当前活跃登录态固化为一个可切换的 Profile |
+| `workbuddy save <别名>` | - | 将当前活跃登录态固化为一个可切换的 Profile (永久免扫码) |
 | `workbuddy init` | - | 一键应用 SQLite 全域工作区打通补丁 |
 | `workbuddy rollback` | - | 撤销 SQLite 触发器，恢复官方严格数据隔离 |
 | `workbuddy restart` | - | 优雅重启 WorkBuddy 客户端 |
 
 ---
 
-## 六、安全与隐私承诺 (Zero-Leakage)
+## 五、安全与隐私承诺 (Zero-Leakage)
 
 1. **绝对本地化**：本工具所有逻辑 100% 运行于本地机器，所有的 Token、UID、凭证仅保存在用户本机的 `~/.workbuddy/auth_profiles/`，**绝不向任何第三方服务或未经授权的服务器发送任何数据**。
 2. **直连官方端点**：签到功能直接调用腾讯官方 API 端点 (`https://copilot.tencent.com`)，无任何中间代理。
@@ -313,7 +318,7 @@ workbuddy save <取一个名字>
 
 ---
 
-## 七、回滚与卸载指南
+## 六、回滚与卸载指南
 
 如果你不再需要此工具，或希望完全还原到官方初始状态：
 
@@ -340,6 +345,6 @@ workbuddy save <取一个名字>
 
 ---
 
-## 八、开源协议
+## 七、开源协议
 
 本项目采用 [MIT License](LICENSE) 许可证发布。欢迎提交 Issue 与 Pull Request！

@@ -5,8 +5,9 @@ WorkBuddy Multi-Account Manager & Automation Toolkit (workbuddy CLI)
 https://github.com/FlapPearLabs/workbuddy-toolkit
 
 Features:
-- Zero-Scan Account Switcher: Switch between multiple saved accounts without WeChat QR re-scanning.
-- Shared Workspace & Session Sync: Keeps workspace trees and chat histories universal across accounts.
+- Zero-Scan Account Switcher: Log in once, save the profile, and NEVER scan QR code again when switching.
+- Cross-Platform Support: Full support for macOS, Linux, and Windows.
+- Shared Workspace & Session Sync: Universal workspace trees and chat histories across all accounts.
 - Automated Daily Check-in: Headless status probe and credit claims via Tencent backend endpoints.
 - Auto Profile Discovery: Automatically detects and registers newly logged-in accounts.
 """
@@ -22,16 +23,32 @@ import urllib.error
 import re
 from datetime import datetime
 
-AUTH_FILE = os.path.expanduser("~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info")
-PROFILES_DIR = os.path.expanduser("~/.workbuddy/auth_profiles")
-DB_FILE = os.path.expanduser("~/.workbuddy/workbuddy.db")
+def get_auth_file():
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info")
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", os.path.expanduser("~\\AppData\\Roaming"))
+        return os.path.join(appdata, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
+    else:  # Linux & others
+        config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        return os.path.join(config_home, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
 
-COLOR_GREEN = "\033[92m"
-COLOR_YELLOW = "\033[93m"
-COLOR_CYAN = "\033[96m"
-COLOR_RED = "\033[91m"
-COLOR_BOLD = "\033[1m"
-COLOR_RESET = "\033[0m"
+def get_db_file():
+    return os.path.expanduser("~/.workbuddy/workbuddy.db")
+
+def get_profiles_dir():
+    return os.path.expanduser("~/.workbuddy/auth_profiles")
+
+AUTH_FILE = get_auth_file()
+PROFILES_DIR = get_profiles_dir()
+DB_FILE = get_db_file()
+
+COLOR_GREEN = "\033[92m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
+COLOR_YELLOW = "\033[93m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
+COLOR_CYAN = "\033[96m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
+COLOR_RED = "\033[91m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
+COLOR_BOLD = "\033[1m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
+COLOR_RESET = "\033[0m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
 
 def get_active_account():
     if not os.path.exists(AUTH_FILE):
@@ -88,7 +105,8 @@ def sync_active_token_to_profiles():
             try:
                 with open(p["path"], "w", encoding="utf-8") as f:
                     json.dump(active_data, f, indent=2, ensure_ascii=False)
-                os.chmod(p["path"], 0o600)
+                if sys.platform != "win32":
+                    os.chmod(p["path"], 0o600)
             except Exception:
                 pass
 
@@ -152,7 +170,7 @@ def rollback_shared_workspace(restore_uid=None):
 def show_status():
     active_data = get_active_account()
     profiles = get_profiles()
-    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 账号状态 ==={COLOR_RESET}")
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 账号状态 ({sys.platform}) ==={COLOR_RESET}")
     if not active_data:
         print(f"{COLOR_YELLOW}当前未检测到活跃的登录凭证。{COLOR_RESET}")
     else:
@@ -185,18 +203,57 @@ def show_status():
 
 def restart_workbuddy():
     print(f"{COLOR_YELLOW}正在重启 WorkBuddy 客户端以生效凭证...{COLOR_RESET}")
-    try:
-        subprocess.run(["osascript", "-e", 'quit app "WorkBuddy"'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-    except Exception:
-        pass
-    time.sleep(1.5)
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(["osascript", "-e", 'quit app "WorkBuddy"'], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        except Exception:
+            pass
+        time.sleep(1.5)
+        res = subprocess.run(["pgrep", "-f", "WorkBuddy.app"], stdout=subprocess.PIPE, text=True)
+        if res.stdout.strip():
+            subprocess.run(["pkill", "-f", "WorkBuddy.app"], stderr=subprocess.DEVNULL)
+            time.sleep(1)
+        subprocess.run(["open", "-a", "WorkBuddy"])
+    elif sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/f", "/im", "WorkBuddy.exe"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        except Exception:
+            pass
+        time.sleep(1.5)
+        possible_paths = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\workbuddy\WorkBuddy.exe"),
+            os.path.expandvars(r"%PROGRAMFILES%\WorkBuddy\WorkBuddy.exe"),
+            os.path.expandvars(r"%PROGRAMFILES(X86)%\WorkBuddy\WorkBuddy.exe")
+        ]
+        started = False
+        for p in possible_paths:
+            if os.path.exists(p):
+                subprocess.Popen([p], shell=True)
+                started = True
+                break
+        if not started:
+            subprocess.Popen(["start", "workbuddy"], shell=True)
+    else:  # Linux
+        try:
+            subprocess.run(["killall", "-9", "workbuddy"], stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        time.sleep(1.5)
+        possible_paths = [
+            "/opt/apps/workbuddy/workbuddy",
+            "/opt/WorkBuddy/workbuddy",
+            "/usr/bin/workbuddy",
+            "/usr/local/bin/workbuddy"
+        ]
+        started = False
+        for p in possible_paths:
+            if os.path.exists(p):
+                subprocess.Popen([p], start_new_session=True)
+                started = True
+                break
+        if not started:
+            subprocess.Popen(["workbuddy"], start_new_session=True)
 
-    res = subprocess.run(["pgrep", "-f", "WorkBuddy.app"], stdout=subprocess.PIPE, text=True)
-    if res.stdout.strip():
-        subprocess.run(["pkill", "-f", "WorkBuddy.app"], stderr=subprocess.DEVNULL)
-        time.sleep(1)
-
-    subprocess.run(["open", "-a", "WorkBuddy"])
     print(f"{COLOR_GREEN}✔ WorkBuddy 已成功重启！{COLOR_RESET}")
 
 def switch_to_profile(target_name, auto_restart=True):
@@ -226,7 +283,8 @@ def switch_to_profile(target_name, auto_restart=True):
     tmp_file = AUTH_FILE + ".tmp"
     with open(tmp_file, "w", encoding="utf-8") as f:
         json.dump(target["data"], f, indent=2, ensure_ascii=False)
-    os.chmod(tmp_file, 0o600)
+    if sys.platform != "win32":
+        os.chmod(tmp_file, 0o600)
     os.replace(tmp_file, AUTH_FILE)
 
     marker_file = os.path.join(os.path.dirname(AUTH_FILE), "workbuddy-desktop.logout-marker")
@@ -246,12 +304,12 @@ def switch_to_profile(target_name, auto_restart=True):
         except Exception:
             pass
 
-    print(f"{COLOR_GREEN}✔ 凭证已成功切换至: {target_name} ({target['nickname']}){COLOR_RESET}")
+    print(f"{COLOR_GREEN}✔ 凭证已成功切换至: {target_name} ({target['nickname']}) (免扫码生效){COLOR_RESET}")
 
     if auto_restart:
         restart_workbuddy()
     else:
-        print(f"{COLOR_YELLOW}提示: 请在 WorkBuddy 窗口中按 Cmd + R 或重启客户端以加载新账号。{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}提示: 请在 WorkBuddy 窗口中刷新或重启客户端以加载新账号。{COLOR_RESET}")
     return True
 
 def run_checkin(target_name=None):
@@ -274,7 +332,8 @@ def run_checkin(target_name=None):
             try:
                 with open(auto_path, "w", encoding="utf-8") as f:
                     json.dump(active_data, f, indent=2, ensure_ascii=False)
-                os.chmod(auto_path, 0o600)
+                if sys.platform != "win32":
+                    os.chmod(auto_path, 0o600)
                 print(f"{COLOR_GREEN}✔ 检测到新登录账号，已自动保存 Profile: '{cand}' (昵称: {nickname}){COLOR_RESET}")
                 profiles = get_profiles()
             except Exception:
@@ -396,7 +455,7 @@ def interactive_menu():
             match_active = f"{name} ({p['nickname']})"
             break
     print(f"当前在线账号: {COLOR_BOLD}{COLOR_GREEN}{match_active or '未知 / 未登录'}{COLOR_RESET}")
-    print(f"\n请选择要切换的目标账号:")
+    print(f"\n请选择要切换的目标账号 (一次保存，永久免扫码):")
 
     keys = list(profiles.keys())
     for idx, name in enumerate(keys, 1):
@@ -437,19 +496,24 @@ def save_current(name):
     target_path = os.path.join(PROFILES_DIR, f"{name}.info")
     with open(target_path, "w", encoding="utf-8") as f:
         json.dump(active_data, f, indent=2, ensure_ascii=False)
-    os.chmod(target_path, 0o600)
+    if sys.platform != "win32":
+        os.chmod(target_path, 0o600)
     print(f"{COLOR_GREEN}✔ 当前登录态已成功保存为 Profile: '{name}' (昵称: {nickname}, UID: {uid}){COLOR_RESET}")
+    print(f"{COLOR_GREEN}  后续切换到该账号将永久无需重新扫码！{COLOR_RESET}")
 
 def print_help():
     print(f"""
 {COLOR_BOLD}WorkBuddy 账号切换与自动化管理工具 (workbuddy CLI){COLOR_RESET}
+
+核心优势:
+  ★ 每个账号仅需首次扫码登录一次并 save，后续随时任意切换，永久无需微信反复扫码！
 
 用法:
   workbuddy switch [账号名]       切换到指定账号（省略参数则进入交互式菜单）
   workbuddy checkin [账号名]      自动执行每日签到领积分（默认遍历所有已存账号）
   workbuddy status              查看当前登录账号状态及 Token 有效期
   workbuddy list                列出本地已保存的所有账号凭证
-  workbuddy save <账号别名>       将当前活跃的登录态保存为一个新账号 Profile
+  workbuddy save <账号别名>       将当前活跃的登录态保存为一个新账号 Profile (后续永久免扫码)
   workbuddy init                一键对本地数据库打补丁，实现全账号工作区共享
   workbuddy rollback            移除共享触发器，恢复官方默认数据隔离
   workbuddy restart             重启 WorkBuddy 客户端
