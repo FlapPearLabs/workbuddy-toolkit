@@ -12,6 +12,12 @@ import shutil
 import sqlite3
 import subprocess
 
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 WORKBUDDY_DIR = os.path.join(HOME, ".workbuddy")
@@ -125,6 +131,7 @@ def init_db():
             cur.execute("""
             CREATE TRIGGER IF NOT EXISTS trg_sessions_force_shared_insert
             AFTER INSERT ON sessions
+            WHEN NEW.user_id != '' AND NEW.user_id IS NOT NULL
             BEGIN
                 UPDATE sessions SET user_id = '' WHERE id = NEW.id;
             END;

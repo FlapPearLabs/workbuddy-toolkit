@@ -10,6 +10,7 @@ UPDATE sessions SET user_id = '' WHERE user_id IS NOT NULL AND user_id != '';
 -- 2. 创建自动注入触发器：新会话插入时自动将 user_id 置空
 CREATE TRIGGER IF NOT EXISTS trg_sessions_force_shared_insert
 AFTER INSERT ON sessions
+WHEN NEW.user_id != '' AND NEW.user_id IS NOT NULL
 BEGIN
     UPDATE sessions SET user_id = '' WHERE id = NEW.id;
 END;

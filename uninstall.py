@@ -12,6 +12,12 @@ import shutil
 import sqlite3
 import subprocess
 
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 HOME = os.path.expanduser("~")
 WORKBUDDY_DIR = os.path.join(HOME, ".workbuddy")
 DB_FILE = os.path.join(WORKBUDDY_DIR, "workbuddy.db")
@@ -90,7 +96,13 @@ def uninstall():
 
     # 4. 询问回滚数据库触发器
     try:
-        ans = input("是否需要同时回滚 SQLite 数据库触发器并恢复官方默认数据隔离？(y/N): ").strip()
+        if "--yes" in sys.argv or "-y" in sys.argv:
+            ans = "y"
+        elif "--no-rollback" in sys.argv or not sys.stdin.isatty():
+            ans = "n"
+        else:
+            ans = input("是否需要同时回滚 SQLite 数据库触发器并恢复官方默认数据隔离？(y/N): ").strip()
+
         if ans.lower() == "y" and os.path.exists(DB_FILE):
             con = sqlite3.connect(DB_FILE)
             con.execute("DROP TRIGGER IF EXISTS trg_sessions_force_shared_insert;")

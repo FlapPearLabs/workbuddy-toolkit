@@ -48,8 +48,12 @@ rm -f "$INSTALL_BIN/wb-checkin"
 rm -f "$INSTALL_BIN/workbuddy-checkin"
 echo "✔ 已清理安装的 CLI 脚本"
 
-echo "是否需要同时回滚 SQLite 数据库触发器并恢复官方默认数据隔离？(y/N)"
-read -r answer
+if [ -t 0 ]; then
+    echo "是否需要同时回滚 SQLite 数据库触发器并恢复官方默认数据隔离？(y/N)"
+    read -r answer
+else
+    answer="n"
+fi
 if [[ "$answer" =~ ^[Yy]$ ]]; then
     python3 -c "
 import sqlite3, os
