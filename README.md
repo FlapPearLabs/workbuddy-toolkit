@@ -1,33 +1,37 @@
 # WorkBuddy Toolkit: Multi-Account Manager & Automated Check-in
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%20(Apple%20Silicon%20%2F%20Intel)-lightgrey.svg)](https://apple.com)
+[![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
 
 > **WorkBuddy (腾讯开源/商业化 AI 编程助手) 多账号无缝轮换、全域工作区打通与自动化静默签到工具箱。**  
-> 深入逆向底层 SQLite 存储隔离机制与腾讯云后端鉴权协议，打造零侵入、高内聚、零打扰的本地自动化工作流。
+> 深入逆向底层 SQLite 存储隔离机制与腾讯云后端鉴权协议，原生全面适配 **macOS**、**Linux** 与 **Windows** 三大操作系统，打造零侵入、高内聚、零打扰的本地自动化工作流。
 
 ---
 
 ## 🤖 复制发给你的 AI Agent：一键全自动安装与自适应调度
 
-> **只需将下方提示词直接复制并发送给你的终端 AI Coding Agent（如 Antigravity、WorkBuddy、Claude Code、Hermes、OpenCode、Codex 或 Cursor），Agent 将全自动为你拉取仓库、安装配置、智能探测自身的 `schedule` 调度能力并向你输出交付报告：**
+> **只需将下方提示词直接复制并发送给你的终端 AI Coding Agent（如 Antigravity、WorkBuddy、Claude Code、Hermes、OpenCode、Codex 或 Cursor），Agent 将自动识别当前操作系统（macOS / Linux / Windows）、全自动拉取仓库、安装配置、智能探测自身的 `schedule` 调度能力并向你输出交付报告：**
 
 ```text
 请帮我安装并配置 WorkBuddy 多账号管理与自动化签到工具包 (workbuddy-toolkit)：
-1. 检查本地环境（当前官方完整支持 macOS），克隆仓库：
+1. 识别当前操作系统平台（macOS、Linux 或 Windows），克隆开源仓库：
    git clone https://github.com/FlapPearLabs/workbuddy-toolkit.git ~/.workbuddy/toolkit
-2. 进入目录并执行一键安装脚本：
-   cd ~/.workbuddy/toolkit && ./install.sh
+2. 进入目录并执行适配当前系统的一键安装程序：
+   - 跨平台通用推荐方式（任何操作系统均可用）：
+     cd ~/.workbuddy/toolkit && python3 install.py   (Windows 下执行: python install.py)
+   - 或使用系统原生安装脚本：
+     macOS / Linux : cd ~/.workbuddy/toolkit && ./install.sh
+     Windows (PowerShell) : cd ~\.workbuddy\toolkit ; .\install.ps1
 3. 执行 `workbuddy init` 确保全域工作区打通触发器已激活；
 4. 执行 `workbuddy status` 检查当前账号状态与已存凭证库；
 5. 智能探测你自身（当前 AI Agent）是否拥有内置的 `schedule` / cron 调度功能：
    - 【若拥有 schedule 功能】（如 Antigravity、WorkBuddy 等内置调度器）：
-     默认使用你的 schedule 工具注册一个每日定时任务（Cron: 0 9 * * *, 执行 /bin/workbuddy checkin 并在触发时向我汇总汇报收益）。
+     默认使用你的 schedule 工具注册一个每日定时任务（Cron: 0 9 * * *, 触发时运行 workbuddy checkin 并向我汇总汇报收益）。
      同时询问我：“已为您默认配置每天早晨 09:00 自动打卡并汇报，请问您是否需要调整打卡时间或汇报偏好？”
    - 【若没有 schedule 功能】（如部分普通 CLI Agent）：
      如实告诉我当前环境没有内置 Agent 调度能力，并请我选择签到方式：
-     ① 采用安装脚本已配置的系统原生 launchd 后台定时打卡（无需 Agent 介入，每天 09:00 静默打卡写入 ~/.workbuddy/logs/checkin.log）；
+     ① 采用安装脚本已配置的系统原生守护定时打卡（macOS launchd / Linux systemd timer / Windows 任务计划程序，每天 09:00 静默打卡写入日志）；
      ② 完全关闭后台自动打卡，后续每次由我手动在终端输入 `wb-checkin` 随时打卡。
 6. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-switch`（免扫码秒切账号）以及如何用 `workbuddy save <别名>` 保存当前登录态。
 ```
@@ -41,7 +45,7 @@
 | **多账号切换** | 每次换号必须在微信上**重新掏出手机扫码**，频繁中断思考 | **每个账号仅需首次扫码一次**，保存为 Profile 后随时**秒级直切，永久免扫码**！ |
 | **工作区与会话** | 换号后历史对话列表变空，工作区关联折叠，需重新拉取项目 | **全域穿透打通**：无论怎么切号，所有账号看到同一个物理工作区与全量对话历史 |
 | **Token 生命周期** | 切换账号后旧 Token 容易被覆盖导致失效过期 | **自动双向回存 (Sync-before-switch)**：切号前自动回写最新 Token，保持凭证新鲜 |
-| **每日签到积分** | 需每天打开图形界面、手动点开活动、逐个切号点击 | **极速静默打卡 (`wb-checkin`)**：0.5 秒遍历所有账号统一领积分，双引擎后台自动运行 |
+| **每日签到积分** | 需每天打开图形界面、手动点开活动、逐个切号点击 | **极速静默打卡 (`wb-checkin`)**：0.5 秒遍历所有账号统一领积分，三端原生系统调度自动运行 |
 
 ---
 
@@ -52,7 +56,7 @@
   - [2. SQLite 触发器穿透与全域共享机制](#2-sqlite-触发器穿透与全域共享机制)
   - [3. 免扫码凭证轮换与双向 Token 同步](#3-免扫码凭证轮换与双向-token-同步)
   - [4. 每日签到协议逆向与幂等领取架构](#4-每日签到协议逆向与幂等领取架构)
-  - [5. 双引擎后台定时调度与自适应探测](#5-双引擎后台定时调度与自适应探测)
+  - [5. 三端原生后台定时调度与自适应探测](#5-三端原生后台定时调度与自适应探测)
 - [三、快速上手与安装](#三快速上手与安装)
 - [四、命令行工具使用手册](#四命令行工具使用手册)
 - [五、安全与隐私承诺 (Zero-Leakage)](#五安全与隐私承诺-zero-leakage)
@@ -63,12 +67,15 @@
 
 ## 一、支持平台与系统要求
 
-- **当前支持平台**：**macOS** (全面支持 Apple Silicon M 系列芯片与 Intel 芯片)。  
-  *(注：Windows 与 Linux 版适配正在规划推进中，当前版本暂专注于 macOS 原生体验)*
-- **依赖环境**：
-  - macOS 12.0+
-  - Python 3.8+（系统自带或 Homebrew 安装均可，零第三方 pip 依赖）
-  - 已安装并登录过至少一个账号的 `WorkBuddy.app`
+| 操作系统 | 支持级别 | 守护进程调度器 | 凭证存储路径 |
+| :--- | :--- | :--- | :--- |
+| **macOS** | 原生完整支持 (Apple Silicon / Intel) | `launchd` (`~/Library/LaunchAgents`) | `~/Library/Application Support/CodeBuddyExtension/...` |
+| **Linux** | 原生完整支持 (主流桌面与服务器发行版) | `systemd --user` (降级至 `crontab`) | `~/.config/CodeBuddyExtension/...` (遵循 XDG 规范) |
+| **Windows** | 原生完整支持 (Windows 10 / 11) | Windows 任务计划程序 (`schtasks` / `pythonw`) | `%APPDATA%\CodeBuddyExtension\...` |
+
+- **依赖要求**：
+  - Python 3.8+（系统自带、Python 官网或包管理器安装均可，**零第三方 pip 依赖**，纯 Python 标准库编写）
+  - 已安装并登录过至少一个账号的 WorkBuddy 客户端（macOS `WorkBuddy.app` / Windows `WorkBuddy.exe` / Linux `workbuddy`）
 
 ---
 
@@ -187,9 +194,9 @@ User-Agent: WorkBuddy/5.5.3
 
 ---
 
-### 5. 双引擎后台定时调度与自适应探测
+### 5. 三端原生后台定时调度与自适应探测
 
-为了让每日签到做到真正的“零打扰、免记挂”，项目实现了分层的调度架构，并支持 Agent 运行时的**自适应能力探测 (Capability Probing)**：
+为了让每日签到做到真正的“零打扰、免记挂”，项目原生实现了三大主流操作系统的后台定时守护体系，并支持 AI Agent 运行时的**自适应能力探测 (Capability Probing)**：
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -200,14 +207,16 @@ User-Agent: WorkBuddy/5.5.3
          │                                       │
          ▼                                       ▼
  自动注册 Agent 内置定时任务              用户自由二选一方案：
- (每日 09:00 自动唤醒对话并汇报战报)        ① 采用系统级 launchd 守护进程静默打卡
+ (每日 09:00 自动唤醒对话并汇报战报)        ① 采用系统原生后台守护进程静默打卡
                                          ② 无需定时打卡，随时手动输入 wb-checkin
 ```
 
-1. **Agent 内置调度层（如有）**：
+1. **AI Agent 内置调度层（推荐）**：
    对于具备内置 `schedule` 工具的 Agent（如 Antigravity、WorkBuddy 等），可在会话中注册常驻 cron（`0 9 * * *`），每天早晨自动唤醒、拉起签到，并在对话窗口中向用户发送美观的收益战报。
-2. **macOS `launchd` 系统守护层**：
-   位于 `~/Library/LaunchAgents/com.workbuddy.dailycheckin.plist`，系统原生底层支持，机器锁屏或合盖休眠唤醒后会自动补跑，日志持久化于 `~/.workbuddy/logs/checkin.log`，无需任何 Agent 保持在线。
+2. **操作系统原生守护层 (Zero-Touch 后台静默)**：
+   - **macOS (`launchd`)**：`~/Library/LaunchAgents/com.workbuddy.dailycheckin.plist`，开机自启、盒盖休眠唤醒补跑。
+   - **Linux (`systemd --user`)**：`~/.config/systemd/user/workbuddy-dailycheckin.timer`，开机自启且支持 `Persistent=true` 唤醒补跑；无 systemd 环境自动降级至用户 `crontab`。
+   - **Windows (任务计划程序 `schtasks`)**：注册 `WorkBuddyDailyCheckin` 计划任务，调用 Windows 内置 `pythonw.exe` 静默后台运行，**绝无黑色 CMD 弹窗干扰**。
 3. **手动模式**：
    若用户不希望后台常驻任何定时任务，只需执行 `wb-checkin` 即可在 0.5 秒内完成手工打卡。
 
@@ -215,23 +224,44 @@ User-Agent: WorkBuddy/5.5.3
 
 ## 三、快速上手与安装
 
-### 一键安装 (macOS)
-克隆本项目并执行自动化安装脚本：
+### 推荐方式：跨平台通用 Python 一键安装 (macOS / Linux / Windows 通用)
 
+无论您使用的是 macOS、Linux 还是 Windows，只要安装了 Python 3.8+，在克隆仓库后直接运行通用安装器即可：
+
+```bash
+git clone https://github.com/FlapPearLabs/workbuddy-toolkit.git ~/.workbuddy/toolkit
+cd ~/.workbuddy/toolkit
+python3 install.py      # Windows 下请运行: python install.py
+```
+
+安装器将全自动完成：
+1. **自动识别操作系统**并部署 CLI 脚本（macOS/Linux 安装到 `~/.local/bin`；Windows 安装到 `~/.workbuddy/bin` 并生成 `.cmd` 垫片且自动写入用户 `PATH` 环境变量）；
+2. **初始化数据库**：对本地 `workbuddy.db` 注入全域工作区互通触发器；
+3. **激活原生系统定时任务**：macOS (`launchd`) / Linux (`systemd timer` 或 `crontab`) / Windows (`schtasks` 计划任务)；
+4. **挂载 IDE 伴随体**：若检测到 Antigravity，自动挂载 Scheduled Tasks Sidecar。
+
+---
+
+### 备选方式：系统原生脚本安装
+
+#### 选项 A：macOS / Linux (Shell)
 ```bash
 git clone https://github.com/FlapPearLabs/workbuddy-toolkit.git ~/.workbuddy/toolkit
 cd ~/.workbuddy/toolkit
 ./install.sh
 ```
 
-`install.sh` 脚本将全自动完成：
-1. 部署 CLI 脚本到 `~/.local/bin/workbuddy` 并软链接 `wb-switch` 与 `wb-checkin`；
-2. 自动对本地数据库注入工作区共享触发器；
-3. 注册并激活 macOS `LaunchAgent` 每日 09:00 自动签到任务；
-4. 挂载 Antigravity Scheduled Tasks Sidecar 配置。
+#### 选项 B：Windows (PowerShell)
+在 PowerShell 中运行（无需管理员权限）：
+```powershell
+git clone https://github.com/FlapPearLabs/workbuddy-toolkit.git $HOME\.workbuddy\toolkit
+cd $HOME\.workbuddy\toolkit
+.\install.ps1
+```
 
-> **提示**：若终端提示找不到 `wb-switch`，请确保 `~/.local/bin` 位于环境变量 `PATH` 中。在 `~/.zshrc` 末尾添加：  
-> `export PATH="$HOME/.local/bin:$PATH"` 并执行 `source ~/.zshrc`。
+> **提示**：安装完成后若提示找不到 `wb-switch`：
+> - **macOS / Linux**：请确保 `~/.local/bin` 在 `PATH` 中（如在 `~/.zshrc` 中添加 `export PATH="$HOME/.local/bin:$PATH"`）；
+> - **Windows**：重新打开一个 PowerShell 或 CMD 窗口即可自动加载最新用户 `PATH`。
 
 ---
 
@@ -324,26 +354,21 @@ workbuddy save <取一个名字>
 
 如果你不再需要此工具，或希望完全还原到官方初始状态：
 
-### 方式 A：运行一键卸载脚本
+### 推荐方式：跨平台通用 Python 一键卸载
 ```bash
-./uninstall.sh
+python3 uninstall.py    # Windows 下运行: python uninstall.py
 ```
+卸载程序会自动注销各系统定时器（macOS launchd / Linux systemd 或 crontab / Windows 任务计划）、清理 CLI 软链接及垫片，并询问是否回滚 SQLite 触发器。
 
-### 方式 B：手动回滚步骤
-1. **注销定时服务**：
-   ```bash
-   launchctl unload ~/Library/LaunchAgents/com.workbuddy.dailycheckin.plist
-   rm -f ~/Library/LaunchAgents/com.workbuddy.dailycheckin.plist
-   rm -rf ~/.gemini/config/sidecars/workbuddy-checkin
-   ```
-2. **恢复数据库隔离状态**：
-   ```sql
-   sqlite3 ~/.workbuddy/workbuddy.db "DROP TRIGGER IF EXISTS trg_sessions_force_shared_insert; DROP TRIGGER IF EXISTS trg_sessions_force_shared_update;"
-   ```
-3. **清理 CLI 脚本**：
-   ```bash
-   rm -f ~/.local/bin/workbuddy ~/.local/bin/wb-switch ~/.local/bin/wb-checkin
-   ```
+### 原生脚本卸载方式
+- **macOS / Linux**：
+  ```bash
+  ./uninstall.sh
+  ```
+- **Windows (PowerShell)**：
+  ```powershell
+  .\uninstall.ps1
+  ```
 
 ---
 

@@ -47,14 +47,35 @@ else
     echo "2. [跳过] 未检测到 $DB_FILE，首次启动 WorkBuddy 后可运行 'workbuddy init' 打补丁。"
 fi
 
-# 5. 配置 macOS 系统级每日 09:00 定时自动签到
-if [ -d "$LAUNCH_AGENTS_DIR" ]; then
+# 5. 配置系统级每日 09:00 定时自动签到
+OS="$(uname -s)"
+if [ "$OS" = "Darwin" ] && [ -d "$LAUNCH_AGENTS_DIR" ]; then
     echo "3. 正在配置 macOS 系统定时任务 (LaunchAgent)..."
     PLIST_TARGET="$LAUNCH_AGENTS_DIR/com.workbuddy.dailycheckin.plist"
     sed "s|{{HOME}}|$HOME|g" "$SCRIPT_DIR/launchd/com.workbuddy.dailycheckin.plist" > "$PLIST_TARGET"
     launchctl unload "$PLIST_TARGET" 2>/dev/null || true
     launchctl load "$PLIST_TARGET"
     echo "   ✔ LaunchAgent 已激活: 每天早晨 09:00 自动执行后台签到"
+elif [ "$OS" = "Linux" ]; then
+    echo "3. 正在配置 Linux 系统定时任务..."
+    SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+    CONFIGURED=0
+    if command -v systemctl >/dev/null 2>&1; then
+        mkdir -p "$SYSTEMD_USER_DIR"
+        cp "$SCRIPT_DIR/systemd/workbuddy-dailycheckin.service" "$SYSTEMD_USER_DIR/"
+        cp "$SCRIPT_DIR/systemd/workbuddy-dailycheckin.timer" "$SYSTEMD_USER_DIR/"
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user enable --now workbuddy-dailycheckin.timer 2>/dev/null || true
+        if systemctl --user is-active --quiet workbuddy-dailycheckin.timer 2>/dev/null; then
+            echo "   ✔ systemd user timer 已激活: 每天早晨 09:00 自动执行后台签到"
+            CONFIGURED=1
+        fi
+    fi
+    if [ "$CONFIGURED" -eq 0 ] && command -v crontab >/dev/null 2>&1; then
+        CRON_CMD="0 9 * * * $INSTALL_BIN/workbuddy checkin >> $HOME/.workbuddy/logs/checkin.log 2>&1"
+        (crontab -l 2>/dev/null | grep -Fv "workbuddy checkin" ; echo "$CRON_CMD") | crontab -
+        echo "   ✔ crontab 已配置: 每天早晨 09:00 自动执行后台签到"
+    fi
 fi
 
 # 6. 配置 Antigravity Scheduled Tasks Sidecar (可选)

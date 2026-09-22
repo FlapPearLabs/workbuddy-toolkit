@@ -21,17 +21,46 @@ import subprocess
 import urllib.request
 import urllib.error
 import re
+import shutil
 from datetime import datetime
+
+# Windows 10/11 虚拟终端 ANSI 颜色初始化
+if sys.platform == "win32":
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # ENABLE_PROCESSED_OUTPUT (1) | ENABLE_WRAP_AT_EOL_OUTPUT (2) | ENABLE_VIRTUAL_TERMINAL_PROCESSING (4) = 7
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+    except Exception:
+        pass
 
 def get_auth_file():
     if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info")
+        candidates = [
+            os.path.expanduser("~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info"),
+            os.path.expanduser("~/.workbuddy/auth/workbuddy-desktop.info"),
+        ]
     elif sys.platform == "win32":
         appdata = os.environ.get("APPDATA", os.path.expanduser("~\\AppData\\Roaming"))
-        return os.path.join(appdata, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
+        localappdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+        userprofile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+        candidates = [
+            os.path.join(appdata, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info"),
+            os.path.join(localappdata, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info"),
+            os.path.join(userprofile, ".workbuddy", "auth", "workbuddy-desktop.info"),
+        ]
     else:  # Linux & others
         config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-        return os.path.join(config_home, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
+        data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+        candidates = [
+            os.path.join(config_home, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info"),
+            os.path.join(data_home, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info"),
+            os.path.expanduser("~/.workbuddy/auth/workbuddy-desktop.info"),
+        ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
 
 def get_db_file():
     return os.path.expanduser("~/.workbuddy/workbuddy.db")
@@ -43,12 +72,13 @@ AUTH_FILE = get_auth_file()
 PROFILES_DIR = get_profiles_dir()
 DB_FILE = get_db_file()
 
-COLOR_GREEN = "\033[92m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
-COLOR_YELLOW = "\033[93m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
-COLOR_CYAN = "\033[96m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
-COLOR_RED = "\033[91m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
-COLOR_BOLD = "\033[1m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
-COLOR_RESET = "\033[0m" if sys.platform != "win32" or "WT_SESSION" in os.environ else ""
+HAS_COLOR = sys.platform != "win32" or "WT_SESSION" in os.environ or os.environ.get("TERM_PROGRAM") or sys.stdout.isatty()
+COLOR_GREEN = "\033[92m" if HAS_COLOR else ""
+COLOR_YELLOW = "\033[93m" if HAS_COLOR else ""
+COLOR_CYAN = "\033[96m" if HAS_COLOR else ""
+COLOR_RED = "\033[91m" if HAS_COLOR else ""
+COLOR_BOLD = "\033[1m" if HAS_COLOR else ""
+COLOR_RESET = "\033[0m" if HAS_COLOR else ""
 
 def get_active_account():
     if not os.path.exists(AUTH_FILE):
@@ -222,32 +252,41 @@ def restart_workbuddy():
         time.sleep(1.5)
         possible_paths = [
             os.path.expandvars(r"%LOCALAPPDATA%\Programs\workbuddy\WorkBuddy.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\WorkBuddy\WorkBuddy.exe"),
             os.path.expandvars(r"%PROGRAMFILES%\WorkBuddy\WorkBuddy.exe"),
-            os.path.expandvars(r"%PROGRAMFILES(X86)%\WorkBuddy\WorkBuddy.exe")
+            os.path.expandvars(r"%PROGRAMFILES(X86)%\WorkBuddy\WorkBuddy.exe"),
+            shutil.which("WorkBuddy.exe"),
+            shutil.which("workbuddy.exe"),
         ]
         started = False
         for p in possible_paths:
-            if os.path.exists(p):
-                subprocess.Popen([p], shell=True)
+            if p and os.path.exists(p) and os.path.isfile(p):
+                if hasattr(os, "startfile"):
+                    os.startfile(p)
+                else:
+                    subprocess.Popen([p], shell=True)
                 started = True
                 break
         if not started:
             subprocess.Popen(["start", "workbuddy"], shell=True)
     else:  # Linux
         try:
-            subprocess.run(["killall", "-9", "workbuddy"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "-i", "workbuddy"], stderr=subprocess.DEVNULL)
         except Exception:
             pass
         time.sleep(1.5)
         possible_paths = [
-            "/opt/apps/workbuddy/workbuddy",
-            "/opt/WorkBuddy/workbuddy",
+            shutil.which("workbuddy"),
             "/usr/bin/workbuddy",
-            "/usr/local/bin/workbuddy"
+            "/usr/local/bin/workbuddy",
+            "/opt/apps/workbuddy/workbuddy",
+            "/opt/workbuddy/workbuddy",
+            "/opt/WorkBuddy/workbuddy",
+            os.path.expanduser("~/.local/bin/workbuddy"),
         ]
         started = False
         for p in possible_paths:
-            if os.path.exists(p):
+            if p and os.path.exists(p) and os.path.isfile(p):
                 subprocess.Popen([p], start_new_session=True)
                 started = True
                 break
@@ -285,7 +324,18 @@ def switch_to_profile(target_name, auto_restart=True):
         json.dump(target["data"], f, indent=2, ensure_ascii=False)
     if sys.platform != "win32":
         os.chmod(tmp_file, 0o600)
-    os.replace(tmp_file, AUTH_FILE)
+    
+    try:
+        os.replace(tmp_file, AUTH_FILE)
+    except PermissionError:
+        # Windows: 若运行中的客户端锁定了凭证文件，先关闭进程再替换
+        if sys.platform == "win32":
+            print(f"{COLOR_YELLOW}检测到凭证文件被客户端锁定，正在提前关闭 WorkBuddy 进程以释放文件锁...{COLOR_RESET}")
+            subprocess.run(["taskkill", "/f", "/im", "WorkBuddy.exe"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            time.sleep(1.2)
+            os.replace(tmp_file, AUTH_FILE)
+        else:
+            raise
 
     marker_file = os.path.join(os.path.dirname(AUTH_FILE), "workbuddy-desktop.logout-marker")
     if os.path.exists(marker_file):

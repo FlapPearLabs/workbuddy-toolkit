@@ -1,0 +1,9 @@
+[Unit]
+Description=WorkBuddy Daily Checkin Timer (Daily at 09:00 AM)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

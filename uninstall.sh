@@ -11,11 +11,27 @@ SIDECAR_DIR="$HOME/.gemini/config/sidecars/workbuddy-checkin"
 
 echo "正在卸载 WorkBuddy Toolkit..."
 
-# 1. 卸载 LaunchAgent
+# 1. 卸载定时任务 (macOS launchd & Linux systemd/cron)
 if [ -f "$PLIST_TARGET" ]; then
     launchctl unload "$PLIST_TARGET" 2>/dev/null || true
     rm -f "$PLIST_TARGET"
-    echo "✔ 已注销并删除 LaunchAgent 定时任务"
+    echo "✔ 已注销并删除 macOS LaunchAgent 定时任务"
+fi
+
+SYSTEMD_TIMER="$HOME/.config/systemd/user/workbuddy-dailycheckin.timer"
+SYSTEMD_SERVICE="$HOME/.config/systemd/user/workbuddy-dailycheckin.service"
+if [ -f "$SYSTEMD_TIMER" ]; then
+    systemctl --user disable --now workbuddy-dailycheckin.timer 2>/dev/null || true
+    rm -f "$SYSTEMD_TIMER" "$SYSTEMD_SERVICE"
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo "✔ 已注销并删除 Linux systemd user timer"
+fi
+
+if command -v crontab >/dev/null 2>&1; then
+    crontab -l 2>/dev/null | grep -F "workbuddy checkin" >/dev/null && {
+        crontab -l 2>/dev/null | grep -Fv "workbuddy checkin" | crontab -
+        echo "✔ 已从 crontab 移除定时任务"
+    } || true
 fi
 
 # 2. 移除 Sidecar
