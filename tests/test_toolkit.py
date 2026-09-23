@@ -238,5 +238,24 @@ class TestWorkBuddyCore(unittest.TestCase):
             self.assertEqual(res.get("model"), workbuddy.PREFERRED_CHAT_MODELS[1])
             self.assertEqual(mock_urlopen.call_count, 2)
 
+    def test_08_parse_and_run_chat_flags(self):
+        """测试 parse_and_run_chat 准确解析 -p, -m, --all 以及位置参数"""
+        with patch.object(workbuddy, "run_chat") as mock_run_chat:
+            # 1. 验证 -p flag
+            workbuddy.parse_and_run_chat(["-p", "测试提示词"])
+            mock_run_chat.assert_called_with(target_name=None, prompt="测试提示词", model=None, send_all=False)
+
+            # 2. 验证 -m 与 -p 组合
+            workbuddy.parse_and_run_chat(["-m", "hy3", "-p", "你好世界"])
+            mock_run_chat.assert_called_with(target_name=None, prompt="你好世界", model="hy3", send_all=False)
+
+            # 3. 验证 --all
+            workbuddy.parse_and_run_chat(["--all", "-p", "全员打卡"])
+            mock_run_chat.assert_called_with(target_name=None, prompt="全员打卡", model=None, send_all=True)
+
+            # 4. 验证直接纯文本传参
+            workbuddy.parse_and_run_chat(["直接说你好"])
+            mock_run_chat.assert_called_with(target_name=None, prompt="直接说你好", model=None, send_all=False)
+
 if __name__ == "__main__":
     unittest.main()

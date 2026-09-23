@@ -487,6 +487,54 @@ def run_chat(target_name=None, prompt="请回复：你好", model=None, send_all
 
     print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}\n")
 
+def parse_and_run_chat(args):
+    """
+    智能解析 chat 命令参数：
+    支持 -p / --prompt, -m / --model, --all 以及位置参数 [target_name] [prompt]
+    """
+    send_all = False
+    model = None
+    prompt = None
+    target_name = None
+
+    i = 0
+    rem_args = []
+    while i < len(args):
+        a = args[i]
+        if a == "--all":
+            send_all = True
+            i += 1
+        elif a in ["-p", "--prompt"]:
+            if i + 1 < len(args):
+                prompt = args[i + 1]
+                i += 2
+            else:
+                i += 1
+        elif a in ["-m", "--model"]:
+            if i + 1 < len(args):
+                model = args[i + 1]
+                i += 2
+            else:
+                i += 1
+        else:
+            rem_args.append(a)
+            i += 1
+
+    profiles = get_profiles()
+    if rem_args:
+        first = rem_args[0]
+        if first in profiles or any(p["nickname"].lower() == first.lower() for p in profiles.values()):
+            target_name = first
+            rem_args = rem_args[1:]
+
+        if rem_args and prompt is None:
+            prompt = " ".join(rem_args)
+
+    if not prompt:
+        prompt = "请回复：你好"
+
+    run_chat(target_name=target_name, prompt=prompt, model=model, send_all=send_all)
+
 def run_checkin(target_name=None, with_chat=True):
     sync_active_token_to_profiles()
     active_data = get_active_account()
@@ -721,15 +769,7 @@ def main():
 
     # 如果通过快捷别名调用
     if "chat" in prog_name:
-        if args and args[0] == "--all":
-            prompt = " ".join(args[1:]) if len(args) > 1 else "请回复：你好"
-            run_chat(prompt=prompt, send_all=True)
-        elif len(args) >= 2:
-            run_chat(target_name=args[0], prompt=" ".join(args[1:]))
-        elif len(args) == 1:
-            run_chat(prompt=args[0])
-        else:
-            run_chat()
+        parse_and_run_chat(args)
         return
     if "checkin" in prog_name:
         with_chat = ("--no-chat" not in args)
@@ -760,17 +800,7 @@ def main():
         target = clean_args[0] if clean_args else None
         run_checkin(target, with_chat=with_chat)
     elif cmd in ["chat", "ask", "tell"]:
-        sub_args = args[1:]
-        if "--all" in sub_args:
-            sub_args = [a for a in sub_args if a != "--all"]
-            prompt = " ".join(sub_args) if sub_args else "请回复：你好"
-            run_chat(prompt=prompt, send_all=True)
-        elif len(sub_args) >= 2:
-            run_chat(target_name=sub_args[0], prompt=" ".join(sub_args[1:]))
-        elif len(sub_args) == 1:
-            run_chat(prompt=sub_args[0])
-        else:
-            run_chat()
+        parse_and_run_chat(args[1:])
     elif cmd in ["status", "info", "whoami"]:
         show_status()
     elif cmd in ["list", "ls"]:
