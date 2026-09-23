@@ -51,11 +51,13 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-switch.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-checkin.cmd")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-chat.cmd")))
         else:
             bin_dir = os.path.join(self.temp_home, ".local", "bin")
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-switch")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-checkin")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-chat")))
 
         # 3. 运行卸载器（输入 n 回答不回滚数据库）
         unres = subprocess.run([sys.executable, uninstaller], input="n\n", cwd=REPO_DIR, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

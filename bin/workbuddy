@@ -9,6 +9,8 @@ Features:
 - Cross-Platform Support: Full support for macOS, Linux, and Windows.
 - Shared Workspace & Session Sync: Universal workspace trees and chat histories across all accounts.
 - Automated Daily Check-in: Headless status probe and credit claims via Tencent backend endpoints.
+- Automated Daily Dialogue: Auto-fires minimal prompt to maintain continuous dialogue rewards with lowest multiplier / free models.
+- Direct CLI Chat: Talk directly with WorkBuddy models in terminal without Electron UI overhead.
 - Auto Profile Discovery: Automatically detects and registers newly logged-in accounts.
 """
 
@@ -23,6 +25,9 @@ import urllib.error
 import re
 import shutil
 from datetime import datetime
+
+VERSION = "0.3.0"
+PREFERRED_CHAT_MODELS = ["hy3", "deepseek-v4-flash", "auto", "glm-5v-turbo"]
 
 # Windows 控制台编码安全处理与 ANSI 颜色初始化
 if sys.platform == "win32":
@@ -367,7 +372,122 @@ def switch_to_profile(target_name, auto_restart=True):
         print(f"{COLOR_YELLOW}提示: 请在 WorkBuddy 窗口中刷新或重启客户端以加载新账号。{COLOR_RESET}")
     return True
 
-def run_checkin(target_name=None):
+def send_chat_message(token, uid, prompt="请回复：你好", model=None, timeout=15):
+    """
+    通过底层原生 HTTP SSE 接口向指定账号发送对话，触发每日连续对话奖励。
+    优先免费/最低倍率模型，遇异常自动向下 fallback。
+    """
+    models_to_try = [model] if model else PREFERRED_CHAT_MODELS
+    last_err = None
+
+    for m in models_to_try:
+        payload = json.dumps({
+            "model": m,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://copilot.tencent.com/v2/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                "Authorization": f"Bearer {token}",
+                "X-User-Id": uid,
+                "User-Agent": "WorkBuddy/5.5.3"
+            }
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                full_text = []
+                for line in resp:
+                    line_str = line.decode("utf-8", errors="ignore").strip()
+                    if line_str.startswith("data: "):
+                        data_part = line_str[6:]
+                        if data_part == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_part)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                full_text.append(content)
+                        except Exception:
+                            pass
+                reply = "".join(full_text).strip()
+                if reply:
+                    return {"success": True, "model": m, "reply": reply}
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")
+            last_err = f"HTTP {e.code}: {err_body[:80]}"
+        except Exception as e:
+            last_err = str(e)
+
+    return {"success": False, "error": last_err or "所有候选模型均无有效响应"}
+
+def run_chat(target_name=None, prompt="请回复：你好", model=None, send_all=False):
+    """
+    在 CLI 执行与 WorkBuddy 模型的直接对话。
+    支持单账号或全账号批量触发每日连续对话。
+    """
+    sync_active_token_to_profiles()
+    profiles = get_profiles()
+
+    targets = {}
+    if send_all:
+        targets = profiles
+    elif target_name and target_name in profiles:
+        targets[target_name] = profiles[target_name]
+    elif target_name and any(p["nickname"].lower() == target_name.lower() for p in profiles.values()):
+        for name, p in profiles.items():
+            if p["nickname"].lower() == target_name.lower():
+                targets[name] = p
+                break
+    else:
+        if target_name:
+            prompt = target_name
+        active_data = get_active_account()
+        if active_data:
+            uid = active_data.get("account", {}).get("uid", "")
+            nick = active_data.get("account", {}).get("nickname", "active")
+            targets["active"] = {
+                "data": active_data,
+                "uid": uid,
+                "nickname": nick
+            }
+        elif profiles:
+            first_key = list(profiles.keys())[0]
+            targets[first_key] = profiles[first_key]
+
+    if not targets:
+        print(f"{COLOR_RED}错误: 未检测到任何已登录或已保存的账号凭证。{COLOR_RESET}")
+        return
+
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy CLI 对话 ({len(targets)} 个账号) ==={COLOR_RESET}")
+    print(f"提示词: {COLOR_BOLD}{prompt}{COLOR_RESET}")
+
+    for name, p in targets.items():
+        data = p["data"]
+        token = data.get("auth", {}).get("accessToken")
+        uid = p["uid"]
+        nickname = p["nickname"]
+
+        if not token or not uid:
+            print(f" {COLOR_YELLOW}• {name:<12}{COLOR_RESET} [昵称: {nickname}] 缺少有效 Token，跳过")
+            continue
+
+        res = send_chat_message(token, uid, prompt=prompt, model=model)
+        if res.get("success"):
+            rep = res["reply"]
+            print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] 模型: {res['model']} -> {COLOR_BOLD}{rep}{COLOR_RESET}")
+        else:
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 对话失败: {res.get('error')}")
+
+    print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}\n")
+
+def run_checkin(target_name=None, with_chat=True):
     sync_active_token_to_profiles()
     active_data = get_active_account()
     profiles = get_profiles()
@@ -410,7 +530,7 @@ def run_checkin(target_name=None):
     else:
         targets = profiles
 
-    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 自动每日签到 ({len(targets)} 个账号) ==={COLOR_RESET}")
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 自动每日签到与连续对话 ({len(targets)} 个账号) ==={COLOR_RESET}")
 
     for name, p in targets.items():
         data = p["data"]
@@ -455,38 +575,48 @@ def run_checkin(target_name=None):
 
         if today_checked_in:
             print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}今日已签到{COLOR_RESET} | 连续 {streak_days} 天 | 累计签到奖励 {total_credits} 积分")
-            continue
+        else:
+            # 2. 执行签到领取
+            claim_req = urllib.request.Request(
+                "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
+                data=b"{}",
+                headers=base_headers
+            )
 
-        # 2. 执行签到领取
-        claim_req = urllib.request.Request(
-            "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
-            data=b"{}",
-            headers=base_headers
-        )
-
-        try:
-            with urllib.request.urlopen(claim_req, timeout=10) as resp:
-                claim_res = json.loads(resp.read().decode("utf-8"))
-                if claim_res.get("code") == 0:
-                    cd = claim_res.get("data", {})
-                    credit = cd.get("credit", 100)
-                    new_streak = cd.get("streak_days", streak_days + 1)
-                    print(f" {COLOR_GREEN}🎉 {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_BOLD}{COLOR_GREEN}签到成功！+{credit} 积分{COLOR_RESET} | 连续签到 {new_streak} 天")
-                else:
-                    print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {claim_res.get('msg')}")
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="ignore")
             try:
-                err_json = json.loads(err_body)
-                msg = err_json.get("msg", err_body)
-            except Exception:
-                msg = err_body
-            if "已签到" in msg:
-                print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
+                with urllib.request.urlopen(claim_req, timeout=10) as resp:
+                    claim_res = json.loads(resp.read().decode("utf-8"))
+                    if claim_res.get("code") == 0:
+                        cd = claim_res.get("data", {})
+                        credit = cd.get("credit", 100)
+                        new_streak = cd.get("streak_days", streak_days + 1)
+                        print(f" {COLOR_GREEN}🎉 {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_BOLD}{COLOR_GREEN}签到成功！+{credit} 积分{COLOR_RESET} | 连续签到 {new_streak} 天")
+                    else:
+                        print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {claim_res.get('msg')}")
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode("utf-8", errors="ignore")
+                try:
+                    err_json = json.loads(err_body)
+                    msg = err_json.get("msg", err_body)
+                except Exception:
+                    msg = err_body
+                if "已签到" in msg:
+                    print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
+                else:
+                    print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到失败 ({e.code}): {msg}")
+            except Exception as e:
+                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}")
+
+        # 3. 自动触发每日连续对话任务 (获取每日连续对话奖励)
+        if with_chat:
+            chat_res = send_chat_message(token, uid, prompt="请回复：你好")
+            if chat_res.get("success"):
+                rep = chat_res["reply"].replace("\n", " ").strip()
+                if len(rep) > 30:
+                    rep = rep[:27] + "..."
+                print(f"    💬 {COLOR_CYAN}[每日对话]{COLOR_RESET} 模型: {chat_res['model']} (低倍率/免费) -> 回复: \"{rep}\" ✔")
             else:
-                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到失败 ({e.code}): {msg}")
-        except Exception as e:
-            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}")
+                print(f"    💬 {COLOR_YELLOW}[每日对话]{COLOR_RESET} 触发未成功: {chat_res.get('error')}")
 
     print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}\n")
 
@@ -558,14 +688,17 @@ def save_current(name):
 
 def print_help():
     print(f"""
-{COLOR_BOLD}WorkBuddy 账号切换与自动化管理工具 (workbuddy CLI){COLOR_RESET}
+{COLOR_BOLD}WorkBuddy 账号切换与自动化管理工具 (workbuddy CLI v{VERSION}){COLOR_RESET}
 
 核心优势:
   ★ 每个账号仅需首次扫码登录一次并 save，后续随时任意切换，永久无需微信反复扫码！
+  ★ 每日打卡与每日连续对话任务联动：一次打卡自动获得积分与连续对话活跃奖励！
 
 用法:
   workbuddy switch [账号名]       切换到指定账号（省略参数则进入交互式菜单）
-  workbuddy checkin [账号名]      自动执行每日签到领积分（默认遍历所有已存账号）
+  workbuddy checkin [账号名]      自动执行每日签到与每日连续对话（默认遍历所有已存账号）
+  workbuddy chat [提示词]         向当前活跃账号发送对话（智能优先免费/最低倍率模型）
+  workbuddy chat --all [提示词]   对所有已保存账号批量发送对话，维持连续对话奖励
   workbuddy status              查看当前登录账号状态及 Token 有效期
   workbuddy list                列出本地已保存的所有账号凭证
   workbuddy save <账号别名>       将当前活跃的登录态保存为一个新账号 Profile (后续永久免扫码)
@@ -576,7 +709,10 @@ def print_help():
 快捷别名:
   wb-switch [账号名]
   wb-checkin [账号名]
+  wb-chat [提示词]
   workbuddy-switch [账号名]
+  workbuddy-checkin [账号名]
+  workbuddy-chat [提示词]
 """)
 
 def main():
@@ -584,9 +720,22 @@ def main():
     args = sys.argv[1:]
 
     # 如果通过快捷别名调用
+    if "chat" in prog_name:
+        if args and args[0] == "--all":
+            prompt = " ".join(args[1:]) if len(args) > 1 else "请回复：你好"
+            run_chat(prompt=prompt, send_all=True)
+        elif len(args) >= 2:
+            run_chat(target_name=args[0], prompt=" ".join(args[1:]))
+        elif len(args) == 1:
+            run_chat(prompt=args[0])
+        else:
+            run_chat()
+        return
     if "checkin" in prog_name:
-        target = args[0] if args else None
-        run_checkin(target)
+        with_chat = ("--no-chat" not in args)
+        clean_args = [a for a in args if a != "--no-chat"]
+        target = clean_args[0] if clean_args else None
+        run_checkin(target, with_chat=with_chat)
         return
     if "switch" in prog_name:
         if args:
@@ -606,8 +755,22 @@ def main():
         else:
             interactive_menu()
     elif cmd in ["checkin", "check-in", "sign", "signin"]:
-        target = args[1] if len(args) > 1 else None
-        run_checkin(target)
+        with_chat = ("--no-chat" not in args)
+        clean_args = [a for a in args[1:] if a != "--no-chat"]
+        target = clean_args[0] if clean_args else None
+        run_checkin(target, with_chat=with_chat)
+    elif cmd in ["chat", "ask", "tell"]:
+        sub_args = args[1:]
+        if "--all" in sub_args:
+            sub_args = [a for a in sub_args if a != "--all"]
+            prompt = " ".join(sub_args) if sub_args else "请回复：你好"
+            run_chat(prompt=prompt, send_all=True)
+        elif len(sub_args) >= 2:
+            run_chat(target_name=sub_args[0], prompt=" ".join(sub_args[1:]))
+        elif len(sub_args) == 1:
+            run_chat(prompt=sub_args[0])
+        else:
+            run_chat()
     elif cmd in ["status", "info", "whoami"]:
         show_status()
     elif cmd in ["list", "ls"]:
@@ -624,6 +787,8 @@ def main():
         rollback_shared_workspace(restore_uid)
     elif cmd in ["restart"]:
         restart_workbuddy()
+    elif cmd in ["-v", "--version", "version"]:
+        print(f"workbuddy toolkit v{VERSION}")
     elif cmd in ["-h", "--help", "help"]:
         print_help()
     else:

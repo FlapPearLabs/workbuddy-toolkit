@@ -46,6 +46,8 @@ rm -f "$INSTALL_BIN/wb-switch"
 rm -f "$INSTALL_BIN/workbuddy-switch"
 rm -f "$INSTALL_BIN/wb-checkin"
 rm -f "$INSTALL_BIN/workbuddy-checkin"
+rm -f "$INSTALL_BIN/wb-chat"
+rm -f "$INSTALL_BIN/workbuddy-chat"
 echo "✔ 已清理安装的 CLI 脚本"
 
 if [ -t 0 ]; then

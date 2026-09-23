@@ -182,13 +182,61 @@ class TestWorkBuddyCore(unittest.TestCase):
         }).encode("utf-8")
         claim_resp.__enter__.return_value = claim_resp
 
-        with patch("urllib.request.urlopen", side_effect=[status_resp, claim_resp]) as mock_urlopen:
+        chat_resp = MagicMock()
+        chat_resp.__iter__.return_value = [
+            b'data: {"choices": [{"delta": {"content": "\xe4\xbd\xa0\xe5\xa5\xbd"}}]}\n\n',
+            b'data: [DONE]\n\n'
+        ]
+        chat_resp.__enter__.return_value = chat_resp
+
+        with patch("urllib.request.urlopen", side_effect=[status_resp, claim_resp, chat_resp]) as mock_urlopen:
             workbuddy.run_checkin("testuser")
-            self.assertEqual(mock_urlopen.call_count, 2)
+            self.assertEqual(mock_urlopen.call_count, 3)
             # 验证请求头包含 Bearer token 和 X-User-Id
             req1 = mock_urlopen.call_args_list[0][0][0]
             self.assertEqual(req1.headers.get("Authorization"), "Bearer mock_token_999")
             self.assertEqual(req1.headers.get("X-user-id"), "mock-uid-999")
+            # 验证第 3 个请求为 chat completions 且使用了流式
+            req3 = mock_urlopen.call_args_list[2][0][0]
+            self.assertIn("/v2/chat/completions", req3.full_url)
+            self.assertEqual(req3.headers.get("Accept"), "text/event-stream")
+
+    def test_06_direct_chat_completion_mock(self):
+        """测试 CLI 直接调用模型对话与 SSE 流式解析"""
+        chat_resp = MagicMock()
+        chat_resp.__iter__.return_value = [
+            b'data: {"choices": [{"delta": {"content": "\xe6\xb5\x8b\xe8\xaf\x95"}}]}\n\n',
+            b'data: {"choices": [{"delta": {"content": "\xe6\x88\x90\xe5\x8a\x9f"}}]}\n\n',
+            b'data: [DONE]\n\n'
+        ]
+        chat_resp.__enter__.return_value = chat_resp
+
+        with patch("urllib.request.urlopen", return_value=chat_resp) as mock_urlopen:
+            res = workbuddy.send_chat_message("token_123", "uid_123", prompt="你好")
+            self.assertTrue(res.get("success"))
+            self.assertEqual(res.get("reply"), "测试成功")
+            self.assertEqual(res.get("model"), workbuddy.PREFERRED_CHAT_MODELS[0])
+
+    def test_07_chat_model_fallback_mock(self):
+        """测试首选模型失败时自动向下 fallback 至下一个低倍率/免费模型"""
+        import urllib.error
+        err_fp = MagicMock()
+        err_fp.read.return_value = b'{"code":11102,"msg":"model error"}'
+        http_err = urllib.error.HTTPError("url", 400, "Bad Request", {}, err_fp)
+
+        fallback_resp = MagicMock()
+        fallback_resp.__iter__.return_value = [
+            b'data: {"choices": [{"delta": {"content": "fallback_ok"}}]}\n\n',
+            b'data: [DONE]\n\n'
+        ]
+        fallback_resp.__enter__.return_value = fallback_resp
+
+        with patch("urllib.request.urlopen", side_effect=[http_err, fallback_resp]) as mock_urlopen:
+            res = workbuddy.send_chat_message("token_123", "uid_123", prompt="你好")
+            self.assertTrue(res.get("success"))
+            self.assertEqual(res.get("reply"), "fallback_ok")
+            self.assertEqual(res.get("model"), workbuddy.PREFERRED_CHAT_MODELS[1])
+            self.assertEqual(mock_urlopen.call_count, 2)
 
 if __name__ == "__main__":
     unittest.main()

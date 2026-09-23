@@ -78,6 +78,11 @@ def install_cli():
             with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
                 f.write(cmd_checkin)
 
+        cmd_chat = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" chat %*\r\n"
+        for name in ["wb-chat.cmd", "workbuddy-chat.cmd"]:
+            with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
+                f.write(cmd_chat)
+
         # 配置 Windows 用户 PATH 环境变量
         try:
             import winreg
@@ -102,7 +107,7 @@ def install_cli():
         shutil.copy2(src_bin, dest_bin)
         os.chmod(dest_bin, 0o755)
 
-        for alias in ["wb-switch", "workbuddy-switch", "wb-checkin", "workbuddy-checkin"]:
+        for alias in ["wb-switch", "workbuddy-switch", "wb-checkin", "workbuddy-checkin", "wb-chat", "workbuddy-chat"]:
             link_path = os.path.join(bin_dir, alias)
             if os.path.islink(link_path) or os.path.exists(link_path):
                 try:
@@ -233,7 +238,8 @@ def main():
     print(f"{COLOR_BOLD}{COLOR_GREEN}🎉 安装部署全部完成！{COLOR_RESET}")
     print(f"{COLOR_CYAN}常用命令指南:{COLOR_RESET}")
     print(f"  • {COLOR_BOLD}wb-switch{COLOR_RESET}             : 呼出多账号无缝切换菜单 (永久免扫码)")
-    print(f"  • {COLOR_BOLD}wb-checkin{COLOR_RESET}            : 一键批量执行所有已存账号每日签到")
+    print(f"  • {COLOR_BOLD}wb-checkin{COLOR_RESET}            : 一键批量执行所有账号每日签到与每日对话")
+    print(f"  • {COLOR_BOLD}wb-chat [提示词]{COLOR_RESET}      : 直接在终端与模型对话维持连续对话奖励")
     print(f"  • {COLOR_BOLD}workbuddy save <别名>{COLOR_RESET} : 将当前登录账号保存入库")
     print(f"  • {COLOR_BOLD}workbuddy status{COLOR_RESET}      : 查看所有账号状态及 Token 有效期")
     print(f"{COLOR_BOLD}{COLOR_GREEN}========================================================{COLOR_RESET}\n")

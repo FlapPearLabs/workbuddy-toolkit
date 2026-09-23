@@ -1,12 +1,13 @@
 # WorkBuddy Toolkit: Multi-Account Manager & Automated Check-in
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
+[![Release: v0.3.0](https://img.shields.io/badge/Release-v0.3.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
 
-> **WorkBuddy (腾讯开源/商业化 AI 编程助手) 多账号无缝轮换、全域工作区打通与自动化静默签到工具箱。**  
-> 深入逆向底层 SQLite 存储隔离机制与腾讯云后端鉴权协议，原生全面适配 **macOS**、**Linux** 与 **Windows** 三大操作系统，打造零侵入、高内聚、零打扰的本地自动化工作流。
+> **WorkBuddy (腾讯开源/商业化 AI 编程助手) 多账号无缝轮换、全域工作区打通、自动化静默签到与每日连续对话保活工具箱。**  
+> 深入逆向底层 SQLite 存储隔离机制、腾讯云鉴权与 `/v2/chat/completions` SSE 流式协议，原生全面适配 **macOS**、**Linux** 与 **Windows** 三大操作系统，打造零侵入、高内聚、零打扰的本地自动化工作流。
 
 ---
 
@@ -28,13 +29,13 @@
 4. 执行 `workbuddy status` 检查当前账号状态与已存凭证库；
 5. 智能探测你自身（当前 AI Agent）是否拥有内置的 `schedule` / cron 调度功能：
    - 【若拥有 schedule 功能】（如 Antigravity、WorkBuddy 等内置调度器）：
-     默认使用你的 schedule 工具注册一个每日定时任务（Cron: 0 9 * * *, 触发时运行 workbuddy checkin 并向我汇总汇报收益）。
-     同时询问我：“已为您默认配置每天早晨 09:00 自动打卡并汇报，请问您是否需要调整打卡时间或汇报偏好？”
+     默认使用你的 schedule 工具注册一个每日定时任务（Cron: 0 9 * * *, 触发时运行 workbuddy checkin 自动执行签到与每日对话保活，并向我汇总汇报收益）。
+     同时询问我：“已为您默认配置每天早晨 09:00 自动打卡（含每日签到积分与连续对话保活）并汇报，请问您是否需要调整打卡时间或汇报偏好？”
    - 【若没有 schedule 功能】（如部分普通 CLI Agent）：
      如实告诉我当前环境没有内置 Agent 调度能力，并请我选择签到方式：
      ① 采用安装脚本已配置的系统原生守护定时打卡（macOS launchd / Linux systemd timer / Windows 任务计划程序，每天 09:00 静默打卡写入日志）；
      ② 完全关闭后台自动打卡，后续每次由我手动在终端输入 `wb-checkin` 随时打卡。
-6. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-switch`（免扫码秒切账号）以及如何用 `workbuddy save <别名>` 保存当前登录态。
+6. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-switch`（免扫码秒切账号）、`wb-checkin`（签到+对话）以及 `wb-chat`（CLI 直接调用模型）。
 ```
 
 ---
@@ -47,6 +48,8 @@
 | **工作区与会话** | 换号后历史对话列表变空，工作区关联折叠，需重新拉取项目 | **全域穿透打通**：无论怎么切号，所有账号看到同一个物理工作区与全量对话历史 |
 | **Token 生命周期** | 切换账号后旧 Token 容易被覆盖导致失效过期 | **自动双向回存 (Sync-before-switch)**：切号前自动回写最新 Token，保持凭证新鲜 |
 | **每日签到积分** | 需每天打开图形界面、手动点开活动、逐个切号点击 | **极速静默打卡 (`wb-checkin`)**：0.5 秒遍历所有账号统一领积分，三端原生系统调度自动运行 |
+| **每日连续对话** | 需打开图形界面手动输入聊天以维持连击奖励 | **全账号自动联动保活**：打卡后自动优先使用免费/超低倍率模型（Hy3/Flash）完成每日对话，维持连击兑换资格 |
+| **终端 CLI 问答** | 官方需打开臃肿 Electron 窗口或配置复杂环境 | **原生秒级直接对话 (`wb-chat`)**：直接在终端向 WorkBuddy 模型提问并流式输出，零 UI 内存占用 |
 
 ---
 
@@ -57,7 +60,8 @@
   - [2. SQLite 触发器穿透与全域共享机制](#2-sqlite-触发器穿透与全域共享机制)
   - [3. 免扫码凭证轮换与双向 Token 同步](#3-免扫码凭证轮换与双向-token-同步)
   - [4. 每日签到协议逆向与幂等领取架构](#4-每日签到协议逆向与幂等领取架构)
-  - [5. 三端原生后台定时调度与自适应探测](#5-三端原生后台定时调度与自适应探测)
+  - [5. 每日连续对话协议逆向与模型倍率智能梯队](#5-每日连续对话协议逆向与模型倍率智能梯队)
+  - [6. 三端原生后台定时调度与自适应探测](#6-三端原生后台定时调度与自适应探测)
 - [三、快速上手与安装](#三快速上手与安装)
 - [四、命令行工具使用手册](#四命令行工具使用手册)
 - [五、安全与隐私承诺 (Zero-Leakage)](#五安全与隐私承诺-zero-leakage)
@@ -195,7 +199,28 @@ User-Agent: WorkBuddy/5.5.3
 
 ---
 
-### 5. 三端原生后台定时调度与自适应探测
+### 5. 每日连续对话协议逆向与模型倍率智能梯队
+
+WorkBuddy 体系设有**每日连续对话打卡奖励**（连续天数可累积连击特权与积分商城兑换资格）。然而官方桌面端必须启动完整的 Electron 渲染窗口并在 UI 中手动键入对话，内存占用大且无法自动化。
+
+项目通过对底层通信层的逆向，攻破了终端免 UI 原生对话的关键通道：
+
+#### (1) 通信协议与 SSE 流式要求
+- **接口端点**：`https://copilot.tencent.com/v2/chat/completions`（遵循 OpenAI 兼容规范）。
+- **SSE 流式硬性约束**：后端网关拒绝非流式请求（返回 `400 Non-stream chat request is currently not supported`），必须配置 `"stream": true` 并使用 `Accept: text/event-stream` 请求头。
+- **纯标准库流式解析器**：通过 Python 原生 `urllib.request` 实现轻量级 SSE 逐行 chunk 解析，零额外外部依赖。
+
+#### (2) 智能倍率与免费模型优先调度策略
+为了在达成每日连续对话任务的同时**彻底杜绝积分浪费**，工具箱设计了智能倍率梯队：
+1. **第一梯队 (`hy3`)**：混元 3.0 大模型，当前官方处于限时免费 / 极低折扣期，优先作为默认主力；
+2. **第二梯队 (`deepseek-v4-flash`)**：超轻量 Flash 模型，极速响应且倍率极低；
+3. **第三梯队 (`auto` / `glm-5v-turbo`)**：官方智能路由与低消耗 Turbo 兜底。
+
+遇到特定模型暂时不可用时，系统自动向下无缝容灾回退（Fallback），并在完成打卡后输出简明的回复摘要（如 `[每日对话] 模型: hy3 (低倍率/免费) -> 回复: "你好" ✔`）。
+
+---
+
+### 6. 三端原生后台定时调度与自适应探测
 
 为了让每日签到做到真正的“零打扰、免记挂”，项目原生实现了三大主流操作系统的后台定时守护体系，并支持 AI Agent 运行时的**自适应能力探测 (Capability Probing)**：
 
@@ -296,31 +321,60 @@ wb-switch my_account_2
 请输入序号 [1-2] 进行切换:
 ```
 
-### 2. 每日签到与积分巡检 (`wb-checkin`)
+### 2. 每日签到与连续对话保活 (`wb-checkin`)
 
 ```bash
-# 自动扫描所有已存账号 + 当前在线账号，统一检查并领取
+# 自动扫描所有已存账号 + 当前在线账号，统一检查签到并自动调用免费/低倍率模型触发每日对话
 wb-checkin
 
-# 或仅为特定账号执行签到
+# 或仅为特定账号执行打卡
 wb-checkin backup_acc
+
+# 若本次只想签到、跳过每日对话调用：
+wb-checkin --no-chat
 ```
 
 输出示例：
 ```text
-=== WorkBuddy 自动每日签到 (2 个账号) ===
+=== WorkBuddy 自动每日签到与连续对话 (2 个账号) ===
  ✔ backup_acc    [昵称: 备用副号] 今日已签到 | 连续 4 天 | 累计签到奖励 400 积分
+    💬 [每日对话] 模型: hy3 (低倍率/免费) -> 回复: "你好" ✔
  🎉 main_dev     [昵称: 开发主号] 签到成功！+100 积分 | 连续签到 6 天
+    💬 [每日对话] 模型: hy3 (低倍率/免费) -> 回复: "你好" ✔
 ----------------------------------------------
 ```
 
-### 3. 查看账号状态与凭证有效期
+### 3. 终端极速对话 (`wb-chat`) — 免 UI 零内存占用
+
+无需开启庞大的 Electron 桌面窗口，直接在终端中向 WorkBuddy 模型提问，秒级流式响应：
+
+```bash
+# 向当前活跃账号发送对话（智能优先免费/最低倍率模型）
+wb-chat "用 Python 写一个快速排序"
+
+# 对所有已保存账号批量发送问候，统一触发每日连续对话奖励
+wb-chat --all "请回复：你好"
+
+# 为指定保存的账号别名发送对话
+wb-chat backup_acc "请回复：测试通过"
+```
+
+输出示例：
+```text
+=== WorkBuddy CLI 对话 (2 个账号) ===
+提示词: 请回复：你好
+ ✔ main_dev     [昵称: 开发主号] 模型: hy3 -> 你好！
+ ✔ backup_acc   [昵称: 备用副号] 模型: hy3 -> 你好！
+----------------------------------------------
+```
+
+### 4. 查看账号状态与凭证有效期
 
 ```bash
 workbuddy status
 ```
 
-### 4. 保存新登录的账号 (只需做一次)
+### 5. 保存新登录的账号 (只需做一次)
 
 当你在 WorkBuddy 界面退出并用微信扫码登录了新账号后：
 ```bash
@@ -329,12 +383,14 @@ workbuddy save <取一个名字>
 ```
 *注：即使你忘记执行 `save`，下次运行 `wb-checkin` 时脚本也会自动识别新账号并完成自动建档入库。*
 
-### 5. 常用命令速查表
+### 6. 常用命令速查表
 
 | 命令 | 别名 | 功能说明 |
 | :--- | :--- | :--- |
 | `workbuddy switch [别名]` | `wb-switch` | 交互式选择或直接切换到指定账号并优雅重启 (免扫码) |
-| `workbuddy checkin [别名]` | `wb-checkin` | 统一执行所有已存账号的每日签到与积分到账 (后台静默) |
+| `workbuddy checkin [别名]` | `wb-checkin` | 统一执行所有已存账号每日签到 + 自动调用低倍率/免费模型每日对话 |
+| `workbuddy chat [提示词]` | `wb-chat` | 终端极速对话（智能优先使用 `hy3`、`deepseek-flash` 等免费低消耗模型） |
+| `workbuddy chat --all [词]` | `wb-chat --all` | 全账号批量发起对话，一键刷新全账号连续对话奖励资格 |
 | `workbuddy status` | `workbuddy list` | 查看当前活跃账号、Token 有效期及全部本地凭证列表 |
 | `workbuddy save <别名>` | - | 将当前活跃登录态固化为一个可切换的 Profile (永久免扫码) |
 | `workbuddy init` | - | 一键应用 SQLite 全域工作区打通补丁 |
