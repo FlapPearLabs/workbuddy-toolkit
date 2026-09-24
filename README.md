@@ -237,7 +237,7 @@ const storageLogger = binding.loggerGet();
 
 1. **磁盘凭据 100% 保持官方原生加密形态（Opaque Blob Passthrough）**：
    - 当用户执行 `workbuddy save` 归档账号 Profile、执行 `workbuddy switch` 切换身份、或在切号前自动回写 Token 时，Toolkit 严格将 `$wbEncrypted` 信封视为**不透明对象**进行原子读写。
-   - **坚决不把解密后的明文凭证持久化到磁盘**！磁盘上的所有 Profile 文件与官方桌面客户端文件格式保持完全镜像同构，既规避了明文泄露风险，又保障了官方客户端无论如何升级都能平滑识别。
+   - **坚决不把解密后的明文凭证持久化到磁盘**！保持与当前已验证 WorkBuddy 凭据格式同构，避免 Toolkit 主动把加密凭据降级为明文；未来客户端若轮换字段密钥或改变存储协议，历史 Profile 仍可能出现 KEY_MISMATCH，并按 Fail-Closed 处理。
 2. **纯内存管道瞬态解密与安全生命周期保证**：
    - 仅在需要向腾讯官方发起签到或终端对话网络请求的前一瞬间，通过管道调用本地 WorkBuddy 运行时获取临时 Token。
    - **实际实现与安全边界保证**：
@@ -289,7 +289,7 @@ const storageLogger = binding.loggerGet();
    - `T17`: accessToken 验证器严格性断言，确保放宽 nickname 不得降低 token 安全防线。
    - **本地执行结果**：`Ran 26 tests in 0.274s -> OK`。
 3. **GitHub Actions 跨平台 CI 矩阵全绿验证**：
-   - **构建状态**：[Run ID: 35994709530](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/runs/35994709530)
+   - **构建状态**：[Run ID: 35997775560](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/runs/35997775560)
    - **矩阵覆盖**：涵盖 macOS / Ubuntu / Windows 三大操作系统 × Python 3.9 / 3.11 / 3.12 共 9 个测试环境组合，外加 1 项 Zero-Leak 安全审计，**10 / 10 任务全部 SUCCESS 绿色通过**！
 4. **各操作系统平台真实可用度一览**：
    - **macOS**：**REAL VERIFIED (真实物理验证)**。原生适配默认安装路径 `/Applications/WorkBuddy.app/Contents/MacOS/Electron`，开箱即用。
@@ -612,7 +612,7 @@ workbuddy save <取一个名字>
 1. **绝对本地化**：本工具所有逻辑 100% 运行于本地机器，所有的 Token、UID、凭证仅保存在用户本机的 `~/.workbuddy/auth_profiles/`，**绝不向任何第三方服务或未经授权的服务器发送任何数据**。
 2. **直连官方端点**：签到功能直接调用腾讯官方 API 端点 (`https://copilot.tencent.com`)，无任何中间代理。
 3. **开源透明**：所有脚本均为开源 Python/Shell 源码，接受任何形式的审计与审查。
-4. **潜在风险与版本兼容性提示 (Remaining Risks)**：保存的 encrypted Profile 使用写入它的 WorkBuddy 构建所对应的字段密钥；如果未来 WorkBuddy 构建实际轮换密钥，历史离线 Profile 可能出现 `KEY_MISMATCH`，当前工具会 fail closed。不要声称历史 Profile 可永久跨任意客户端升级。
+4. **潜在风险与版本兼容性提示 (Remaining Risks)**：保存的 encrypted Profile 使用写入它的 WorkBuddy 构建所对应的字段密钥；如果未来 WorkBuddy 构建实际轮换密钥，历史离线 Profile 可能出现 `KEY_MISMATCH`，当前工具会严格按 Fail-Closed 处理。历史 Profile 无法保证永久跨任意客户端版本升级。
 
 ---
 
