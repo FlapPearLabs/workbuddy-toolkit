@@ -511,5 +511,64 @@ class TestWorkBuddyCore(unittest.TestCase):
                 auth_header = req_obj.get_header("Authorization")
                 self.assertEqual(auth_header, f"Bearer {resolved_str}")
 
+    def test_t16_encrypted_nickname_unicode_and_control_chars(self):
+        """T16: encrypted nickname -> resolves Unicode/spaces, rejects NUL/controls, falls back safely"""
+        env_nick = self._create_mock_envelope()
+        account_data = {
+            "nickname": env_nick,
+            "uin": "123456",
+            "uid": "wb_user_test_long_id"
+        }
+
+        # 1. 验证解密为中文 "测试账号" 正常通过，get_display_nickname 必须返回 "测试账号"
+        with patch.object(workbuddy, "find_workbuddy_runtime", return_value="/mock/WorkBuddy"):
+            with patch.object(workbuddy, "run_native_resolver", return_value={"ok": True, "version": 1, "value": "测试账号"}):
+                nick = workbuddy.get_display_nickname(account_data)
+                self.assertEqual(nick, "测试账号")
+                resolved = workbuddy.resolve_credential_field(env_nick, field_name="nickname")
+                self.assertEqual(resolved, "测试账号")
+
+        # 2. 验证包含空格与合规 Unicode (Emoji/标点) 正常合法通过
+        with patch.object(workbuddy, "find_workbuddy_runtime", return_value="/mock/WorkBuddy"):
+            with patch.object(workbuddy, "run_native_resolver", return_value={"ok": True, "version": 1, "value": "开发 组长 🚀"}):
+                nick = workbuddy.get_display_nickname(account_data)
+                self.assertEqual(nick, "开发 组长 🚀")
+                resolved = workbuddy.resolve_credential_field(env_nick, field_name="nickname")
+                self.assertEqual(resolved, "开发 组长 🚀")
+
+        # 3. 验证包含 NUL (\x00) 或控制字符时 fail closed，get_display_nickname 安全 fallback 至 uin
+        with patch.object(workbuddy, "find_workbuddy_runtime", return_value="/mock/WorkBuddy"):
+            for bad_nick in ("bad\x00nick", "bad\x1fnick", "bad\x7fnick", "   ", ""):
+                with patch.object(workbuddy, "run_native_resolver", return_value={"ok": True, "version": 1, "value": bad_nick}):
+                    with self.assertRaises(workbuddy.CredentialError):
+                        workbuddy.resolve_credential_field(env_nick, field_name="nickname")
+                    nick = workbuddy.get_display_nickname(account_data)
+                    self.assertEqual(nick, "123456", f"遇到非法昵称 {repr(bad_nick)} 应安全回退到 uin")
+
+    def test_t17_access_token_validator_strictness_not_relaxed(self):
+        """T17: accessToken validator strictness -> Chinese/spaces/controls strictly rejected for accessToken"""
+        env_token = self._create_mock_envelope()
+
+        # 1. 明文 accessToken 传入非 Token 字符集时必须抛出 INVALID_FORMAT
+        for invalid_plain in ("测试账号", "token with spaces", "token\x00nul", "token\nnewline"):
+            with self.assertRaises(workbuddy.CredentialError):
+                workbuddy.resolve_credential_field(invalid_plain, field_name="accessToken")
+
+        # 2. 加密信封解密后若返回中文或带空格字符串，accessToken 校验必须 fail closed
+        with patch.object(workbuddy, "find_workbuddy_runtime", return_value="/mock/WorkBuddy"):
+            with patch.object(workbuddy, "run_native_resolver", return_value={"ok": True, "version": 1, "value": "测试账号"}):
+                with self.assertRaises(workbuddy.CredentialError):
+                    workbuddy.resolve_credential_field(env_token, field_name="accessToken")
+
+            with patch.object(workbuddy, "run_native_resolver", return_value={"ok": True, "version": 1, "value": "token with space"}):
+                with self.assertRaises(workbuddy.CredentialError):
+                    workbuddy.resolve_credential_field(env_token, field_name="accessToken")
+
+            # 3. 唯有符合严格 Token 正则的 ASCII 字符串才允许通过
+            valid_token = "mock_valid_token_ascii_string_12345"
+            with patch.object(workbuddy, "run_native_resolver", return_value={"ok": True, "version": 1, "value": valid_token}):
+                resolved = workbuddy.resolve_credential_field(env_token, field_name="accessToken")
+                self.assertEqual(resolved, valid_token)
+
 if __name__ == "__main__":
     unittest.main()

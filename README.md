@@ -2,7 +2,7 @@
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
 [![Release: v0.3.1](https://img.shields.io/badge/Release-v0.3.1-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 24/24 Passed](https://img.shields.io/badge/Tests-24%2F24%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests: 26/26 Passed](https://img.shields.io/badge/Tests-26%2F26%20Passed%20(100%25)-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
@@ -238,9 +238,16 @@ const storageLogger = binding.loggerGet();
 1. **磁盘凭据 100% 保持官方原生加密形态（Opaque Blob Passthrough）**：
    - 当用户执行 `workbuddy save` 归档账号 Profile、执行 `workbuddy switch` 切换身份、或在切号前自动回写 Token 时，Toolkit 严格将 `$wbEncrypted` 信封视为**不透明对象**进行原子读写。
    - **坚决不把解密后的明文凭证持久化到磁盘**！磁盘上的所有 Profile 文件与官方桌面客户端文件格式保持完全镜像同构，既规避了明文泄露风险，又保障了官方客户端无论如何升级都能平滑识别。
-2. **纯内存管道瞬态解密（Transient In-Memory Decryption）**：
+2. **纯内存管道瞬态解密与安全生命周期保证**：
    - 仅在需要向腾讯官方发起签到或终端对话网络请求的前一瞬间，通过管道调用本地 WorkBuddy 运行时获取临时 Token。
-   - 解密后的 Token 仅短暂保留在 Python 进程的内存局部变量中，网络请求发出后立即被垃圾回收销毁，**绝不写入任何临时文件，绝不打印到终端或日志**。
+   - **实际实现与安全边界保证**：
+     - plaintext credential 不主动持久化
+     - 不写 auth profile
+     - 不写临时文件
+     - 不写日志
+     - 不主动打印
+     - 仅在当前进程/子进程内瞬态使用
+   - **物理内存擦除边界说明**：Node.js 解密助手中的底层 JS Buffer（如密钥与解密原始 bytes）在完成使用后会调用 `.fill(0)` 尽力擦除底层缓冲区；但须明确：上层 JavaScript 字符串、JSON 序列化传输管道以及 Python 运行时中的 `bytes`/`str` 对象，受高级语言不可变对象特性与垃圾回收机制约束，技术上无法保证立即物理 zeroization。工具通过绝不落盘、绝不打印、绝不写日志与严格 Fail-Closed 原则确保凭据安全闭环。
 
 #### (4) 稳健性保障：昵称字典防御降级链与 Fail-Closed 阻断机制
 1. **5 级安全防守回退链（Safe Nickname Fallback）**：
@@ -265,8 +272,8 @@ const storageLogger = binding.loggerGet();
    - **测试环境**：macOS 15.x (Apple Silicon) 真实物理开发机。
    - **目标客户端**：官方正式版 WorkBuddy 5.6+（内置 Electron 37.10.3）。
    - **物理证据**：通过管道调用本地原生绑定，执行耗时仅 **48ms**，内存占用近乎为零，成功完成加密字段解析并完成静默打卡与连续对话。
-2. **全覆盖自动化测试套件（24/24 100% Passed）**：
-   在 [`tests/test_toolkit.py`](tests/test_toolkit.py) 中新增了专属的 **T1 至 T15** 测试用例：
+2. **全覆盖自动化测试套件（26/26 100% Passed）**：
+   在 [`tests/test_toolkit.py`](tests/test_toolkit.py) 中新增了专属的 **T1 至 T17** 测试用例：
    - `T1`: 遗留旧版明文凭据直接解析，不触发子进程，性能零损耗；
    - `T2`: 准确识别 `$wbEncrypted` 加密信封特征；
    - `T3`: 损坏或不完整的加密信封触发 Fail-Closed 拒绝；
@@ -277,8 +284,10 @@ const storageLogger = binding.loggerGet();
    - `T10`: 旧版明文 Profile 零回归；
    - `T11`-`T13`: Doctor 诊断在明文、加密可用、加密缺失三种场景下的矩阵断言；
    - `T14`: 日志与标准输出绝不泄露明文 Token 与私钥；
-   - `T15`: API 网络层确保仅合法 ASCII 字符串才可发出请求。
-   - **本地执行结果**：`Ran 24 tests in 0.269s -> OK`。
+   - `T15`: API 网络层确保仅合法 ASCII 字符串才可发出请求；
+   - `T16`: 加密昵称支持中文、空格与 Unicode 解析，严格拒绝 NUL 及不可见控制字符并安全回退；
+   - `T17`: accessToken 验证器严格性断言，确保放宽 nickname 不得降低 token 安全防线。
+   - **本地执行结果**：`Ran 26 tests in 0.274s -> OK`。
 3. **GitHub Actions 跨平台 CI 矩阵全绿验证**：
    - **构建状态**：[Run ID: 35994709530](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/runs/35994709530)
    - **矩阵覆盖**：涵盖 macOS / Ubuntu / Windows 三大操作系统 × Python 3.9 / 3.11 / 3.12 共 9 个测试环境组合，外加 1 项 Zero-Leak 安全审计，**10 / 10 任务全部 SUCCESS 绿色通过**！
@@ -603,6 +612,7 @@ workbuddy save <取一个名字>
 1. **绝对本地化**：本工具所有逻辑 100% 运行于本地机器，所有的 Token、UID、凭证仅保存在用户本机的 `~/.workbuddy/auth_profiles/`，**绝不向任何第三方服务或未经授权的服务器发送任何数据**。
 2. **直连官方端点**：签到功能直接调用腾讯官方 API 端点 (`https://copilot.tencent.com`)，无任何中间代理。
 3. **开源透明**：所有脚本均为开源 Python/Shell 源码，接受任何形式的审计与审查。
+4. **潜在风险与版本兼容性提示 (Remaining Risks)**：保存的 encrypted Profile 使用写入它的 WorkBuddy 构建所对应的字段密钥；如果未来 WorkBuddy 构建实际轮换密钥，历史离线 Profile 可能出现 `KEY_MISMATCH`，当前工具会 fail closed。不要声称历史 Profile 可永久跨任意客户端升级。
 
 ---
 

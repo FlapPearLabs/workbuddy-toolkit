@@ -25,6 +25,7 @@ import urllib.error
 import re
 import shutil
 import base64
+import unicodedata
 from datetime import datetime
 
 VERSION = "0.3.1"
@@ -93,11 +94,21 @@ COLOR_RESET = "\033[0m" if HAS_COLOR else ""
 # ==============================================================================
 # Credential Compatibility Layer (支持旧版明文凭据与 WorkBuddy 5.6+ 加密凭据)
 # 核心原则：DO NOT DECRYPT FOR STORAGE（持久化保留原始格式，仅在请求时临时内存解密）
+# 实际实现与安全边界保证：
+# - plaintext credential 不主动持久化
+# - 不写 auth profile
+# - 不写临时文件
+# - 不写日志
+# - 不主动打印
+# - 仅在当前进程/子进程内瞬态使用
+# 注意：JS Buffer 的 key/plaintext fill(0) 虽尽力擦除底层缓冲区，但 JS string、
+# JSON 序列化传输以及 Python bytes/string 受语言不可变对象限制，无法保证立即物理 zeroization。
 # ==============================================================================
 
 AUTH_INPUT_LIMIT = 65536
 AUTH_OUTPUT_LIMIT = 65536
 TOKEN_LIMIT = 32768
+NICKNAME_LIMIT = 256
 AUTH_HELPER_TIMEOUT = 10.0
 
 AUTH_REASONS = {
@@ -113,7 +124,7 @@ AUTH_REASONS = {
     "AUTH_CREDENTIAL_UNRESOLVED": "凭据解析失败，无法获取有效认证令牌",
 }
 
-# 最小 Node.js 解密助手（通过 stdin/stdout 安全通信，内存解密，绝不落盘，绝不打印）
+# 最小 Node.js 解密助手（通过 stdin/stdout 安全通信，瞬态内存解密，绝不落盘，绝不打印）
 AUTH_HELPER_JS = r"""
 'use strict';
 const crypto = require('crypto');
@@ -182,10 +193,10 @@ function decrypt(envelope) {
       cipher.setAAD(aad); cipher.setAuthTag(envelope.tag);
       plaintext = Buffer.concat([cipher.update(envelope.ciphertext), cipher.final()]);
     } catch (_) { failure('DECRYPT_FAILED'); }
-    const token = utf8(plaintext);
-    if (!token.length || token.length > 32768 || !/^[A-Za-z0-9._~+\/-]+=*$/.test(token))
+    const text = utf8(plaintext);
+    if (!text.length || text.length > 32768)
       failure('INVALID_FORMAT');
-    return token;
+    return text;
   } finally {
     if (key) key.fill(0);
     if (plaintext) plaintext.fill(0);
@@ -210,7 +221,8 @@ process.stdin.on('end', () => {
       if (!crypto.getCiphers().includes('aes-256-gcm')) failure('RUNTIME_UNAVAILABLE');
       reply({ok: true, electron: process.versions.electron || 'unknown'});
     } else if (request.operation === 'decrypt') {
-      reply({ok: true, accessToken: decrypt(decode(request.value))});
+      const decrypted = decrypt(decode(request.value));
+      reply({ok: true, value: decrypted, accessToken: decrypted});
     } else failure('HELPER_PROTOCOL');
   } catch (e) {
     const reasons = ['INVALID_FORMAT','UNSUPPORTED_ENVELOPE','RUNTIME_UNAVAILABLE',
@@ -232,6 +244,23 @@ def is_valid_token_string(token):
         and 0 < len(token) <= TOKEN_LIMIT
         and re.fullmatch(r"[A-Za-z0-9._~+\/-]+=*", token) is not None
     )
+
+def is_valid_nickname_string(nick):
+    """
+    根据 field_name="nickname" 进行最小字段级验证：
+    - 必须为合法非空字符串，长度在 1 到 256 字符之间，且不全为空白
+    - 允许合法 UTF-8 Unicode 文本（包含中文、日文、Emoji 等）以及包含正常空格的昵称
+    - 拒绝 NUL (\x00) 及不可见控制字符 (ord < 32 或 Unicode 类别 Cc / Cs)
+    - 不得应用 accessToken 专用字符集 regex
+    """
+    if not isinstance(nick, str):
+        return False
+    if not (0 < len(nick) <= NICKNAME_LIMIT) or not nick.strip():
+        return False
+    for ch in nick:
+        if ord(ch) < 32 or unicodedata.category(ch) in ("Cc", "Cs"):
+            return False
+    return True
 
 def is_encrypted_credential(value):
     return (
@@ -401,60 +430,75 @@ def run_native_resolver(runtime_exe, request_payload):
 def resolve_credential_field(raw_value, field_name="accessToken"):
     """
     解析凭据字段为明文字符串：
-    - Case 1: 明文字符串 -> 直接返回
-    - Case 2: $wbEncrypted 加密信封 -> 调用 WorkBuddy 本地运行时解密，返回纯内存 Token
+    - Case 1: 明文字符串 -> 按 field_name 校验有效性后直接返回
+    - Case 2: $wbEncrypted 加密信封 -> 调用 WorkBuddy 本地运行时解密，按 field_name 校验有效性后返回瞬态字符串
     - Case 3: 损坏或不受支持格式 -> Fail closed (抛出 CredentialError)
     - Case 4: 运行时不可用 -> Fail closed (抛出 CredentialError)
     """
-    fmt = check_token_format(raw_value)
-    if fmt == "plaintext":
-        return raw_value
-    elif fmt == "sym-v1":
-        runtime = find_workbuddy_runtime()
-        reply = run_native_resolver(runtime, {"operation": "decrypt", "value": raw_value})
-        resolved = reply.get("accessToken")
-        if not is_valid_token_string(resolved):
+    if isinstance(raw_value, str):
+        val = raw_value
+    elif isinstance(raw_value, dict):
+        fmt = check_token_format(raw_value)
+        if fmt == "sym-v1":
+            runtime = find_workbuddy_runtime()
+            reply = run_native_resolver(runtime, {"operation": "decrypt", "value": raw_value})
+            val = reply.get("value")
+            if val is None:
+                val = reply.get("accessToken")
+            if not isinstance(val, str):
+                raise CredentialError("INVALID_FORMAT")
+        elif fmt == "unsupported":
+            raise CredentialError("UNSUPPORTED_ENVELOPE")
+        else:
             raise CredentialError("INVALID_FORMAT")
-        return resolved
-    elif fmt == "unsupported":
-        raise CredentialError("UNSUPPORTED_ENVELOPE")
     else:
         raise CredentialError("INVALID_FORMAT")
+
+    if field_name == "nickname":
+        if not is_valid_nickname_string(val):
+            raise CredentialError("INVALID_FORMAT")
+        return val
+    else:
+        # accessToken 及其他鉴权凭据字段严格使用 is_valid_token_string 校验，修 nickname 不得放宽 accessToken
+        if not is_valid_token_string(val):
+            raise CredentialError("INVALID_FORMAT")
+        return val
 
 def get_display_nickname(account_data, default_name=""):
     """
     提取安全的显示昵称，杜绝 dict.lower() crash。
     fallback 顺序:
-    1. plaintext 昵称
-    2. 如果昵称是加密对象，尝试安全解密；失败则 fallback
+    1. plaintext 昵称（若为合法字符串且通过 is_valid_nickname_string）
+    2. 如果昵称是加密对象，尝试安全解密并通过 is_valid_nickname_string 校验；失败则 fallback
     3. account uin
     4. account uid 前 8 位
     5. default_name
     """
     if not isinstance(account_data, dict):
-        return str(default_name)
+        return str(default_name) if default_name else "未知用户"
 
     nick = account_data.get("nickname")
-    if isinstance(nick, str) and nick.strip():
+    if isinstance(nick, str) and is_valid_nickname_string(nick):
         return nick.strip()
 
     if is_encrypted_credential(nick):
         try:
             resolved = resolve_credential_field(nick, field_name="nickname")
-            if isinstance(resolved, str) and resolved.strip():
+            if isinstance(resolved, str) and is_valid_nickname_string(resolved):
                 return resolved.strip()
         except Exception:
             pass
 
     uin = account_data.get("uin")
     if uin not in (None, ""):
-        return str(uin)
+        return str(uin).strip()
 
     uid = account_data.get("uid")
     if uid not in (None, ""):
-        return str(uid)[:8]
+        clean_uid = str(uid).strip()
+        return clean_uid[:8] if len(clean_uid) >= 8 else clean_uid
 
-    return str(default_name)
+    return str(default_name) if default_name else "未知用户"
 
 def get_active_account():
     if not os.path.exists(AUTH_FILE):
