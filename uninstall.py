@@ -85,7 +85,7 @@ def uninstall():
             print(f"{COLOR_GREEN}✔ 已删除 Windows CLI 安装目录及垫片 ({bin_dir}){COLOR_RESET}")
     else:
         bin_dir = os.path.join(HOME, ".local", "bin")
-        for name in ["workbuddy", "wb-switch", "workbuddy-switch", "wb-checkin", "workbuddy-checkin", "wb-chat", "workbuddy-chat"]:
+        for name in ["workbuddy", "wb-switch", "workbuddy-switch", "wb-checkin", "workbuddy-checkin", "wb-chat", "workbuddy-chat", "wb-doctor", "workbuddy-doctor"]:
             fpath = os.path.join(bin_dir, name)
             if os.path.islink(fpath) or os.path.exists(fpath):
                 try:

@@ -83,6 +83,11 @@ def install_cli():
             with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
                 f.write(cmd_chat)
 
+        cmd_doctor = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" doctor %*\r\n"
+        for name in ["wb-doctor.cmd", "workbuddy-doctor.cmd"]:
+            with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
+                f.write(cmd_doctor)
+
         # 配置 Windows 用户 PATH 环境变量
         try:
             import winreg
@@ -107,7 +112,7 @@ def install_cli():
         shutil.copy2(src_bin, dest_bin)
         os.chmod(dest_bin, 0o755)
 
-        for alias in ["wb-switch", "workbuddy-switch", "wb-checkin", "workbuddy-checkin", "wb-chat", "workbuddy-chat"]:
+        for alias in ["wb-switch", "workbuddy-switch", "wb-checkin", "workbuddy-checkin", "wb-chat", "workbuddy-chat", "wb-doctor", "workbuddy-doctor"]:
             link_path = os.path.join(bin_dir, alias)
             if os.path.islink(link_path) or os.path.exists(link_path):
                 try:

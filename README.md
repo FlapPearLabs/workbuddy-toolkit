@@ -1,13 +1,13 @@
 # WorkBuddy Toolkit: Multi-Account Manager & Automated Check-in
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
-[![Release: v0.3.0](https://img.shields.io/badge/Release-v0.3.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
+[![Release: v0.3.1](https://img.shields.io/badge/Release-v0.3.1-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
 
 > **WorkBuddy (腾讯开源/商业化 AI 编程助手) 多账号无缝轮换、全域工作区打通、自动化静默签到与每日连续对话保活工具箱。**  
-> 深入逆向底层 SQLite 存储隔离机制、腾讯云鉴权与 `/v2/chat/completions` SSE 流式协议，原生全面适配 **macOS**、**Linux** 与 **Windows** 三大操作系统，打造零侵入、高内聚、零打扰的本地自动化工作流。
+> 深入逆向底层 SQLite 存储隔离机制、腾讯云鉴权、5.6+ 本地凭证加密协议与 `/v2/chat/completions` SSE 流式协议，原生全面适配 **macOS**、**Linux** 与 **Windows** 三大操作系统，打造零侵入、高内聚、零打扰的本地自动化工作流。
 
 ---
 
@@ -26,8 +26,9 @@
      macOS / Linux : cd ~/.workbuddy/toolkit && ./install.sh
      Windows (PowerShell) : cd ~\.workbuddy\toolkit ; .\install.ps1
 3. 执行 `workbuddy init` 确保全域工作区打通触发器已激活；
-4. 执行 `workbuddy status` 检查当前账号状态与已存凭证库；
-5. 智能探测你自身（当前 AI Agent）是否拥有内置的 `schedule` / cron 调度功能：
+4. 执行 `workbuddy doctor` 诊断本地凭证格式与解密运行时兼容性；
+5. 执行 `workbuddy status` 检查当前账号状态与已存凭证库；
+6. 智能探测你自身（当前 AI Agent）是否拥有内置的 `schedule` / cron 调度功能：
    - 【若拥有 schedule 功能】（如 Antigravity、WorkBuddy 等内置调度器）：
      默认使用你的 schedule 工具注册一个每日定时任务（Cron: 0 9 * * *, 触发时运行 workbuddy checkin 自动执行签到与每日对话保活，并向我汇总汇报收益）。
      同时询问我：“已为您默认配置每天早晨 09:00 自动打卡（含每日签到积分与连续对话保活）并汇报，请问您是否需要调整打卡时间或汇报偏好？”
@@ -35,16 +36,17 @@
      如实告诉我当前环境没有内置 Agent 调度能力，并请我选择签到方式：
      ① 采用安装脚本已配置的系统原生守护定时打卡（macOS launchd / Linux systemd timer / Windows 任务计划程序，每天 09:00 静默打卡写入日志）；
      ② 完全关闭后台自动打卡，后续每次由我手动在终端输入 `wb-checkin` 随时打卡。
-6. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-switch`（免扫码秒切账号）、`wb-checkin`（签到+对话）以及 `wb-chat`（CLI 直接调用模型）。
+7. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-switch`（免扫码秒切账号）、`wb-checkin`（签到+对话）、`wb-chat`（CLI 直接调用模型）以及 `wb-doctor`（兼容诊断）。
 ```
 
 ---
 
-## ⭐ 核心终极优势：一次登录，永久免扫码！
+## ⭐ 核心优势：多账号快速轮换与 WorkBuddy 5.6+ 加密凭据原生兼容
 
 | 对比维度 | 传统 WorkBuddy 官方体验 | 使用 WorkBuddy Toolkit |
 | :--- | :--- | :--- |
-| **多账号切换** | 每次换号必须在微信上**重新掏出手机扫码**，频繁中断思考 | **每个账号仅需首次扫码一次**，保存为 Profile 后随时**秒级直切，永久免扫码**！ |
+| **多账号切换** | 每次换号必须在微信上**重新掏出手机扫码**，频繁中断思考 | **免除微信反复扫码**：保存已登录凭据 Profile 后随时**秒级直切**，即切即用！ |
+| **加密凭据兼容** | 5.6+ 采用 `$wbEncrypted` 加密敏感字段，普通脚本直接失效 | **原生解密兼容 (v0.3.1+)**：运行时透明兼容明文与加密凭据，严格内存级解密，不降级、不落盘 |
 | **工作区与会话** | 换号后历史对话列表变空，工作区关联折叠，需重新拉取项目 | **全域穿透打通**：无论怎么切号，所有账号看到同一个物理工作区与全量对话历史 |
 | **Token 生命周期** | 切换账号后旧 Token 容易被覆盖导致失效过期 | **自动双向回存 (Sync-before-switch)**：切号前自动回写最新 Token，保持凭证新鲜 |
 | **每日签到积分** | 需每天打开图形界面、手动点开活动、逐个切号点击 | **极速静默打卡 (`wb-checkin`)**：0.5 秒遍历所有账号统一领积分，三端原生系统调度自动运行 |
@@ -137,12 +139,12 @@ END;
 
 **技术优势**：
 - **零 CPU/内存占用**：触发器由 SQLite 引擎在事务内毫秒级触发，无需任何常驻进程轮询。
-- **全版本自愈**：即便客户端升级，只要 SQLite 数据库未被彻底重建，触发器将永久生效。
+- **高韧性**：只要 SQLite 数据库未被完全重建，触发器将持续生效。
 - **平滑回滚**：仅需 `DROP TRIGGER` 即可恢复官方的数据隔离策略。
 
 ---
 
-### 3. 免扫码凭证轮换与双向 Token 同步
+### 3. 账号快速轮换与双向 Token 同步
 
 #### (1) 凭证存储机制
 WorkBuddy 的当前登录凭证以 JSON 格式存储在如下路径：  
@@ -151,7 +153,7 @@ WorkBuddy 的当前登录凭证以 JSON 格式存储在如下路径：
 包含字段：
 - `account.uid`: 用户全局唯一标识
 - `account.nickname`: 用户昵称
-- `auth.accessToken`: 访问令牌（通常有效期 30 天）
+- `auth.accessToken`: 访问令牌（通常有效期 30 天，5.6+ 可能为 `$wbEncrypted` 加密信封）
 - `auth.refreshToken`: 刷新令牌（通常有效期 60 天）
 - `auth.expiresAt`: 毫秒级过期时间戳
 
@@ -166,7 +168,31 @@ WorkBuddy 的当前登录凭证以 JSON 格式存储在如下路径：
 
 ---
 
-### 4. 每日签到协议逆向与幂等领取架构
+### 4. WorkBuddy 5.6+ 敏感凭证加密支持与 Doctor 诊断
+
+自 WorkBuddy 5.6.x 起，客户端对 `accessToken` 等敏感字段引入了本地加密信封格式 (`$wbEncrypted`, suite 1 / sym-v1)。
+
+#### (1) DO NOT DECRYPT FOR STORAGE 原则
+workbuddy-toolkit 坚决贯彻最小特权与零泄密架构：
+- **原样持久化**：当保存 Profile 或在账号间切换时，原始的 `$wbEncrypted` 信封数据被完整保留并原样写入目标文件，**绝不把加密凭据降级解密后以明文存盘**。
+- **纯内存瞬时解析**：仅在调用官方 Copilot 接口（签到/对话）的瞬间，工具调用本机 WorkBuddy 客户端运行时（以 `ELECTRON_RUN_AS_NODE` 模式安全通信）在内存管道中解密获取 `accessToken`。使用完毕后内存立即清零，绝不落盘、绝不打印至控制台或写入日志。
+- **Fail Closed 安全防护**：若信封格式损坏或本机无法找到可用 WorkBuddy 运行时，工具立即阻断网络请求，严禁将字典对象或错误数据发送给服务端。
+
+#### (2) Doctor 兼容性自检
+```bash
+workbuddy doctor   # 或使用别名 wb-doctor
+```
+运行后将即时输出当前系统的兼容性检查报告：
+- 凭证文件是否存在与格式识别（plaintext / encrypted）
+- 加密套件识别（sym-v1 / suite 1）
+- 本地 WorkBuddy 运行时可执行路径发现状态
+- 原生解密助手可用性（Electron 运行时探测）
+- API 联通能力（READY / BLOCKED）
+- 最终结论（COMPATIBLE / INCOMPATIBLE）
+
+---
+
+### 5. 每日签到协议逆向与幂等领取架构
 
 通过对 `app.asar` 内通信层及运行时日志分析，我们还原了 WorkBuddy 签到活动的底层通信协议：
 
@@ -293,9 +319,9 @@ cd $HOME\.workbuddy\toolkit
 
 ## 四、命令行工具使用手册
 
-安装后，全局提供 `workbuddy`、`wb-switch`、`wb-checkin` 快捷命令：
+安装后，全局提供 `workbuddy`、`wb-switch`、`wb-checkin`、`wb-chat` 以及 `wb-doctor` 快捷命令：
 
-### 1. 账号无缝切换 (`wb-switch`) — 永久免扫码
+### 1. 账号快速切换 (`wb-switch`)
 
 ```bash
 # 方式 A：打开交互式数字选择菜单 (CC Switch 风格)
@@ -312,7 +338,7 @@ wb-switch my_account_2
 ==============================================
 当前在线账号: main_dev (当前使用中)
 
-请选择要切换的目标账号 (一次保存，永久免扫码):
+请选择要切换的目标账号:
  ▶ 1) main_dev     [昵称: 开发主号] (当前使用中)
    2) backup_acc   [昵称: 备用副号]
 
@@ -368,13 +394,36 @@ wb-chat backup_acc "请回复：测试通过"
 ----------------------------------------------
 ```
 
-### 4. 查看账号状态与凭证有效期
+### 4. 环境与凭证兼容性诊断 (`wb-doctor`)
+
+一键检查本地凭据格式与 WorkBuddy 运行时原生解密能力：
+
+```bash
+workbuddy doctor   # 或 wb-doctor
+```
+
+输出示例：
+```text
+=== WorkBuddy Toolkit Doctor ===
+
+Auth file             : OK (/Users/.../workbuddy-desktop.info)
+Credential format     : encrypted
+Encrypted scheme      : detected (sym-v1 / suite 1)
+WorkBuddy runtime     : FOUND (/Applications/WorkBuddy.app/Contents/MacOS/Electron)
+Credential resolver   : AVAILABLE (Electron 37.10.3)
+Profile count         : 2
+API capability        : READY
+
+RESULT: COMPATIBLE
+```
+
+### 5. 查看账号状态与凭证有效期
 
 ```bash
 workbuddy status
 ```
 
-### 5. 保存新登录的账号 (只需做一次)
+### 6. 保存新登录的账号
 
 当你在 WorkBuddy 界面退出并用微信扫码登录了新账号后：
 ```bash
@@ -383,16 +432,17 @@ workbuddy save <取一个名字>
 ```
 *注：即使你忘记执行 `save`，下次运行 `wb-checkin` 时脚本也会自动识别新账号并完成自动建档入库。*
 
-### 6. 常用命令速查表
+### 7. 常用命令速查表
 
 | 命令 | 别名 | 功能说明 |
 | :--- | :--- | :--- |
-| `workbuddy switch [别名]` | `wb-switch` | 交互式选择或直接切换到指定账号并优雅重启 (免扫码) |
+| `workbuddy switch [别名]` | `wb-switch` | 交互式选择或直接切换到指定账号并优雅重启 |
 | `workbuddy checkin [别名]` | `wb-checkin` | 统一执行所有已存账号每日签到 + 自动调用低倍率/免费模型每日对话 |
 | `workbuddy chat [提示词]` | `wb-chat` | 终端极速对话（智能优先使用 `hy3`、`deepseek-flash` 等免费低消耗模型） |
 | `workbuddy chat --all [词]` | `wb-chat --all` | 全账号批量发起对话，一键刷新全账号连续对话奖励资格 |
+| `workbuddy doctor` | `wb-doctor` | 深度诊断凭据加密套件、本地运行时路径与解密通信就绪度 |
 | `workbuddy status` | `workbuddy list` | 查看当前活跃账号、Token 有效期及全部本地凭证列表 |
-| `workbuddy save <别名>` | - | 将当前活跃登录态固化为一个可切换的 Profile (永久免扫码) |
+| `workbuddy save <别名>` | - | 将当前活跃登录态固化为一个可切换的 Profile |
 | `workbuddy init` | - | 一键应用 SQLite 全域工作区打通补丁 |
 | `workbuddy rollback` | - | 撤销 SQLite 触发器，恢复官方严格数据隔离 |
 | `workbuddy restart` | - | 优雅重启 WorkBuddy 客户端 |

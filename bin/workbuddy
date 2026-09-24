@@ -24,9 +24,10 @@ import urllib.request
 import urllib.error
 import re
 import shutil
+import base64
 from datetime import datetime
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 PREFERRED_CHAT_MODELS = ["hy3", "deepseek-v4-flash", "auto", "glm-5v-turbo"]
 
 # Windows 控制台编码安全处理与 ANSI 颜色初始化
@@ -89,6 +90,372 @@ COLOR_RED = "\033[91m" if HAS_COLOR else ""
 COLOR_BOLD = "\033[1m" if HAS_COLOR else ""
 COLOR_RESET = "\033[0m" if HAS_COLOR else ""
 
+# ==============================================================================
+# Credential Compatibility Layer (支持旧版明文凭据与 WorkBuddy 5.6+ 加密凭据)
+# 核心原则：DO NOT DECRYPT FOR STORAGE（持久化保留原始格式，仅在请求时临时内存解密）
+# ==============================================================================
+
+AUTH_INPUT_LIMIT = 65536
+AUTH_OUTPUT_LIMIT = 65536
+TOKEN_LIMIT = 32768
+AUTH_HELPER_TIMEOUT = 10.0
+
+AUTH_REASONS = {
+    "INVALID_FORMAT": "凭据格式无效或信封数据损坏",
+    "UNSUPPORTED_ENVELOPE": "不支持的加密凭据格式（仅支持 suite 1 / sym-v1）",
+    "RUNTIME_NOT_FOUND": "未检测到可用的 WorkBuddy 客户端运行时，请配置 WORKBUDDY_EXE 环境变量",
+    "INVALID_RUNTIME_PATH": "WORKBUDDY_EXE 指定的文件不存在或不可执行",
+    "RUNTIME_UNAVAILABLE": "客户端运行时不支持所需的原生存储解密接口",
+    "KEY_MISMATCH": "凭据与当前 WorkBuddy 运行时的密钥不匹配",
+    "DECRYPT_FAILED": "加密凭据认证或解密失败",
+    "HELPER_TIMEOUT": "凭据解密助手子进程执行超时",
+    "HELPER_PROTOCOL": "客户端解密通信协议异常",
+    "AUTH_CREDENTIAL_UNRESOLVED": "凭据解析失败，无法获取有效认证令牌",
+}
+
+# 最小 Node.js 解密助手（通过 stdin/stdout 安全通信，内存解密，绝不落盘，绝不打印）
+AUTH_HELPER_JS = r"""
+'use strict';
+const crypto = require('crypto');
+const inputLimit = 65536;
+const failure = reason => { throw {reason}; };
+const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
+function base64(value, length) {
+  if (typeof value !== 'string' || value.length > inputLimit) failure('INVALID_FORMAT');
+  const bytes = Buffer.from(value, 'base64');
+  if (bytes.toString('base64') !== value || (length !== undefined && bytes.length !== length))
+    failure('INVALID_FORMAT');
+  return bytes;
+}
+function utf8(bytes) {
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) failure('INVALID_FORMAT');
+  return text;
+}
+function decode(value) {
+  if (!object(value) || Object.keys(value).sort().join(',') !== '$wbEncrypted,envelope' || value.$wbEncrypted !== 1)
+    failure('UNSUPPORTED_ENVELOPE');
+  let envelope;
+  try { envelope = JSON.parse(utf8(base64(value.envelope))); }
+  catch (e) { failure(e.reason || 'INVALID_FORMAT'); }
+  if (!object(envelope) || !Number.isInteger(envelope.suite)) failure('INVALID_FORMAT');
+  if (envelope.suite !== 1) failure('UNSUPPORTED_ENVELOPE');
+  if (Object.keys(envelope).sort().join(',') !== 'authTag,ciphertext,keyId,nonce,suite' ||
+      typeof envelope.keyId !== 'string' || !/^[0-9a-f]{16}$/.test(envelope.keyId)) failure('INVALID_FORMAT');
+  return {keyId: envelope.keyId, nonce: base64(envelope.nonce, 12),
+    tag: base64(envelope.authTag, 16), ciphertext: base64(envelope.ciphertext)};
+}
+function nativeStorage() {
+  try {
+    const storage = process._linkedBinding('electron_browser_workbuddy_storage');
+    if (typeof storage.loggerGet !== 'function') failure('RUNTIME_UNAVAILABLE');
+    return storage;
+  } catch (_) { failure('RUNTIME_UNAVAILABLE'); }
+}
+function decrypt(envelope) {
+  let payload;
+  try { payload = JSON.parse(nativeStorage().loggerGet()); }
+  catch (_) { failure('RUNTIME_UNAVAILABLE'); }
+  let key;
+  let plaintext;
+  try {
+    if (!object(payload) || payload.version !== 1) failure('RUNTIME_UNAVAILABLE');
+    let secret;
+    try { secret = base64(payload.atRestSecretKey, 32); }
+    catch (_) { failure('RUNTIME_UNAVAILABLE'); }
+    const empty = secret.every(b => b === 0);
+    secret.fill(0);
+    if (empty) failure('RUNTIME_UNAVAILABLE');
+    key = crypto.createHash('sha256').update(payload.atRestSecretKey, 'utf8').digest();
+    payload = null;
+    if (crypto.createHash('sha256').update(key).digest('hex').slice(0, 16) !== envelope.keyId)
+      failure('KEY_MISMATCH');
+    const lp = s => {
+      const bytes = Buffer.from(s, 'utf8');
+      const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
+      return Buffer.concat([length, bytes]);
+    };
+    const aad = Buffer.concat([Buffer.from('WB-AAD\0', 'ascii'), Buffer.from([1]),
+      lp('WBEV1'), lp('sym-v1'), Buffer.from([0, 0, 0, 1]), lp(envelope.keyId), Buffer.from([2, 0, 0])]);
+    try {
+      const cipher = crypto.createDecipheriv('aes-256-gcm', key, envelope.nonce, {authTagLength: 16});
+      cipher.setAAD(aad); cipher.setAuthTag(envelope.tag);
+      plaintext = Buffer.concat([cipher.update(envelope.ciphertext), cipher.final()]);
+    } catch (_) { failure('DECRYPT_FAILED'); }
+    const token = utf8(plaintext);
+    if (!token.length || token.length > 32768 || !/^[A-Za-z0-9._~+\/-]+=*$/.test(token))
+      failure('INVALID_FORMAT');
+    return token;
+  } finally {
+    if (key) key.fill(0);
+    if (plaintext) plaintext.fill(0);
+  }
+}
+let chunks = [], size = 0;
+function reply(value) {
+  process.stdout.write(JSON.stringify({version: 1, ...value}), () => process.exit(value.ok ? 0 : 1));
+}
+process.stdin.on('data', chunk => {
+  size += chunk.length;
+  if (size > inputLimit) reply({ok: false, reason: 'INVALID_FORMAT'});
+  else chunks.push(chunk);
+});
+process.stdin.on('error', () => reply({ok: false, reason: 'HELPER_PROTOCOL'}));
+process.stdin.on('end', () => {
+  try {
+    const request = JSON.parse(utf8(Buffer.concat(chunks))); chunks = [];
+    if (!object(request) || request.version !== 1) failure('HELPER_PROTOCOL');
+    if (request.operation === 'probe') {
+      nativeStorage();
+      if (!crypto.getCiphers().includes('aes-256-gcm')) failure('RUNTIME_UNAVAILABLE');
+      reply({ok: true, electron: process.versions.electron || 'unknown'});
+    } else if (request.operation === 'decrypt') {
+      reply({ok: true, accessToken: decrypt(decode(request.value))});
+    } else failure('HELPER_PROTOCOL');
+  } catch (e) {
+    const reasons = ['INVALID_FORMAT','UNSUPPORTED_ENVELOPE','RUNTIME_UNAVAILABLE',
+      'KEY_MISMATCH','DECRYPT_FAILED','HELPER_PROTOCOL'];
+    reply({ok: false, reason: reasons.includes(e.reason) ? e.reason : 'HELPER_PROTOCOL'});
+  }
+});
+"""
+
+class CredentialError(Exception):
+    def __init__(self, reason, message=None):
+        self.reason = reason
+        self.message = message or AUTH_REASONS.get(reason, f"认证错误: {reason}")
+        super().__init__(self.message)
+
+def is_valid_token_string(token):
+    return (
+        isinstance(token, str)
+        and 0 < len(token) <= TOKEN_LIMIT
+        and re.fullmatch(r"[A-Za-z0-9._~+\/-]+=*", token) is not None
+    )
+
+def is_encrypted_credential(value):
+    return (
+        isinstance(value, dict)
+        and value.get("$wbEncrypted") == 1
+        and "envelope" in value
+    )
+
+def check_token_format(value):
+    """
+    检查 token 格式:
+    - 'plaintext' (有效字符串)
+    - 'sym-v1' (有效 suite 1 加密信封)
+    - 'unsupported' (不支持的加密格式)
+    - 'malformed' (格式损坏)
+    - 'missing' (空值)
+    """
+    if value is None:
+        return "missing"
+    if isinstance(value, str):
+        return "plaintext" if is_valid_token_string(value) else "malformed"
+    if isinstance(value, dict):
+        if set(value.keys()) != {"$wbEncrypted", "envelope"} or value.get("$wbEncrypted") != 1:
+            return "unsupported"
+        encoded = value.get("envelope")
+        if not isinstance(encoded, str) or not (0 < len(encoded) <= AUTH_INPUT_LIMIT - 1024):
+            return "malformed"
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+            if base64.b64encode(raw).decode("ascii") != encoded:
+                return "malformed"
+            envelope = json.loads(raw.decode("utf-8"))
+            if not isinstance(envelope, dict):
+                return "malformed"
+            suite = envelope.get("suite")
+            if suite != 1:
+                return "unsupported"
+            if set(envelope.keys()) != {"suite", "keyId", "nonce", "authTag", "ciphertext"}:
+                return "malformed"
+            if not isinstance(envelope.get("keyId"), str) or not re.fullmatch(r"[0-9a-f]{16}", envelope["keyId"]):
+                return "malformed"
+            for field, length in (("nonce", 12), ("authTag", 16), ("ciphertext", None)):
+                data = envelope.get(field)
+                if not isinstance(data, str):
+                    return "malformed"
+                dec = base64.b64decode(data, validate=True)
+                if base64.b64encode(dec).decode("ascii") != data or (length is not None and len(dec) != length):
+                    return "malformed"
+            return "sym-v1"
+        except Exception:
+            return "malformed"
+    return "malformed"
+
+def find_workbuddy_runtime():
+    """
+    定位本机 WorkBuddy 可执行文件/运行时路径。
+    优先读取 WORKBUDDY_EXE 环境变量，其次按操作系统探测标准安装路径。
+    """
+    override = os.environ.get("WORKBUDDY_EXE")
+    if override:
+        path = os.path.abspath(os.path.expanduser(override))
+        if os.path.isfile(path) and (sys.platform == "win32" or os.access(path, os.X_OK)):
+            return path
+        raise CredentialError("INVALID_RUNTIME_PATH")
+
+    candidates = []
+    if sys.platform == "darwin":
+        for root in ("/Applications", os.path.expanduser("~/Applications")):
+            app_bundle = os.path.join(root, "WorkBuddy.app")
+            plist_path = os.path.join(app_bundle, "Contents", "Info.plist")
+            if os.path.exists(plist_path):
+                exe_name = "Electron"
+                try:
+                    import plistlib
+                    with open(plist_path, "rb") as f:
+                        info = plistlib.load(f)
+                        exe_name = info.get("CFBundleExecutable", "Electron")
+                except Exception:
+                    pass
+                candidates.append(os.path.join(app_bundle, "Contents", "MacOS", exe_name))
+            candidates.append(os.path.join(app_bundle, "Contents", "MacOS", "Electron"))
+    elif sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+        candidates.append(os.path.join(local, "Programs", "WorkBuddy", "WorkBuddy.exe"))
+        candidates.append(os.path.join(local, "Programs", "workbuddy", "WorkBuddy.exe"))
+        for pvar in ("ProgramFiles", "ProgramFiles(x86)"):
+            pval = os.environ.get(pvar)
+            if pval:
+                candidates.append(os.path.join(pval, "WorkBuddy", "WorkBuddy.exe"))
+        which_exe = shutil.which("WorkBuddy.exe") or shutil.which("workbuddy.exe")
+        if which_exe:
+            candidates.append(which_exe)
+    else:  # Linux
+        which_wb = shutil.which("workbuddy")
+        if which_wb:
+            candidates.append(which_wb)
+        candidates.extend([
+            "/opt/WorkBuddy/workbuddy",
+            "/opt/workbuddy/workbuddy",
+            os.path.expanduser("~/.local/bin/workbuddy")
+        ])
+
+    for p in candidates:
+        if p and os.path.isfile(p) and (sys.platform == "win32" or os.access(p, os.X_OK)):
+            return os.path.abspath(p)
+
+    raise CredentialError("RUNTIME_NOT_FOUND")
+
+def run_native_resolver(runtime_exe, request_payload):
+    """
+    通过子进程与 WorkBuddy 运行时进行安全通信。
+    采用标准输入/输出流管道传递请求与结果，不产生临时文件，绝不在异常中回显凭据。
+    """
+    data = json.dumps(dict(request_payload, version=1), ensure_ascii=True).encode("ascii")
+    if len(data) > AUTH_INPUT_LIMIT:
+        raise CredentialError("INVALID_FORMAT")
+
+    # 屏蔽外部 Node/Electron 注入环境变量，开启 ELECTRON_RUN_AS_NODE
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if not k.upper().startswith(("NODE_", "ELECTRON_", "WORKBUDDY_"))
+    }
+    clean_env["ELECTRON_RUN_AS_NODE"] = "1"
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+
+    try:
+        proc = subprocess.Popen(
+            [runtime_exe, "-e", AUTH_HELPER_JS],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=clean_env,
+            shell=False,
+            creationflags=creationflags
+        )
+    except OSError:
+        raise CredentialError("RUNTIME_UNAVAILABLE")
+
+    try:
+        stdout_data, stderr_data = proc.communicate(input=data, timeout=AUTH_HELPER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise CredentialError("HELPER_TIMEOUT")
+
+    if len(stdout_data) > AUTH_OUTPUT_LIMIT:
+        raise CredentialError("HELPER_PROTOCOL")
+
+    try:
+        reply = json.loads(stdout_data.decode("utf-8"))
+    except Exception:
+        raise CredentialError("HELPER_PROTOCOL")
+
+    if not isinstance(reply, dict) or reply.get("version") != 1:
+        raise CredentialError("HELPER_PROTOCOL")
+
+    if not reply.get("ok"):
+        reason = reply.get("reason", "HELPER_PROTOCOL")
+        raise CredentialError(reason if reason in AUTH_REASONS else "HELPER_PROTOCOL")
+
+    if proc.returncode != 0:
+        raise CredentialError("HELPER_PROTOCOL")
+
+    return reply
+
+def resolve_credential_field(raw_value, field_name="accessToken"):
+    """
+    解析凭据字段为明文字符串：
+    - Case 1: 明文字符串 -> 直接返回
+    - Case 2: $wbEncrypted 加密信封 -> 调用 WorkBuddy 本地运行时解密，返回纯内存 Token
+    - Case 3: 损坏或不受支持格式 -> Fail closed (抛出 CredentialError)
+    - Case 4: 运行时不可用 -> Fail closed (抛出 CredentialError)
+    """
+    fmt = check_token_format(raw_value)
+    if fmt == "plaintext":
+        return raw_value
+    elif fmt == "sym-v1":
+        runtime = find_workbuddy_runtime()
+        reply = run_native_resolver(runtime, {"operation": "decrypt", "value": raw_value})
+        resolved = reply.get("accessToken")
+        if not is_valid_token_string(resolved):
+            raise CredentialError("INVALID_FORMAT")
+        return resolved
+    elif fmt == "unsupported":
+        raise CredentialError("UNSUPPORTED_ENVELOPE")
+    else:
+        raise CredentialError("INVALID_FORMAT")
+
+def get_display_nickname(account_data, default_name=""):
+    """
+    提取安全的显示昵称，杜绝 dict.lower() crash。
+    fallback 顺序:
+    1. plaintext 昵称
+    2. 如果昵称是加密对象，尝试安全解密；失败则 fallback
+    3. account uin
+    4. account uid 前 8 位
+    5. default_name
+    """
+    if not isinstance(account_data, dict):
+        return str(default_name)
+
+    nick = account_data.get("nickname")
+    if isinstance(nick, str) and nick.strip():
+        return nick.strip()
+
+    if is_encrypted_credential(nick):
+        try:
+            resolved = resolve_credential_field(nick, field_name="nickname")
+            if isinstance(resolved, str) and resolved.strip():
+                return resolved.strip()
+        except Exception:
+            pass
+
+    uin = account_data.get("uin")
+    if uin not in (None, ""):
+        return str(uin)
+
+    uid = account_data.get("uid")
+    if uid not in (None, ""):
+        return str(uid)[:8]
+
+    return str(default_name)
+
 def get_active_account():
     if not os.path.exists(AUTH_FILE):
         return None
@@ -108,14 +475,16 @@ def get_profiles():
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    acc = data.get("account", {}) if isinstance(data, dict) else {}
+                    nick = get_display_nickname(acc, default_name=name)
                     profiles[name] = {
                         "path": fpath,
                         "data": data,
-                        "uid": data.get("account", {}).get("uid", ""),
-                        "nickname": data.get("account", {}).get("nickname", name),
-                        "uin": data.get("account", {}).get("uin", ""),
-                        "expiresAt": data.get("auth", {}).get("expiresAt", 0),
-                        "refreshExpiresAt": data.get("auth", {}).get("refreshExpiresAt", 0)
+                        "uid": acc.get("uid", "") if isinstance(acc, dict) else "",
+                        "nickname": nick,
+                        "uin": acc.get("uin", "") if isinstance(acc, dict) else "",
+                        "expiresAt": data.get("auth", {}).get("expiresAt", 0) if isinstance(data, dict) and isinstance(data.get("auth"), dict) else 0,
+                        "refreshExpiresAt": data.get("auth", {}).get("refreshExpiresAt", 0) if isinstance(data, dict) and isinstance(data.get("auth"), dict) else 0
                     }
             except Exception:
                 pass
@@ -214,31 +583,36 @@ def show_status():
     if not active_data:
         print(f"{COLOR_YELLOW}当前未检测到活跃的登录凭证。{COLOR_RESET}")
     else:
-        acc = active_data.get("account", {})
-        auth = active_data.get("auth", {})
-        uid = acc.get("uid", "")
-        nickname = acc.get("nickname", "未命名")
-        expires = format_timestamp(auth.get("expiresAt", 0))
-        refresh_expires = format_timestamp(auth.get("refreshExpiresAt", 0))
-        
+        acc = active_data.get("account", {}) if isinstance(active_data, dict) else {}
+        auth = active_data.get("auth", {}) if isinstance(active_data, dict) else {}
+        uid = acc.get("uid", "") if isinstance(acc, dict) else ""
+        nickname = get_display_nickname(acc, default_name="未命名")
+        raw_token = auth.get("accessToken") if isinstance(auth, dict) else None
+        token_fmt = check_token_format(raw_token)
+        expires = format_timestamp(auth.get("expiresAt", 0) if isinstance(auth, dict) else 0)
+        refresh_expires = format_timestamp(auth.get("refreshExpiresAt", 0) if isinstance(auth, dict) else 0)
+
         match_name = None
         for name, p in profiles.items():
             if p["uid"] == uid:
                 match_name = name
                 break
-        
+
         display_name = f"{nickname} ({match_name})" if match_name else nickname
         print(f"当前活跃账号: {COLOR_BOLD}{COLOR_GREEN}{display_name}{COLOR_RESET}")
         print(f"账号 UID    : {uid}")
+        print(f"凭证存储格式: {token_fmt}")
         print(f"Token 有效期: {expires}")
         print(f"刷新令牌过期: {refresh_expires}")
 
     print(f"\n已保存的账号凭证库 ({len(profiles)} 个):")
     for name, p in profiles.items():
-        is_active = active_data and active_data.get("account", {}).get("uid") == p["uid"]
+        is_active = active_data and isinstance(active_data, dict) and active_data.get("account", {}).get("uid") == p["uid"]
         tag = f"{COLOR_GREEN}[当前活动]{COLOR_RESET}" if is_active else "         "
         masked_uid = f"{p['uid'][:8]}..." if len(p["uid"]) > 8 else p["uid"]
-        print(f" {tag} • {COLOR_BOLD}{name:<12}{COLOR_RESET} 昵称: {p['nickname']} (UID: {masked_uid}) 有效期至: {format_timestamp(p['expiresAt'])}")
+        p_tok = p["data"].get("auth", {}).get("accessToken") if isinstance(p.get("data"), dict) and isinstance(p["data"].get("auth"), dict) else None
+        p_fmt = check_token_format(p_tok)
+        print(f" {tag} • {COLOR_BOLD}{name:<12}{COLOR_RESET} 昵称: {p['nickname']} (UID: {masked_uid}) [{p_fmt}] 有效期至: {format_timestamp(p['expiresAt'])}")
     print()
 
 def restart_workbuddy():
@@ -377,6 +751,9 @@ def send_chat_message(token, uid, prompt="请回复：你好", model=None, timeo
     通过底层原生 HTTP SSE 接口向指定账号发送对话，触发每日连续对话奖励。
     优先免费/最低倍率模型，遇异常自动向下 fallback。
     """
+    if not isinstance(token, str) or not is_valid_token_string(token):
+        return {"success": False, "error": "AUTH_CREDENTIAL_UNRESOLVED: Token 非有效字符串"}
+
     models_to_try = [model] if model else PREFERRED_CHAT_MODELS
     last_err = None
 
@@ -394,7 +771,7 @@ def send_chat_message(token, uid, prompt="请回复：你好", model=None, timeo
                 "Content-Type": "application/json",
                 "Accept": "text/event-stream",
                 "Authorization": f"Bearer {token}",
-                "X-User-Id": uid,
+                "X-User-Id": str(uid),
                 "User-Agent": "WorkBuddy/5.5.3"
             }
         )
@@ -450,8 +827,8 @@ def run_chat(target_name=None, prompt="请回复：你好", model=None, send_all
             prompt = target_name
         active_data = get_active_account()
         if active_data:
-            uid = active_data.get("account", {}).get("uid", "")
-            nick = active_data.get("account", {}).get("nickname", "active")
+            uid = active_data.get("account", {}).get("uid", "") if isinstance(active_data, dict) and isinstance(active_data.get("account"), dict) else ""
+            nick = get_display_nickname(active_data.get("account", {}) if isinstance(active_data, dict) else {}, default_name="active")
             targets["active"] = {
                 "data": active_data,
                 "uid": uid,
@@ -470,15 +847,28 @@ def run_chat(target_name=None, prompt="请回复：你好", model=None, send_all
 
     for name, p in targets.items():
         data = p["data"]
-        token = data.get("auth", {}).get("accessToken")
+        raw_token = data.get("auth", {}).get("accessToken") if isinstance(data, dict) and isinstance(data.get("auth"), dict) else None
         uid = p["uid"]
         nickname = p["nickname"]
 
-        if not token or not uid:
-            print(f" {COLOR_YELLOW}• {name:<12}{COLOR_RESET} [昵称: {nickname}] 缺少有效 Token，跳过")
+        if not raw_token or not uid:
+            print(f" {COLOR_YELLOW}• {name:<12}{COLOR_RESET} [昵称: {nickname}] 缺少有效 Token 或 UID，跳过")
             continue
 
-        res = send_chat_message(token, uid, prompt=prompt, model=model)
+        try:
+            token = resolve_credential_field(raw_token, field_name="accessToken")
+        except CredentialError as ce:
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析失败: {ce.message}")
+            continue
+        except Exception as e:
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析异常: {e}")
+            continue
+
+        if not isinstance(token, str) or not is_valid_token_string(token):
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据无法解析为有效令牌，跳过")
+            continue
+
+        res = send_chat_message(token, str(uid), prompt=prompt, model=model)
         if res.get("success"):
             rep = res["reply"]
             print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] 模型: {res['model']} -> {COLOR_BOLD}{rep}{COLOR_RESET}")
@@ -542,10 +932,10 @@ def run_checkin(target_name=None, with_chat=True):
 
     # 自动发现：如果当前客户端登录了一个尚未保存到 profiles 的新账号，自动识别并保存入库
     if active_data:
-        active_uid = active_data.get("account", {}).get("uid")
+        active_uid = active_data.get("account", {}).get("uid") if isinstance(active_data, dict) and isinstance(active_data.get("account"), dict) else None
         if active_uid and not any(p["uid"] == active_uid for p in profiles.values()):
-            nickname = active_data.get("account", {}).get("nickname") or active_data.get("account", {}).get("uin") or active_uid[:8]
-            clean_name = re.sub(r"[^\w\-]", "_", str(nickname)).strip("_") or active_uid[:8]
+            nickname = get_display_nickname(active_data.get("account", {}) if isinstance(active_data, dict) else {}, default_name=str(active_uid)[:8])
+            clean_name = re.sub(r"[^\w\-]", "_", str(nickname)).strip("_") or str(active_uid)[:8]
             cand = clean_name
             idx = 1
             while os.path.exists(os.path.join(PROFILES_DIR, f"{cand}.info")):
@@ -582,19 +972,32 @@ def run_checkin(target_name=None, with_chat=True):
 
     for name, p in targets.items():
         data = p["data"]
-        token = data.get("auth", {}).get("accessToken")
+        raw_token = data.get("auth", {}).get("accessToken") if isinstance(data, dict) and isinstance(data.get("auth"), dict) else None
         uid = p["uid"]
         nickname = p["nickname"]
 
-        if not token or not uid:
-            print(f" {COLOR_YELLOW}• {name:<12}{COLOR_RESET} [昵称: {nickname}] 缺少有效 Token，跳过")
+        if not raw_token or not uid:
+            print(f" {COLOR_YELLOW}• {name:<12}{COLOR_RESET} [昵称: {nickname}] 缺少有效 Token 或 UID，跳过")
+            continue
+
+        try:
+            token = resolve_credential_field(raw_token, field_name="accessToken")
+        except CredentialError as ce:
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析失败: {ce.message}")
+            continue
+        except Exception as e:
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析异常: {e}")
+            continue
+
+        if not isinstance(token, str) or not is_valid_token_string(token):
+            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据无法解析为有效令牌，跳过")
             continue
 
         base_headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Authorization": f"Bearer {token}",
-            "X-User-Id": uid,
+            "X-User-Id": str(uid),
             "User-Agent": "WorkBuddy/5.5.3"
         }
 
@@ -657,7 +1060,7 @@ def run_checkin(target_name=None, with_chat=True):
 
         # 3. 自动触发每日连续对话任务 (获取每日连续对话奖励)
         if with_chat:
-            chat_res = send_chat_message(token, uid, prompt="请回复：你好")
+            chat_res = send_chat_message(token, str(uid), prompt="请回复：你好")
             if chat_res.get("success"):
                 rep = chat_res["reply"].replace("\n", " ").strip()
                 if len(rep) > 30:
@@ -722,9 +1125,9 @@ def save_current(name):
     if not active_data:
         print(f"{COLOR_RED}错误: 当前没有检测到已登录的 WorkBuddy 凭证。{COLOR_RESET}")
         return
-    acc = active_data.get("account", {})
-    nickname = acc.get("nickname", name)
-    uid = acc.get("uid", "")
+    acc = active_data.get("account", {}) if isinstance(active_data, dict) else {}
+    nickname = get_display_nickname(acc, default_name=name)
+    uid = acc.get("uid", "") if isinstance(acc, dict) else ""
     os.makedirs(PROFILES_DIR, exist_ok=True)
     target_path = os.path.join(PROFILES_DIR, f"{name}.info")
     with open(target_path, "w", encoding="utf-8") as f:
@@ -732,24 +1135,122 @@ def save_current(name):
     if sys.platform != "win32":
         os.chmod(target_path, 0o600)
     print(f"{COLOR_GREEN}✔ 当前登录态已成功保存为 Profile: '{name}' (昵称: {nickname}, UID: {uid}){COLOR_RESET}")
-    print(f"{COLOR_GREEN}  后续切换到该账号将永久无需重新扫码！{COLOR_RESET}")
+    print(f"{COLOR_GREEN}  凭证已按原生格式保存（保持加密格式，解密仅在内存中执行）。{COLOR_RESET}")
+
+def run_doctor():
+    """
+    诊断 WorkBuddy Toolkit 与当前环境及凭据格式的兼容性。
+    不打印任何明文 Token、密钥或完整信封。
+    """
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy Toolkit Doctor ==={COLOR_RESET}\n")
+
+    auth_exists = os.path.exists(AUTH_FILE)
+    auth_status = f"{COLOR_GREEN}OK{COLOR_RESET}" if auth_exists else f"{COLOR_YELLOW}MISSING{COLOR_RESET}"
+    print(f"Auth file             : {auth_status} ({AUTH_FILE})")
+
+    active_data = get_active_account()
+    raw_token = active_data.get("auth", {}).get("accessToken") if isinstance(active_data, dict) and isinstance(active_data.get("auth"), dict) else None
+
+    token_fmt = check_token_format(raw_token)
+    if not auth_exists or not active_data or raw_token is None:
+        fmt_display = "none"
+        scheme_display = "none"
+    elif token_fmt == "plaintext":
+        fmt_display = "plaintext"
+        scheme_display = "none"
+    elif token_fmt == "sym-v1":
+        fmt_display = "encrypted"
+        scheme_display = "detected (sym-v1 / suite 1)"
+    elif token_fmt == "unsupported":
+        fmt_display = "encrypted (unsupported suite)"
+        scheme_display = "unknown"
+    else:
+        fmt_display = "unknown"
+        scheme_display = "unknown"
+
+    print(f"Credential format     : {fmt_display}")
+    print(f"Encrypted scheme      : {scheme_display}")
+
+    runtime_path = None
+    runtime_found = False
+    try:
+        runtime_path = find_workbuddy_runtime()
+        runtime_found = True
+        rt_status = f"{COLOR_GREEN}FOUND{COLOR_RESET} ({runtime_path})"
+    except CredentialError as e:
+        rt_status = f"{COLOR_RED}MISSING{COLOR_RESET} ({e.message})"
+    except Exception as e:
+        rt_status = f"{COLOR_RED}MISSING{COLOR_RESET} ({e})"
+
+    print(f"WorkBuddy runtime     : {rt_status}")
+
+    resolver_avail = False
+    if runtime_found:
+        try:
+            probe = run_native_resolver(runtime_path, {"operation": "probe"})
+            if probe.get("ok"):
+                resolver_avail = True
+                electron_ver = probe.get("electron", "unknown")
+                res_status = f"{COLOR_GREEN}AVAILABLE{COLOR_RESET} (Electron {electron_ver})"
+            else:
+                res_status = f"{COLOR_RED}UNAVAILABLE{COLOR_RESET} ({probe.get('reason')})"
+        except CredentialError as e:
+            res_status = f"{COLOR_RED}UNAVAILABLE{COLOR_RESET} ({e.message})"
+        except Exception as e:
+            res_status = f"{COLOR_RED}UNAVAILABLE{COLOR_RESET} ({e})"
+    else:
+        res_status = f"{COLOR_YELLOW}UNAVAILABLE{COLOR_RESET}"
+
+    print(f"Credential resolver   : {res_status}")
+
+    profiles = get_profiles()
+    print(f"Profile count         : {len(profiles)}")
+
+    # 判断 API capability
+    api_ready = False
+    if token_fmt == "plaintext":
+        api_ready = True
+    elif token_fmt == "sym-v1" and resolver_avail:
+        api_ready = True
+    elif not auth_exists and profiles:
+        all_ok = True
+        for p in profiles.values():
+            p_tok = p["data"].get("auth", {}).get("accessToken") if isinstance(p.get("data"), dict) and isinstance(p["data"].get("auth"), dict) else None
+            p_fmt = check_token_format(p_tok)
+            if p_fmt == "sym-v1" and not resolver_avail:
+                all_ok = False
+            elif p_fmt in ("unsupported", "malformed"):
+                all_ok = False
+        api_ready = all_ok and len(profiles) > 0
+
+    api_status = f"{COLOR_GREEN}READY{COLOR_RESET}" if api_ready else f"{COLOR_RED}BLOCKED{COLOR_RESET}"
+    print(f"API capability        : {api_status}")
+
+    # RESULT: COMPATIBLE 或 INCOMPATIBLE
+    is_compatible = api_ready or (not auth_exists and not profiles)
+    result_text = f"{COLOR_BOLD}{COLOR_GREEN}COMPATIBLE{COLOR_RESET}" if is_compatible else f"{COLOR_BOLD}{COLOR_RED}INCOMPATIBLE{COLOR_RESET}"
+    print(f"\nRESULT: {result_text}\n")
+    return is_compatible
 
 def print_help():
     print(f"""
 {COLOR_BOLD}WorkBuddy 账号切换与自动化管理工具 (workbuddy CLI v{VERSION}){COLOR_RESET}
 
-核心优势:
-  ★ 每个账号仅需首次扫码登录一次并 save，后续随时任意切换，永久无需微信反复扫码！
+核心特性:
+  ★ 免重新扫码账号切换：保存已验证凭证 Profile，切号即时生效。
+  ★ 原生加密兼容支持：完整兼容 WorkBuddy 5.6+ 敏感字段加密格式 ($wbEncrypted)。
   ★ 每日打卡与每日连续对话任务联动：一次打卡自动获得积分与连续对话活跃奖励！
+  ★ 状态深度自检：自带 doctor 命令，快速诊断本地解密运行时与 API 就绪能力。
 
 用法:
   workbuddy switch [账号名]       切换到指定账号（省略参数则进入交互式菜单）
   workbuddy checkin [账号名]      自动执行每日签到与每日连续对话（默认遍历所有已存账号）
   workbuddy chat [提示词]         向当前活跃账号发送对话（智能优先免费/最低倍率模型）
   workbuddy chat --all [提示词]   对所有已保存账号批量发送对话，维持连续对话奖励
-  workbuddy status              查看当前登录账号状态及 Token 有效期
+  workbuddy doctor              检查当前凭据格式、本地解密运行时及兼容状态
+  workbuddy status              查看当前登录账号状态及凭据格式
   workbuddy list                列出本地已保存的所有账号凭证
-  workbuddy save <账号别名>       将当前活跃的登录态保存为一个新账号 Profile (后续永久免扫码)
+  workbuddy save <账号别名>       将当前活跃的登录态保存为一个新账号 Profile
   workbuddy init                一键对本地数据库打补丁，实现全账号工作区共享
   workbuddy rollback            移除共享触发器，恢复官方默认数据隔离
   workbuddy restart             重启 WorkBuddy 客户端
@@ -758,9 +1259,11 @@ def print_help():
   wb-switch [账号名]
   wb-checkin [账号名]
   wb-chat [提示词]
+  wb-doctor
   workbuddy-switch [账号名]
   workbuddy-checkin [账号名]
   workbuddy-chat [提示词]
+  workbuddy-doctor
 """)
 
 def main():
@@ -768,6 +1271,9 @@ def main():
     args = sys.argv[1:]
 
     # 如果通过快捷别名调用
+    if "doctor" in prog_name:
+        ok = run_doctor()
+        sys.exit(0 if ok else 1)
     if "chat" in prog_name:
         parse_and_run_chat(args)
         return
@@ -789,7 +1295,10 @@ def main():
         return
 
     cmd = args[0].lower()
-    if cmd in ["switch", "use"]:
+    if cmd in ["doctor", "check", "diag", "diagnose"]:
+        ok = run_doctor()
+        sys.exit(0 if ok else 1)
+    elif cmd in ["switch", "use"]:
         if len(args) > 1:
             switch_to_profile(args[1], auto_restart=True)
         else:

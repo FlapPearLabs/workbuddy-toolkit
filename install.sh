@@ -33,7 +33,9 @@ ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-checkin"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-checkin"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-chat"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-chat"
-echo "   ✔ 已安装: workbuddy, wb-switch, wb-checkin, wb-chat"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-doctor"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-doctor"
+echo "   ✔ 已安装: workbuddy, wb-switch, wb-checkin, wb-chat, wb-doctor"
 
 # 3. 检查 PATH
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
