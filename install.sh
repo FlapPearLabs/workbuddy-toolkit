@@ -86,7 +86,7 @@ fi
 if [ -d "$HOME/.gemini" ]; then
     echo "4. 正在配置 Antigravity Scheduled Tasks 侧边栏任务..."
     mkdir -p "$SIDECAR_DIR"
-    cp "$SCRIPT_DIR/sidecar/sidecar.json" "$SIDECAR_DIR/sidecar.json"
+    sed -e "s|{{BIN_PATH}}|$INSTALL_BIN/workbuddy|g" -e "s|{{HOME}}|$HOME|g" "$SCRIPT_DIR/sidecar/sidecar.json" > "$SIDECAR_DIR/sidecar.json"
     echo "   ✔ Sidecar 已配置，可在 Antigravity UI 的 Scheduled Tasks 查看"
 fi
 

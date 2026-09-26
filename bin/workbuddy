@@ -969,6 +969,16 @@ def parse_and_run_chat(args):
 
     run_chat(target_name=target_name, prompt=prompt, model=model, send_all=send_all)
 
+def notify_desktop(title, message):
+    if sys.platform == "darwin":
+        try:
+            safe_title = str(title).replace('"', '\\"')
+            safe_msg = str(message).replace('"', '\\"')
+            script = f'display notification "{safe_msg}" with title "{safe_title}"'
+            subprocess.run(["osascript", "-e", script], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
 def run_checkin(target_name=None, with_chat=True):
     sync_active_token_to_profiles()
     active_data = get_active_account()
@@ -1014,6 +1024,10 @@ def run_checkin(target_name=None, with_chat=True):
 
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 自动每日签到与连续对话 ({len(targets)} 个账号) ==={COLOR_RESET}")
 
+    checked_already = 0
+    new_checked = 0
+    failed = 0
+
     for name, p in targets.items():
         data = p["data"]
         raw_token = data.get("auth", {}).get("accessToken") if isinstance(data, dict) and isinstance(data.get("auth"), dict) else None
@@ -1022,19 +1036,23 @@ def run_checkin(target_name=None, with_chat=True):
 
         if not raw_token or not uid:
             print(f" {COLOR_YELLOW}• {name:<12}{COLOR_RESET} [昵称: {nickname}] 缺少有效 Token 或 UID，跳过")
+            failed += 1
             continue
 
         try:
             token = resolve_credential_field(raw_token, field_name="accessToken")
         except CredentialError as ce:
             print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析失败: {ce.message}")
+            failed += 1
             continue
         except Exception as e:
             print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析异常: {e}")
+            failed += 1
             continue
 
         if not isinstance(token, str) or not is_valid_token_string(token):
             print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据无法解析为有效令牌，跳过")
+            failed += 1
             continue
 
         base_headers = {
@@ -1057,10 +1075,12 @@ def run_checkin(target_name=None, with_chat=True):
                 status_res = json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 查询签到状态失败: {e}")
+            failed += 1
             continue
 
         if status_res.get("code") != 0:
             print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 接口错误: {status_res.get('msg')}")
+            failed += 1
             continue
 
         status_data = status_res.get("data", {})
@@ -1069,6 +1089,7 @@ def run_checkin(target_name=None, with_chat=True):
         total_credits = status_data.get("total_credits", 0)
 
         if today_checked_in:
+            checked_already += 1
             print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}今日已签到{COLOR_RESET} | 连续 {streak_days} 天 | 累计签到奖励 {total_credits} 积分")
         else:
             # 2. 执行签到领取
@@ -1082,11 +1103,13 @@ def run_checkin(target_name=None, with_chat=True):
                 with urllib.request.urlopen(claim_req, timeout=10) as resp:
                     claim_res = json.loads(resp.read().decode("utf-8"))
                     if claim_res.get("code") == 0:
+                        new_checked += 1
                         cd = claim_res.get("data", {})
                         credit = cd.get("credit", 100)
                         new_streak = cd.get("streak_days", streak_days + 1)
                         print(f" {COLOR_GREEN}🎉 {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_BOLD}{COLOR_GREEN}签到成功！+{credit} 积分{COLOR_RESET} | 连续签到 {new_streak} 天")
                     else:
+                        failed += 1
                         print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {claim_res.get('msg')}")
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode("utf-8", errors="ignore")
@@ -1096,10 +1119,13 @@ def run_checkin(target_name=None, with_chat=True):
                 except Exception:
                     msg = err_body
                 if "已签到" in msg:
+                    checked_already += 1
                     print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
                 else:
+                    failed += 1
                     print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到失败 ({e.code}): {msg}")
             except Exception as e:
+                failed += 1
                 print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}")
 
         # 3. 自动触发每日连续对话任务 (获取每日连续对话奖励)
@@ -1114,6 +1140,17 @@ def run_checkin(target_name=None, with_chat=True):
                 print(f"    💬 {COLOR_YELLOW}[每日对话]{COLOR_RESET} 触发未成功: {chat_res.get('error')}")
 
     print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}\n")
+
+    if sys.platform == "darwin" and targets:
+        summary_parts = []
+        if new_checked:
+            summary_parts.append(f"{new_checked}个新签到成功")
+        if checked_already:
+            summary_parts.append(f"{checked_already}个今日已签")
+        if failed:
+            summary_parts.append(f"{failed}个失败")
+        summary_text = "，".join(summary_parts) if summary_parts else "签到完成"
+        notify_desktop("WorkBuddy 每日签到", f"共 {len(targets)} 个账号：{summary_text}")
 
 def interactive_menu():
     profiles = get_profiles()

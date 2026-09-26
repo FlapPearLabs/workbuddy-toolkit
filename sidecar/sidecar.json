@@ -1,14 +1,12 @@
 {
   "display_name": "WorkBuddy 每日多账号自动签到",
-  "description": "每天早晨 09:00 自动执行 WorkBuddy 多账号统一签到领积分并汇报",
+  "description": "每天早晨 09:00 自动执行 WorkBuddy 多账号统一签到领积分并发送桌面通知",
   "builtin": "schedule",
   "args": [
     "0 9 * * *",
-    "agentapi",
-    "new-conversation",
-    "--title=WorkBuddy 每日自动签到",
-    "请执行 WorkBuddy 自动签到任务：运行 wb-checkin，检查并汇报所有账号的今日签到结果与累计积分。"
+    "/usr/bin/python3",
+    "{{BIN_PATH}}",
+    "checkin"
   ],
-  "initial_prompt": "请执行 WorkBuddy 自动签到任务：运行 wb-checkin，检查并汇报所有账号的今日签到结果与累计积分。",
   "restart_policy": "always"
 }

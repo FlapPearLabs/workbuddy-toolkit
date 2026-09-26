@@ -222,14 +222,17 @@ def setup_scheduler(bin_path, bin_dir):
             except Exception as e:
                 print(f"{COLOR_YELLOW}   [提示] 未配置系统定时器，您可随时运行 wb-checkin 手动打卡。{COLOR_RESET}")
 
-def setup_sidecar():
+def setup_sidecar(dest_bin):
     gemini_dir = os.path.join(HOME, ".gemini")
     if os.path.exists(gemini_dir):
         sidecar_dest = os.path.join(gemini_dir, "config", "sidecars", "workbuddy-checkin")
         sidecar_src = os.path.join(SCRIPT_DIR, "sidecar", "sidecar.json")
         if os.path.exists(sidecar_src):
             os.makedirs(sidecar_dest, exist_ok=True)
-            shutil.copy2(sidecar_src, os.path.join(sidecar_dest, "sidecar.json"))
+            with open(sidecar_src, "r", encoding="utf-8") as f:
+                content = f.read().replace("{{BIN_PATH}}", dest_bin).replace("{{HOME}}", HOME)
+            with open(os.path.join(sidecar_dest, "sidecar.json"), "w", encoding="utf-8") as f:
+                f.write(content)
             print(f"{COLOR_GREEN}4. ✔ Antigravity 侧边栏任务伴随体已配置{COLOR_RESET}")
 
 def main():
@@ -238,7 +241,7 @@ def main():
     dest_bin, bin_dir = install_cli()
     init_db()
     setup_scheduler(dest_bin, bin_dir)
-    setup_sidecar()
+    setup_sidecar(dest_bin)
     print(f"\n{COLOR_BOLD}{COLOR_GREEN}========================================================{COLOR_RESET}")
     print(f"{COLOR_BOLD}{COLOR_GREEN}🎉 安装部署全部完成！{COLOR_RESET}")
     print(f"{COLOR_CYAN}常用命令指南:{COLOR_RESET}")
