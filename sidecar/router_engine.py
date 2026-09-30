@@ -80,6 +80,7 @@ def get_official_auth():
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+    allow_reuse_address = True
 
 class FailoverRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
