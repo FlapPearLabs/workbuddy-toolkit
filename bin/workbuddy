@@ -28,8 +28,8 @@ import base64
 import unicodedata
 from datetime import datetime
 
-VERSION = "0.3.1"
-PREFERRED_CHAT_MODELS = ["hy3", "deepseek-v4-flash", "auto", "glm-5v-turbo"]
+VERSION = "0.4.0"
+PREFERRED_CHAT_MODELS = ["hy3", "deepseek-v4.1-flash", "glm-5.3-flash", "auto", "glm-5v-turbo"]
 
 # Windows 控制台编码安全处理与 ANSI 颜色初始化
 if sys.platform == "win32":
@@ -1313,17 +1313,117 @@ def run_doctor():
     print(f"\nRESULT: {result_text}\n")
     return is_compatible
 
+def find_sidecar_dir():
+    candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sidecar")),
+        os.path.expanduser("~/.workbuddy/toolkit/sidecar"),
+        os.path.expanduser("~/.local/share/workbuddy/sidecar"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "sidecar"),
+        "/Users/songshiyao/.gemini/antigravity/scratch/workbuddy-toolkit/sidecar"
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return candidates[0]
+
+def run_models_cmd(args):
+    """调用模型全景资产、倍率透视与轻量终端选择器"""
+    sidecar_dir = find_sidecar_dir()
+    if sidecar_dir not in sys.path:
+        sys.path.insert(0, sidecar_dir)
+    import models_inventory
+    old_argv = sys.argv
+    try:
+        sys.argv = [sys.argv[0]] + list(args)
+        models_inventory.main()
+    finally:
+        sys.argv = old_argv
+
+def run_router_cmd(args):
+    """管理 WorkBuddy 容灾轮换路由服务 (status / start / stop / restart)"""
+    action = args[0].lower() if args else "status"
+    sidecar_dir = find_sidecar_dir()
+    if sidecar_dir not in sys.path:
+        sys.path.insert(0, sidecar_dir)
+    import router_engine
+
+    cfg_file = router_engine.DEFAULT_ROUTER_CONFIG
+    port = 8047
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                port = json.load(f).get("port", 8047)
+        except Exception:
+            pass
+
+    if action == "status":
+        print(f"\n{COLOR_BOLD}=== WorkBuddy Failover Router 状态 ==={COLOR_RESET}")
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/status")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                print(f"网关服务   : {COLOR_GREEN}运行中 (ONLINE){COLOR_RESET}")
+                print(f"监听端口   : {port}")
+                chain_str = " -> ".join(data.get("chain", [])) or "空 (请运行 wb-models 设置)"
+                print(f"容灾梯队   : {COLOR_CYAN}{chain_str}{COLOR_RESET}")
+                cooldowns = data.get("active_cooldowns", {})
+                if cooldowns:
+                    cd_str = ", ".join([f"{k} (剩 {v}s)" for k, v in cooldowns.items()])
+                    print(f"冷却中模型 : {COLOR_YELLOW}{cd_str}{COLOR_RESET}")
+                else:
+                    print(f"冷却中模型 : 无 (所有候选均健康就绪)")
+        except Exception:
+            print(f"网关服务   : {COLOR_RED}未运行 (OFFLINE){COLOR_RESET}")
+            print(f"提示: 可使用 'workbuddy router start' 启动，或配置 LaunchAgent 常驻运行。")
+        print()
+    elif action == "start":
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/health")
+            with urllib.request.urlopen(req, timeout=1) as resp:
+                print(f"{COLOR_YELLOW}Failover Router 已经在运行中 (http://127.0.0.1:{port}){COLOR_RESET}")
+                return
+        except Exception:
+            pass
+
+        plist_path = os.path.expanduser("~/Library/LaunchAgents/com.workbuddy.failover-router.plist")
+        if os.path.exists(plist_path):
+            subprocess.run(["launchctl", "load", "-w", plist_path], capture_output=True)
+            time.sleep(0.5)
+            print(f"{COLOR_GREEN}✔ 已通过 launchd 启动 Failover Router 常驻服务。{COLOR_RESET}")
+        else:
+            script_path = os.path.join(sidecar_dir, "router_engine.py")
+            subprocess.Popen([sys.executable, script_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.5)
+            print(f"{COLOR_GREEN}✔ 已在后台启动 Failover Router 服务 (端口: {port})。{COLOR_RESET}")
+    elif action == "stop":
+        plist_path = os.path.expanduser("~/Library/LaunchAgents/com.workbuddy.failover-router.plist")
+        if os.path.exists(plist_path):
+            subprocess.run(["launchctl", "unload", plist_path], capture_output=True)
+        subprocess.run(["pkill", "-f", "router_engine.py"], capture_output=True)
+        subprocess.run(["pkill", "-f", "failover-router"], capture_output=True)
+        print(f"{COLOR_GREEN}✔ Failover Router 服务已停止。{COLOR_RESET}")
+    elif action == "restart":
+        run_router_cmd(["stop"])
+        time.sleep(0.5)
+        run_router_cmd(["start"])
+    else:
+        print(f"用法: workbuddy router [status|start|stop|restart]")
+
 def print_help():
     print(f"""
 {COLOR_BOLD}WorkBuddy 账号切换与自动化管理工具 (workbuddy CLI v{VERSION}){COLOR_RESET}
 
 核心特性:
   ★ 免重新扫码账号切换：保存已验证凭证 Profile，切号即时生效。
-  ★ 原生加密兼容支持：完整兼容 WorkBuddy 5.6+ 敏感字段加密格式 ($wbEncrypted)。
+  ★ 模型全景资产与倍率透视：实时聚合官方倍率与三方模型，历史高频使用自动置顶。
+  ★ 容灾轮换路由 (Auto Pilot)：首包防挂起、429 秒级轮换、冷却熔断，保障长任务不断流。
   ★ 每日打卡与每日连续对话任务联动：一次打卡自动获得积分与连续对话活跃奖励！
   ★ 状态深度自检：自带 doctor 命令，快速诊断本地解密运行时与 API 就绪能力。
 
 用法:
+  workbuddy models [选项]         呼出模型全景资产与优先级轻量选择器 (TUI)
+                                  --list (文本清单) | --json | --smart-apply (一键智能生效)
+  workbuddy router [子命令]       管理容灾网关服务 (status / start / stop / restart)
   workbuddy switch [账号名]       切换到指定账号（省略参数则进入交互式菜单）
   workbuddy checkin [账号名]      自动执行每日签到与每日连续对话（默认遍历所有已存账号）
   workbuddy chat [提示词]         向当前活跃账号发送对话（智能优先免费/最低倍率模型）
@@ -1337,14 +1437,14 @@ def print_help():
   workbuddy restart             重启 WorkBuddy 客户端
 
 快捷别名:
+  wb-models [选项]
+  wb-router [子命令]
   wb-switch [账号名]
   wb-checkin [账号名]
   wb-chat [提示词]
   wb-doctor
-  workbuddy-switch [账号名]
-  workbuddy-checkin [账号名]
-  workbuddy-chat [提示词]
-  workbuddy-doctor
+  workbuddy-models
+  workbuddy-router
 """)
 
 def main():
@@ -1370,13 +1470,23 @@ def main():
         else:
             interactive_menu()
         return
+    if "model" in prog_name:
+        run_models_cmd(args)
+        return
+    if "router" in prog_name:
+        run_router_cmd(args)
+        return
 
     if not args:
         interactive_menu()
         return
 
     cmd = args[0].lower()
-    if cmd in ["doctor", "check", "diag", "diagnose"]:
+    if cmd in ["models", "model"]:
+        run_models_cmd(args[1:])
+    elif cmd in ["router"]:
+        run_router_cmd(args[1:])
+    elif cmd in ["doctor", "check", "diag", "diagnose"]:
         ok = run_doctor()
         sys.exit(0 if ok else 1)
     elif cmd in ["switch", "use"]:

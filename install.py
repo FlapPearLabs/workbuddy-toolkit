@@ -88,6 +88,26 @@ def install_cli():
             with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
                 f.write(cmd_doctor)
 
+        cmd_models = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" models %*\r\n"
+        for name in ["wb-models.cmd", "workbuddy-models.cmd"]:
+            with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
+                f.write(cmd_models)
+
+        cmd_router = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" router %*\r\n"
+        for name in ["wb-router.cmd", "workbuddy-router.cmd"]:
+            with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
+                f.write(cmd_router)
+
+        # 部署 Sidecar 伴随组件至 ~/.workbuddy/toolkit/sidecar
+        toolkit_dir = os.path.join(WORKBUDDY_DIR, "toolkit")
+        os.makedirs(toolkit_dir, exist_ok=True)
+        src_sidecar = os.path.join(SCRIPT_DIR, "sidecar")
+        dest_sidecar = os.path.join(toolkit_dir, "sidecar")
+        if os.path.exists(src_sidecar):
+            if os.path.exists(dest_sidecar):
+                shutil.rmtree(dest_sidecar)
+            shutil.copytree(src_sidecar, dest_sidecar)
+
         # 配置 Windows 用户 PATH 环境变量
         try:
             import winreg
@@ -106,13 +126,30 @@ def install_cli():
         print(f"{COLOR_GREEN}1. ✔ CLI 工具及 Windows 命令垫片已安装至: {bin_dir}{COLOR_RESET}")
         return dest_bin, bin_dir
     else:
+        # 部署 Sidecar 伴随组件至 ~/.workbuddy/toolkit/sidecar
+        toolkit_dir = os.path.join(WORKBUDDY_DIR, "toolkit")
+        os.makedirs(toolkit_dir, exist_ok=True)
+        src_sidecar = os.path.join(SCRIPT_DIR, "sidecar")
+        dest_sidecar = os.path.join(toolkit_dir, "sidecar")
+        if os.path.exists(src_sidecar):
+            if os.path.exists(dest_sidecar):
+                shutil.rmtree(dest_sidecar)
+            shutil.copytree(src_sidecar, dest_sidecar)
+
         bin_dir = os.path.join(HOME, ".local", "bin")
         os.makedirs(bin_dir, exist_ok=True)
         dest_bin = os.path.join(bin_dir, "workbuddy")
         shutil.copy2(src_bin, dest_bin)
         os.chmod(dest_bin, 0o755)
 
-        for alias in ["wb-switch", "workbuddy-switch", "wb-checkin", "workbuddy-checkin", "wb-chat", "workbuddy-chat", "wb-doctor", "workbuddy-doctor"]:
+        for alias in [
+            "wb-switch", "workbuddy-switch",
+            "wb-checkin", "workbuddy-checkin",
+            "wb-chat", "workbuddy-chat",
+            "wb-doctor", "workbuddy-doctor",
+            "wb-models", "workbuddy-models",
+            "wb-router", "workbuddy-router"
+        ]:
             link_path = os.path.join(bin_dir, alias)
             if os.path.islink(link_path) or os.path.exists(link_path):
                 try:
@@ -128,7 +165,7 @@ def install_cli():
         if bin_dir not in path_env:
             print(f"{COLOR_YELLOW}   [提示] {bin_dir} 暂不在当前 PATH 中，建议将其加入 ~/.bashrc 或 ~/.zshrc{COLOR_RESET}")
 
-        print(f"{COLOR_GREEN}1. ✔ CLI 工具已安装至: {bin_dir} (workbuddy, wb-switch, wb-checkin){COLOR_RESET}")
+        print(f"{COLOR_GREEN}1. ✔ CLI 工具已安装至: {bin_dir} (workbuddy, wb-models, wb-router, wb-switch, wb-checkin){COLOR_RESET}")
         return dest_bin, bin_dir
 
 def init_db():
@@ -163,10 +200,12 @@ def init_db():
         print(f"2. {COLOR_YELLOW}[跳过] 未检测到 {DB_FILE}，首次启动 WorkBuddy 后可运行 'workbuddy init' 打补丁。{COLOR_RESET}")
 
 def setup_scheduler(bin_path, bin_dir):
-    print(f"3. 正在配置系统级每日 09:00 定时自动打卡...")
+    print(f"3. 正在配置系统级调度与容灾路由常驻服务...")
     if sys.platform == "darwin":
         launch_dir = os.path.join(HOME, "Library", "LaunchAgents")
         os.makedirs(launch_dir, exist_ok=True)
+
+        # 每日签到 LaunchAgent
         plist_src = os.path.join(SCRIPT_DIR, "launchd", "com.workbuddy.dailycheckin.plist")
         plist_dest = os.path.join(launch_dir, "com.workbuddy.dailycheckin.plist")
         if os.path.exists(plist_src):
@@ -177,6 +216,18 @@ def setup_scheduler(bin_path, bin_dir):
             subprocess.run(["launchctl", "unload", plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             subprocess.run(["launchctl", "load", plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             print(f"{COLOR_GREEN}   ✔ macOS LaunchAgent 已激活 (每天 09:00 静默签到){COLOR_RESET}")
+
+        # 容灾路由 LaunchAgent (端口 8047)
+        router_plist_src = os.path.join(SCRIPT_DIR, "launchd", "com.workbuddy.failover-router.plist")
+        router_plist_dest = os.path.join(launch_dir, "com.workbuddy.failover-router.plist")
+        if os.path.exists(router_plist_src):
+            with open(router_plist_src, "r", encoding="utf-8") as f:
+                content = f.read().replace("{{HOME}}", HOME)
+            with open(router_plist_dest, "w", encoding="utf-8") as f:
+                f.write(content)
+            subprocess.run(["launchctl", "unload", router_plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            subprocess.run(["launchctl", "load", "-w", router_plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            print(f"{COLOR_GREEN}   ✔ macOS LaunchAgent 已激活 (Failover Router 容灾轮换路由 :8047){COLOR_RESET}")
     elif sys.platform == "win32":
         task_name = "WorkBuddyDailyCheckin"
         python_exe = sys.executable
@@ -245,6 +296,8 @@ def main():
     print(f"\n{COLOR_BOLD}{COLOR_GREEN}========================================================{COLOR_RESET}")
     print(f"{COLOR_BOLD}{COLOR_GREEN}🎉 安装部署全部完成！{COLOR_RESET}")
     print(f"{COLOR_CYAN}常用命令指南:{COLOR_RESET}")
+    print(f"  • {COLOR_BOLD}wb-models{COLOR_RESET}             : 呼出模型全景资产、倍率透视与轻量终端选择器 (TUI)")
+    print(f"  • {COLOR_BOLD}wb-router [status|start]{COLOR_RESET}: 管理容灾轮换路由网关服务")
     print(f"  • {COLOR_BOLD}wb-switch{COLOR_RESET}             : 呼出多账号无缝切换菜单 (永久免扫码)")
     print(f"  • {COLOR_BOLD}wb-checkin{COLOR_RESET}            : 一键批量执行所有账号每日签到与每日对话")
     print(f"  • {COLOR_BOLD}wb-chat [提示词]{COLOR_RESET}      : 直接在终端与模型对话维持连续对话奖励")
