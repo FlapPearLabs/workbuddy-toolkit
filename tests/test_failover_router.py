@@ -113,7 +113,7 @@ class TestFailoverRouter(unittest.TestCase):
             ]
         }
 
-        cls.router = router_engine.FailoverRouterServer(cls.config)
+        cls.router = router_engine.FailoverRouterServer(cls.config, config_path=None)
         cls.router.start(port=cls.router_port)
         time.sleep(0.1)
 
@@ -214,6 +214,30 @@ class TestFailoverRouter(unittest.TestCase):
             self.assertEqual(e.code, 503)
             err_data = json.loads(e.read().decode("utf-8"))
             self.assertIn("error", err_data)
+
+    def test_05_subagent_specific_model_failover(self):
+        """测试子 Agent 显式指定具体模型时，若发生 429 能自动由梯队备用模型接管"""
+        self.router.clear_cooldown("model-primary")
+        self.router.clear_cooldown("model-secondary")
+        self.upstream1.set_mode("rate_limit_429")
+        self.upstream2.set_mode("success_stream")
+
+        url = f"http://127.0.0.1:{self.router_port}/v1/chat/completions"
+        payload = json.dumps({
+            "model": "model-primary",  # 子 Agent 指定专属模型
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True
+        }).encode("utf-8")
+
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers.get("X-WorkBuddy-Routed-Model"), "model-secondary")
+            lines = [line.decode("utf-8") for line in resp if line.strip()]
+            self.assertTrue(any("Hello" in l for l in lines))
+
+        # model-primary 自动进入冷却池
+        self.assertTrue(self.router.is_in_cooldown("model-primary"))
 
 if __name__ == "__main__":
     unittest.main()

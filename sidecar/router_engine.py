@@ -189,6 +189,34 @@ class FailoverRouterServer:
             "active_cooldowns": cooldown_status
         }
 
+    def find_model_config(self, model_id: str) -> Optional[Dict[str, Any]]:
+        models_json = os.path.expanduser("~/.workbuddy/models.json")
+        if os.path.exists(models_json):
+            try:
+                with open(models_json, "r", encoding="utf-8") as f:
+                    for m in json.load(f):
+                        if m.get("id") == model_id:
+                            return {
+                                "id": model_id,
+                                "name": m.get("name", model_id),
+                                "source": "custom",
+                                "supportsToolCall": m.get("supportsToolCall", True),
+                                "supportsReasoning": m.get("supportsReasoning", False),
+                                "url": m.get("url", ""),
+                                "apiKey": m.get("apiKey", "")
+                            }
+            except Exception:
+                pass
+        return {
+            "id": model_id,
+            "name": model_id,
+            "source": "official",
+            "supportsToolCall": True,
+            "supportsReasoning": True,
+            "url": "https://copilot.tencent.com/v2/chat/completions",
+            "apiKey": ""
+        }
+
     def start(self, port: Optional[int] = None):
         target_port = port or self.config.get("port", 8047)
         self.server = ThreadedHTTPServer(('127.0.0.1', target_port), FailoverRequestHandler)
@@ -226,7 +254,21 @@ class FailoverRouterServer:
         is_streaming = req_data.get("stream", True)
         last_error = "All candidates failed"
 
-        for idx, candidate in enumerate(chain):
+        # 支持子 Agent 指定专属模型：若调用方显式指定了具体模型（非 workbuddy-autopilot），
+        # 则将该模型置为首位尝试；若发生 429 或故障，自动降级并由预设梯队无缝接管
+        req_model = req_data.get("model", "")
+        effective_chain = [dict(c) for c in chain]
+        if req_model and req_model not in ("workbuddy-autopilot", "auto", "default"):
+            match_idx = next((i for i, c in enumerate(effective_chain) if c.get("id") == req_model), None)
+            if match_idx is not None:
+                fav = effective_chain.pop(match_idx)
+                effective_chain.insert(0, fav)
+            else:
+                custom_c = self.find_model_config(req_model)
+                if custom_c:
+                    effective_chain.insert(0, custom_c)
+
+        for idx, candidate in enumerate(effective_chain):
             mid = candidate.get("id")
             if not mid:
                 continue
