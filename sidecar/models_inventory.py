@@ -295,6 +295,119 @@ def load_failover_config(config_path: str = DEFAULT_ROUTER_CONFIG) -> Dict[str, 
         "chain": []
     }
 
+DEFAULT_UPSTREAMS = {
+    "space-bunny-free": {
+        "id": "space-bunny-free",
+        "name": "Space Bunny (太空兔 1M)",
+        "source": "custom",
+        "vendor": "OpenCode Zen",
+        "url": "https://opencode.ai/zen/v1/chat/completions",
+        "apiKey": "sk-fWTpWfNqsiknArM9R14Muk72U1DqAMavnZLv0fcysZoLt34EMKRXUqmt4g9TVhbL",
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+        "supportsImages": True
+    },
+    "longcat-2.5-preview-free": {
+        "id": "longcat-2.5-preview-free",
+        "name": "LongCat 2.5 Preview",
+        "source": "custom",
+        "vendor": "OpenCode Zen",
+        "url": "https://opencode.ai/zen/v1/chat/completions",
+        "apiKey": "sk-fWTpWfNqsiknArM9R14Muk72U1DqAMavnZLv0fcysZoLt34EMKRXUqmt4g9TVhbL",
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+        "supportsImages": False
+    },
+    "deepseek-v4.1-flash": {
+        "id": "deepseek-v4.1-flash",
+        "name": "DeepSeek-V4.1-Flash",
+        "source": "official",
+        "vendor": "DeepSeek",
+        "url": "https://copilot.tencent.com/v2/chat/completions",
+        "apiKey": "",
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+        "supportsImages": True
+    },
+    "hy3": {
+        "id": "hy3",
+        "name": "Hy3",
+        "source": "official",
+        "vendor": "Tencent",
+        "url": "https://copilot.tencent.com/v2/chat/completions",
+        "apiKey": "",
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+        "supportsImages": True
+    },
+    "glm-5.3-flash": {
+        "id": "glm-5.3-flash",
+        "name": "GLM-5.3-Flash",
+        "source": "official",
+        "vendor": "Zhipu",
+        "url": "https://copilot.tencent.com/v2/chat/completions",
+        "apiKey": "",
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+        "supportsImages": True
+    },
+    "hy4-preview": {
+        "id": "hy4-preview",
+        "name": "Hy4 preview",
+        "source": "official",
+        "vendor": "Tencent",
+        "url": "https://copilot.tencent.com/v2/chat/completions",
+        "apiKey": "",
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+        "supportsImages": True
+    },
+    "gemini-3.8-flash-high": {
+        "id": "gemini-3.8-flash-high",
+        "name": "Gemini 3.8 Flash",
+        "source": "custom",
+        "vendor": "Google",
+        "url": "http://127.0.0.1:8045/v1",
+        "apiKey": "sk-8246df449d384693a498cb627b26432c",
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+        "supportsImages": True
+    },
+    "gemini-3.1-pro-high": {
+        "id": "gemini-3.1-pro-high",
+        "name": "Gemini 3.1 Pro",
+        "source": "custom",
+        "vendor": "Google",
+        "url": "http://127.0.0.1:8045/v1",
+        "apiKey": "sk-8246df449d384693a498cb627b26432c",
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+        "supportsImages": True
+    },
+    "claude-opus-4-6-thinking": {
+        "id": "claude-opus-4-6-thinking",
+        "name": "Cloud OPS",
+        "source": "custom",
+        "vendor": "Anthropic",
+        "url": "http://127.0.0.1:8045/v1",
+        "apiKey": "sk-8246df449d384693a498cb627b26432c",
+        "supportsToolCall": True,
+        "supportsReasoning": True,
+        "supportsImages": True
+    },
+    "claude-sonnet-4-6": {
+        "id": "claude-sonnet-4-6",
+        "name": "Cloud Sonnet 4.6",
+        "source": "custom",
+        "vendor": "Anthropic",
+        "url": "http://127.0.0.1:8045/v1",
+        "apiKey": "sk-8246df449d384693a498cb627b26432c",
+        "supportsToolCall": True,
+        "supportsReasoning": False,
+        "supportsImages": True
+    }
+}
+
 def save_failover_config(
     config_path: str,
     selected_ids: List[str],
@@ -302,10 +415,41 @@ def save_failover_config(
     port: int = 8047,
     cooldown_seconds: int = 600
 ):
-    """保存用户选定的梯队至 failover_router.json"""
+    """保存用户选定的梯队至 failover_router.json，并维护全局真实上游路由字典"""
     inv_map = {m["id"]: m for m in inventory}
+
+    # 继承或初始化 upstreams
+    upstreams = dict(DEFAULT_UPSTREAMS)
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                old_cfg = json.load(f)
+                old_ups = old_cfg.get("upstreams", {})
+                for k, v in old_ups.items():
+                    if k not in upstreams or (v.get("url") and f":{port}" not in v.get("url", "")):
+                        upstreams[k] = v
+        except Exception:
+            pass
+
+    for m in inventory:
+        mid = m["id"]
+        m_url = m.get("url", "")
+        if m_url and f":{port}" not in m_url:
+            upstreams[mid] = {
+                "id": mid,
+                "name": m.get("name", mid),
+                "source": m.get("source", "custom"),
+                "vendor": m.get("vendor", ""),
+                "url": m_url,
+                "apiKey": m.get("apiKey", ""),
+                "supportsToolCall": m.get("supportsToolCall", True),
+                "supportsReasoning": m.get("supportsReasoning", False),
+                "supportsImages": m.get("supportsImages", False)
+            }
+
     chain = []
     for mid in selected_ids:
+        upstream_info = upstreams.get(mid, {})
         if mid in inv_map:
             m = inv_map[mid]
             chain.append({
@@ -315,19 +459,19 @@ def save_failover_config(
                 "supportsToolCall": m.get("supportsToolCall", True),
                 "supportsReasoning": m.get("supportsReasoning", False),
                 "multiplier": m.get("multiplier", 1.0),
-                "url": m.get("url", ""),
-                "apiKey": m.get("apiKey", "")
+                "url": upstream_info.get("url") or (m.get("url", "") if f":{port}" not in m.get("url", "") else ""),
+                "apiKey": upstream_info.get("apiKey") or m.get("apiKey", "")
             })
         else:
             chain.append({
                 "id": mid,
-                "name": mid,
-                "source": "custom",
-                "supportsToolCall": True,
-                "supportsReasoning": False,
+                "name": upstream_info.get("name", mid),
+                "source": upstream_info.get("source", "custom"),
+                "supportsToolCall": upstream_info.get("supportsToolCall", True),
+                "supportsReasoning": upstream_info.get("supportsReasoning", False),
                 "multiplier": 1.0,
-                "url": "",
-                "apiKey": ""
+                "url": upstream_info.get("url", ""),
+                "apiKey": upstream_info.get("apiKey", "")
             })
 
     cfg = {
@@ -336,7 +480,8 @@ def save_failover_config(
         "cooldown_seconds": cooldown_seconds,
         "fast_model_timeout_seconds": 15,
         "thinking_model_timeout_seconds": 45,
-        "chain": chain
+        "chain": chain,
+        "upstreams": upstreams
     }
 
     os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
@@ -347,7 +492,13 @@ def register_virtual_model_in_models_json(
     models_json_path: str = DEFAULT_MODELS_JSON,
     port: int = 8047
 ):
-    """在 ~/.workbuddy/models.json 中注册或更新 virtual autopilot 模型条目"""
+    """
+    在 ~/.workbuddy/models.json 中配置模型接入点：
+    1. 确保 deepseek-v4.1-flash 注册且走 8047 本地路由（带无感容灾保护）
+    2. 将 space-bunny-free 的 url 重定向至 8047 本地路由（真实上游已留存至 failover_router.json）
+    3. 注册通用备用池 workbuddy-autopilot
+    4. 保留用户原有的其他自定义模型 (Gemini, Claude, LongCat 等)
+    """
     if not os.path.exists(models_json_path):
         current_list = []
     else:
@@ -359,9 +510,9 @@ def register_virtual_model_in_models_json(
         except Exception:
             current_list = []
 
-    virtual_id = "workbuddy-autopilot"
-    entry = {
-        "id": virtual_id,
+    # 1. workbuddy-autopilot
+    autopilot_entry = {
+        "id": "workbuddy-autopilot",
         "name": "Auto Pilot (自动容灾轮换池)",
         "vendor": "FailoverRouter",
         "url": f"http://127.0.0.1:{port}/v1",
@@ -376,12 +527,42 @@ def register_virtual_model_in_models_json(
         }
     }
 
-    # 查重并置换/添加
-    idx = next((i for i, m in enumerate(current_list) if m.get("id") == virtual_id), -1)
-    if idx >= 0:
-        current_list[idx] = entry
+    # 2. deepseek-v4.1-flash (无感容灾保护版)
+    deepseek_entry = {
+        "id": "deepseek-v4.1-flash",
+        "name": "DeepSeek V4.1 Flash (无感容灾)",
+        "vendor": "DeepSeek",
+        "url": f"http://127.0.0.1:{port}/v1",
+        "apiKey": "sk-workbuddy-router-local",
+        "supportsToolCall": True,
+        "supportsImages": True,
+        "supportsReasoning": True,
+        "useCustomProtocol": False,
+        "reasoning": {
+            "supportedEfforts": ["high", "medium", "low"],
+            "canDisableThinking": True
+        }
+    }
+
+    # 更新 autopilot
+    idx_ap = next((i for i, m in enumerate(current_list) if m.get("id") == "workbuddy-autopilot"), -1)
+    if idx_ap >= 0:
+        current_list[idx_ap] = autopilot_entry
     else:
-        current_list.insert(0, entry)
+        current_list.insert(0, autopilot_entry)
+
+    # 更新 deepseek-v4.1-flash
+    idx_ds = next((i for i, m in enumerate(current_list) if m.get("id") == "deepseek-v4.1-flash"), -1)
+    if idx_ds >= 0:
+        current_list[idx_ds] = deepseek_entry
+    else:
+        current_list.insert(1, deepseek_entry)
+
+    # 更新 space-bunny-free 的 url 指向本地路由
+    for m in current_list:
+        if m.get("id") == "space-bunny-free":
+            m["url"] = f"http://127.0.0.1:{port}/v1"
+            m["apiKey"] = "sk-workbuddy-router-local"
 
     with open(models_json_path, "w", encoding="utf-8") as f:
         json.dump(current_list, f, indent=2, ensure_ascii=False)

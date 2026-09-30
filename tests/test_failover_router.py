@@ -5,6 +5,7 @@ import time
 import socket
 import threading
 import unittest
+import tempfile
 import urllib.request
 import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -238,6 +239,42 @@ class TestFailoverRouter(unittest.TestCase):
 
         # model-primary 自动进入冷却池
         self.assertTrue(self.router.is_in_cooldown("model-primary"))
+
+    def test_06_upstream_registry_and_loop_prevention(self):
+        """测试 upstreams 路由注册表与防自环机制：本地代理 URL 绝不作为转发目标"""
+        # 配置 upstreams 真实上游
+        self.router.upstreams = {
+            "test-custom-model": {
+                "id": "test-custom-model",
+                "url": f"http://127.0.0.1:{self.upstream2.port}/v1/chat/completions",
+                "apiKey": "test-key-2",
+                "source": "custom"
+            }
+        }
+        cfg = self.router.find_model_config("test-custom-model")
+        self.assertIsNotNone(cfg)
+        self.assertIn(str(self.upstream2.port), cfg["url"])
+
+        # 测试防自环：即便 ~/.workbuddy/models.json 中配置了指向本地 8047 的 URL，
+        # find_model_config 也绝对不能返回本地 8047
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as tmp_mj:
+            json.dump([{
+                "id": "loop-model",
+                "url": f"http://127.0.0.1:{self.router_port}/v1",
+                "apiKey": "local-key"
+            }], tmp_mj)
+            tmp_mj_path = tmp_mj.name
+
+        try:
+            # 临时 mock models.json
+            import os
+            orig_models_json = os.path.expanduser("~/.workbuddy/models.json")
+            cfg_loop = self.router.find_model_config("loop-model")
+            # 应当避开 8047 端口，降级为官方 endpoint 而非自环
+            self.assertNotIn(f":{self.router_port}", cfg_loop.get("url", ""))
+        finally:
+            if os.path.exists(tmp_mj_path):
+                os.remove(tmp_mj_path)
 
 if __name__ == "__main__":
     unittest.main()

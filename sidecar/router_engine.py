@@ -137,6 +137,7 @@ class FailoverRouterServer:
         self.fast_timeout = config.get("fast_model_timeout_seconds", 15)
         self.thinking_timeout = config.get("thinking_model_timeout_seconds", 45)
         self.chain = config.get("chain", [])
+        self.upstreams: Dict[str, Any] = config.get("upstreams", {})
         self.cooldowns: Dict[str, float] = {}
         self.lock = threading.Lock()
         self.server: Optional[ThreadedHTTPServer] = None
@@ -153,6 +154,7 @@ class FailoverRouterServer:
                 with self.lock:
                     self.config = new_cfg
                     self.chain = new_cfg.get("chain", [])
+                    self.upstreams = new_cfg.get("upstreams", {})
                     self.cooldown_seconds = new_cfg.get("cooldown_seconds", 600)
                     self.fast_timeout = new_cfg.get("fast_model_timeout_seconds", 15)
                     self.thinking_timeout = new_cfg.get("thinking_model_timeout_seconds", 45)
@@ -190,23 +192,40 @@ class FailoverRouterServer:
         }
 
     def find_model_config(self, model_id: str) -> Optional[Dict[str, Any]]:
+        # 1. 优先查阅显式配置的 upstreams 真实上游路由字典
+        if hasattr(self, "upstreams") and self.upstreams and model_id in self.upstreams:
+            return dict(self.upstreams[model_id])
+
+        # 2. 查阅预设梯队 chain
+        for c in self.chain:
+            if c.get("id") == model_id:
+                return dict(c)
+
+        # 3. 查阅 ~/.workbuddy/models.json（严格防自环：绝对不可将请求转发回本地 8047 端口）
+        my_port = self.config.get("port", 8047)
         models_json = os.path.expanduser("~/.workbuddy/models.json")
         if os.path.exists(models_json):
             try:
                 with open(models_json, "r", encoding="utf-8") as f:
                     for m in json.load(f):
                         if m.get("id") == model_id:
+                            m_url = m.get("url", "")
+                            # 防自环：如果 URL 指向本地 8047 代理，则跳过防止递归死循环
+                            if f":{my_port}" in m_url or f"127.0.0.1:{my_port}" in m_url or f"localhost:{my_port}" in m_url:
+                                continue
                             return {
                                 "id": model_id,
                                 "name": m.get("name", model_id),
                                 "source": "custom",
                                 "supportsToolCall": m.get("supportsToolCall", True),
                                 "supportsReasoning": m.get("supportsReasoning", False),
-                                "url": m.get("url", ""),
+                                "url": m_url,
                                 "apiKey": m.get("apiKey", "")
                             }
             except Exception:
                 pass
+
+        # 4. 默认官方内置模型兜底（走腾讯官方 Copilot v2 接口）
         return {
             "id": model_id,
             "name": model_id,
@@ -455,7 +474,7 @@ class FailoverRouterServer:
             except urllib.error.HTTPError as he:
                 last_error = f"HTTP {he.code}: {he.reason}"
                 self.trigger_cooldown(mid)
-                next_model = chain[idx + 1].get("id") if idx + 1 < len(chain) else "无备用"
+                next_model = effective_chain[idx + 1].get("id") if idx + 1 < len(effective_chain) else "无备用"
                 send_macos_notification(
                     "WorkBuddy 故障自动轮换",
                     f"模型 {mid} 返回 {he.code}，已无缝切换至 {next_model} 继续执行"
@@ -472,7 +491,7 @@ class FailoverRouterServer:
             except (socket.timeout, TimeoutError) as te:
                 last_error = f"Timeout after {timeout_limit}s on first chunk"
                 self.trigger_cooldown(mid)
-                next_model = chain[idx + 1].get("id") if idx + 1 < len(chain) else "无备用"
+                next_model = effective_chain[idx + 1].get("id") if idx + 1 < len(effective_chain) else "无备用"
                 send_macos_notification(
                     "WorkBuddy 首包挂起超时",
                     f"模型 {mid} 首包等待超过 {timeout_limit}s，已切换至 {next_model}"

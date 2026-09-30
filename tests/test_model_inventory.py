@@ -216,5 +216,27 @@ class TestModelInventory(unittest.TestCase):
         )
         self.assertEqual(resolved, dynamic_file)
 
+    def test_register_virtual_model_in_models_json(self):
+        models_inventory.register_virtual_model_in_models_json(
+            models_json_path=self.models_json_path,
+            port=8047
+        )
+        with open(self.models_json_path, "r", encoding="utf-8") as f:
+            updated = json.load(f)
+
+        ids = [m["id"] for m in updated]
+        self.assertIn("workbuddy-autopilot", ids)
+        self.assertIn("deepseek-v4.1-flash", ids)
+        self.assertIn("space-bunny-free", ids)
+
+        # 检查 space-bunny-free 的 URL 是否被重定向至本地容灾路由
+        sb = next(m for m in updated if m["id"] == "space-bunny-free")
+        self.assertEqual(sb["url"], "http://127.0.0.1:8047/v1")
+
+        # 检查 deepseek-v4.1-flash 的 URL 与思维档位
+        ds = next(m for m in updated if m["id"] == "deepseek-v4.1-flash")
+        self.assertEqual(ds["url"], "http://127.0.0.1:8047/v1")
+        self.assertTrue(ds["reasoning"]["canDisableThinking"])
+
 if __name__ == "__main__":
     unittest.main()
