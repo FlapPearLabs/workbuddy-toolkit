@@ -46,7 +46,7 @@ def load_config():
 
 def get_open_files(directory):
     open_files = set()
-    if not os.path.exists(directory):
+    if not os.path.exists(directory) or os.name == 'nt':
         return open_files
     try:
         # lsof +D <dir> is recursive, -F n outputs file paths
@@ -134,7 +134,8 @@ def main():
                     mtime = os.path.getmtime(fp)
                     if now - mtime > ttl_seconds:
                         if is_file_open(fp, open_files):
-                            truncate_file(fp)
+                            if os.name != 'nt':
+                                truncate_file(fp)
                         elif dir_basename != today_str and dir_basename != "sandbox":
                             remove_file(fp)
                 except Exception:
@@ -162,8 +163,9 @@ def main():
                     size = os.path.getsize(fp)
                     real_fp = os.path.realpath(fp)
                     if is_file_open(fp, open_files):
-                        if truncate_file(fp):
-                            current_size -= size
+                        if os.name != 'nt':
+                            if truncate_file(fp):
+                                current_size -= size
                     elif dir_basename != today_str and dir_basename != "sandbox":
                         if remove_file(fp):
                             current_size -= size
@@ -182,7 +184,8 @@ def main():
                 try:
                     if now - os.path.getmtime(fp) > ttl_seconds:
                         if is_file_open(fp, open_files):
-                            truncate_file(fp)
+                            if os.name != 'nt':
+                                truncate_file(fp)
                         else:
                             remove_file(fp)
                 except Exception:

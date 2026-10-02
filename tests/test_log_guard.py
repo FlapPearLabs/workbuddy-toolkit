@@ -51,7 +51,10 @@ class TestLogGuard(unittest.TestCase):
             os.rename = original_rename
             os.name = original_name
 
-    def test_cleanup_locked_sandbox_file(self):
+    def test_cleanup_locked_sandbox_file_windows(self):
+        original_name = os.name
+        os.name = 'nt'
+        
         sandbox_dir = os.path.join(self.temp_dir, "sandbox", "old_date")
         os.makedirs(sandbox_dir)
         filepath = os.path.join(sandbox_dir, "locked.log")
@@ -67,9 +70,11 @@ class TestLogGuard(unittest.TestCase):
         try:
             self.guard.main()
             self.assertTrue(os.path.exists(filepath))
-            self.assertEqual(os.path.getsize(filepath), 0)
+            # On Windows, we should skip truncation entirely if the file is locked
+            self.assertEqual(os.path.getsize(filepath), 1024)
         finally:
             self.guard.is_file_open = original_is_file_open
+            os.name = original_name
 
 if __name__ == '__main__':
     unittest.main()
