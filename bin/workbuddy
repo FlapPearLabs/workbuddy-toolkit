@@ -1318,8 +1318,7 @@ def find_sidecar_dir():
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sidecar")),
         os.path.expanduser("~/.workbuddy/toolkit/sidecar"),
         os.path.expanduser("~/.local/share/workbuddy/sidecar"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "sidecar"),
-        "/Users/songshiyao/.gemini/antigravity/scratch/workbuddy-toolkit/sidecar"
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "sidecar")
     ]
     for c in candidates:
         if os.path.isdir(c):

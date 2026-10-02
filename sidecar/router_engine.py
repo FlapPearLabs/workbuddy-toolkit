@@ -55,8 +55,7 @@ def get_official_auth():
     if _wb_cli_module is None:
         candidates = [
             os.path.expanduser("~/.local/bin/workbuddy"),
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bin", "workbuddy")),
-            "/Users/songshiyao/.gemini/antigravity/scratch/workbuddy-toolkit/bin/workbuddy"
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bin", "workbuddy"))
         ]
         import runpy
         for c in candidates:

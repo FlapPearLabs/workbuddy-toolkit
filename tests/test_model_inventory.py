@@ -96,13 +96,13 @@ class TestModelInventory(unittest.TestCase):
         """)
         # Insert historical sessions
         sessions = [
-            ("s1", "hy3", 1700000000000),
-            ("s2", "hy3", 1700000001000),
-            ("s3", "hy3", 1700000002000),
-            ("s4", "deepseek-v4-flash", 1700000003000),
-            ("s5", "deepseek-v4-flash", 1700000004000),
-            ("s6", "space-bunny-free", 1700000005000),
-            ("s7", "custom-local:gemini-3.8-flash-high", 1700000006000),
+            ("s1", "hy3", 1800000000001),
+            ("s2", "hy3", 1800000000002),
+            ("s3", "hy3", 1800000000003),
+            ("s4", "deepseek-v4-flash", 1800000000004),
+            ("s5", "deepseek-v4-flash", 1800000000005),
+            ("s6", "space-bunny-free", 1800000000006),
+            ("s7", "custom-local:gemini-3.8-flash-high", 1800000000007),
         ]
         cur.executemany("INSERT INTO sessions VALUES (?, ?, ?)", sessions)
         conn.commit()
