@@ -142,6 +142,12 @@ def install_cli():
         shutil.copy2(src_bin, dest_bin)
         os.chmod(dest_bin, 0o755)
 
+        src_log_guard = os.path.join(SCRIPT_DIR, "bin", "workbuddy-log-guard")
+        if os.path.exists(src_log_guard):
+            dest_log_guard = os.path.join(bin_dir, "workbuddy-log-guard")
+            shutil.copy2(src_log_guard, dest_log_guard)
+            os.chmod(dest_log_guard, 0o755)
+
         for alias in [
             "wb-switch", "workbuddy-switch",
             "wb-checkin", "workbuddy-checkin",
@@ -228,6 +234,18 @@ def setup_scheduler(bin_path, bin_dir):
             subprocess.run(["launchctl", "unload", router_plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             subprocess.run(["launchctl", "load", "-w", router_plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             print(f"{COLOR_GREEN}   ✔ macOS LaunchAgent 已激活 (Failover Router 容灾轮换路由 :8047){COLOR_RESET}")
+
+        # Log Guard LaunchAgent
+        guard_plist_src = os.path.join(SCRIPT_DIR, "launchd", "com.workbuddy.log-guard.plist")
+        guard_plist_dest = os.path.join(launch_dir, "com.workbuddy.log-guard.plist")
+        if os.path.exists(guard_plist_src):
+            with open(guard_plist_src, "r", encoding="utf-8") as f:
+                content = f.read().replace("{{HOME}}", HOME)
+            with open(guard_plist_dest, "w", encoding="utf-8") as f:
+                f.write(content)
+            subprocess.run(["launchctl", "unload", guard_plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            subprocess.run(["launchctl", "load", "-w", guard_plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            print(f"{COLOR_GREEN}   ✔ macOS LaunchAgent 已激活 (Log Guard 沙盒日志看门狗){COLOR_RESET}")
     elif sys.platform == "win32":
         task_name = "WorkBuddyDailyCheckin"
         python_exe = sys.executable
@@ -264,8 +282,9 @@ def setup_scheduler(bin_path, bin_dir):
                 cron_cmd = f"0 9 * * * {bin_path} checkin >> {LOGS_DIR}/checkin.log 2>&1"
                 proc = subprocess.run(["crontab", "-l"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 existing = proc.stdout if proc.returncode == 0 else ""
-                lines = [l for l in existing.splitlines() if "workbuddy checkin" not in l]
+                lines = [l for l in existing.splitlines() if "workbuddy checkin" not in l and "workbuddy-log-guard" not in l]
                 lines.append(cron_cmd)
+                lines.append(f"0,30 * * * * {bin_dir}/workbuddy-log-guard >> {LOGS_DIR}/log-guard.log 2>&1")
                 new_cron = "\n".join(lines) + "\n"
                 set_proc = subprocess.Popen(["crontab", "-"], stdin=subprocess.PIPE, text=True)
                 set_proc.communicate(new_cron)

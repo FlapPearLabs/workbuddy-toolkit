@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os
+import sys
+import json
+import time
+import shutil
+import subprocess
+from datetime import datetime
+
+HOME = os.path.expanduser("~")
+LOG_DIR = os.environ.get("WB_LOG_DIR", os.path.join(HOME, ".workbuddy", "logs"))
+SANDBOX_DIR = os.path.join(LOG_DIR, "sandbox")
+TRACES_DIR = os.environ.get("WB_TRACES_DIR", os.path.join(HOME, ".workbuddy", "traces"))
+CONFIG_FILE = os.environ.get("WB_LOG_GUARD_CONFIG", os.path.join(HOME, ".workbuddy", "log_guard.json"))
+
+def load_config():
+    # Defaults
+    config = {
+        "ttl_minutes": 2160,       # 36 hours
+        "max_sandbox_mb": 2048,    # 2GB hard limit
+        "target_sandbox_mb": 1536, # 1.5GB target limit when cleaning
+        "max_file_mb": 30          # Single file max 30MB
+    }
+    # Env var overrides
+    if "WB_TTL_MINUTES" in os.environ:
+        config["ttl_minutes"] = int(os.environ["WB_TTL_MINUTES"])
+    if "WB_MAX_SANDBOX_MB" in os.environ:
+        config["max_sandbox_mb"] = int(os.environ["WB_MAX_SANDBOX_MB"])
+    if "WB_TARGET_SANDBOX_MB" in os.environ:
+        config["target_sandbox_mb"] = int(os.environ["WB_TARGET_SANDBOX_MB"])
+    if "WB_MAX_FILE_MB" in os.environ:
+        config["max_file_mb"] = int(os.environ["WB_MAX_FILE_MB"])
+
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                file_cfg = json.load(f)
+                for k in config.keys():
+                    if k in file_cfg:
+                        config[k] = file_cfg[k]
+        except Exception as e:
+            print(f"Failed to read {CONFIG_FILE}: {e}", file=sys.stderr)
+            
+    return config
+
+def get_open_files(directory):
+    open_files = set()
+    if not os.path.exists(directory):
+        return open_files
+    try:
+        # lsof +D <dir> is recursive, -F n outputs file paths
+        result = subprocess.run(["lsof", "-F", "n", "+D", os.path.realpath(directory)], 
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15)
+        for line in result.stdout.splitlines():
+            if line.startswith('n/'):
+                open_files.add(os.path.realpath(line[1:]))
+    except Exception:
+        pass
+    return open_files
+
+def truncate_file(filepath):
+    try:
+        with open(filepath, 'w') as f:
+            pass # Truncate to 0
+        return True
+    except Exception:
+        return False
+
+def remove_file(filepath):
+    try:
+        os.remove(filepath)
+        return True
+    except Exception:
+        return False
+
+def get_dir_size(directory):
+    total = 0
+    for dirpath, _, filenames in os.walk(directory):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            if not os.path.islink(fp) and os.path.isfile(fp):
+                total += os.path.getsize(fp)
+    return total
+
+def main():
+    config = load_config()
+    ttl_seconds = config["ttl_minutes"] * 60
+    max_file_bytes = config["max_file_mb"] * 1024 * 1024
+    max_sandbox_bytes = config["max_sandbox_mb"] * 1024 * 1024
+    target_sandbox_bytes = config["target_sandbox_mb"] * 1024 * 1024
+    now = time.time()
+    today_str = datetime.now().strftime("%Y%m%d")
+
+    open_files = get_open_files(LOG_DIR)
+
+    # 1. Truncate over-sized files (even if not open)
+    if os.path.exists(LOG_DIR):
+        for dirpath, _, filenames in os.walk(LOG_DIR):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                try:
+                    if os.path.getsize(fp) > max_file_bytes:
+                        truncate_file(fp)
+                except Exception:
+                    pass
+
+    # 2. TTL Cleanup for sandbox
+    if os.path.exists(SANDBOX_DIR):
+        for dirpath, dirnames, filenames in os.walk(SANDBOX_DIR):
+            dir_basename = os.path.basename(dirpath)
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                real_fp = os.path.realpath(fp)
+                try:
+                    mtime = os.path.getmtime(fp)
+                    if now - mtime > ttl_seconds:
+                        if real_fp in open_files:
+                            truncate_file(fp)
+                        elif dir_basename != today_str and dir_basename != "sandbox":
+                            remove_file(fp)
+                except Exception:
+                    pass
+        
+        # 3. Directory capacity hard limit
+        current_size = get_dir_size(SANDBOX_DIR)
+        if current_size > max_sandbox_bytes:
+            # Collect files, sort by mtime
+            all_files = []
+            for dirpath, _, filenames in os.walk(SANDBOX_DIR):
+                dir_basename = os.path.basename(dirpath)
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    try:
+                        all_files.append((os.path.getmtime(fp), fp, dir_basename))
+                    except Exception:
+                        pass
+            all_files.sort(key=lambda x: x[0])
+            
+            for mtime, fp, dir_basename in all_files:
+                if current_size <= target_sandbox_bytes:
+                    break
+                try:
+                    size = os.path.getsize(fp)
+                    real_fp = os.path.realpath(fp)
+                    if real_fp in open_files:
+                        if truncate_file(fp):
+                            current_size -= size
+                    elif dir_basename != today_str and dir_basename != "sandbox":
+                        if remove_file(fp):
+                            current_size -= size
+                except Exception:
+                    pass
+
+    # 4. Other log dir cleanup
+    if os.path.exists(LOG_DIR):
+        for dirpath, dirnames, filenames in os.walk(LOG_DIR, topdown=False):
+            # Skip root log dir and sandbox dir correctly
+            if dirpath == LOG_DIR or dirpath.startswith(os.path.join(SANDBOX_DIR, "")) or dirpath == SANDBOX_DIR:
+                continue
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                real_fp = os.path.realpath(fp)
+                try:
+                    if now - os.path.getmtime(fp) > ttl_seconds:
+                        if real_fp in open_files:
+                            truncate_file(fp)
+                        else:
+                            remove_file(fp)
+                except Exception:
+                    pass
+            # Clean empty directories (bottom-up traversal makes this work properly)
+            if not os.listdir(dirpath):
+                try:
+                    os.rmdir(dirpath)
+                except Exception:
+                    pass
+
+    # 5. Clean traces directory (24 hours TTL)
+    traces_ttl = 24 * 3600
+    if os.path.exists(TRACES_DIR):
+        for dirpath, dirnames, filenames in os.walk(TRACES_DIR, topdown=False):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                try:
+                    if now - os.path.getmtime(fp) > traces_ttl:
+                        remove_file(fp)
+                except Exception:
+                    pass
+            if dirpath != TRACES_DIR and not os.listdir(dirpath):
+                try:
+                    os.rmdir(dirpath)
+                except Exception:
+                    pass
+
+if __name__ == "__main__":
+    main()

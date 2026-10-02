@@ -41,6 +41,15 @@ def uninstall():
             except Exception:
                 pass
             print(f"{COLOR_GREEN}✔ 已注销并删除 macOS LaunchAgent 定时任务{COLOR_RESET}")
+            
+        guard_plist_path = os.path.join(HOME, "Library", "LaunchAgents", "com.workbuddy.log-guard.plist")
+        if os.path.exists(guard_plist_path):
+            subprocess.run(["launchctl", "unload", guard_plist_path], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            try:
+                os.remove(guard_plist_path)
+            except Exception:
+                pass
+            print(f"{COLOR_GREEN}✔ 已注销并删除 log-guard LaunchAgent 定时任务{COLOR_RESET}")
     elif sys.platform == "win32":
         try:
             subprocess.run(["schtasks", "/delete", "/tn", "WorkBuddyDailyCheckin", "/f"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
@@ -62,8 +71,8 @@ def uninstall():
         if shutil.which("crontab"):
             try:
                 proc = subprocess.run(["crontab", "-l"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-                if proc.returncode == 0 and "workbuddy checkin" in proc.stdout:
-                    lines = [l for l in proc.stdout.splitlines() if "workbuddy checkin" not in l]
+                if proc.returncode == 0:
+                    lines = [l for l in proc.stdout.splitlines() if "workbuddy checkin" not in l and "workbuddy-log-guard" not in l]
                     new_cron = "\n".join(lines) + "\n"
                     set_proc = subprocess.Popen(["crontab", "-"], stdin=subprocess.PIPE, text=True)
                     set_proc.communicate(new_cron)
@@ -85,7 +94,7 @@ def uninstall():
             print(f"{COLOR_GREEN}✔ 已删除 Windows CLI 安装目录及垫片 ({bin_dir}){COLOR_RESET}")
     else:
         bin_dir = os.path.join(HOME, ".local", "bin")
-        for name in ["workbuddy", "wb-switch", "workbuddy-switch", "wb-checkin", "workbuddy-checkin", "wb-chat", "workbuddy-chat", "wb-doctor", "workbuddy-doctor"]:
+        for name in ["workbuddy", "workbuddy-log-guard", "wb-switch", "workbuddy-switch", "wb-checkin", "workbuddy-checkin", "wb-chat", "workbuddy-chat", "wb-doctor", "workbuddy-doctor"]:
             fpath = os.path.join(bin_dir, name)
             if os.path.islink(fpath) or os.path.exists(fpath):
                 try:
