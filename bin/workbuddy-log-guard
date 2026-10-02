@@ -74,6 +74,24 @@ def remove_file(filepath):
     except Exception:
         return False
 
+def is_file_open(filepath, open_files_set):
+    real_fp = os.path.realpath(filepath)
+    if real_fp in open_files_set:
+        return True
+    
+    if os.name == 'nt':
+        try:
+            # On Windows, try to rename it. If it's opened by another process, it will raise PermissionError or Sharing Violation.
+            tmp = filepath + ".wblck"
+            os.rename(filepath, tmp)
+            os.rename(tmp, filepath)
+            return False
+        except OSError as e:
+            if getattr(e, 'winerror', None) == 32 or getattr(e, 'winerror', None) == 33 or e.errno == 13:
+                return True
+            return False
+    return False
+
 def get_dir_size(directory):
     total = 0
     for dirpath, _, filenames in os.walk(directory):
@@ -115,7 +133,7 @@ def main():
                 try:
                     mtime = os.path.getmtime(fp)
                     if now - mtime > ttl_seconds:
-                        if real_fp in open_files:
+                        if is_file_open(fp, open_files):
                             truncate_file(fp)
                         elif dir_basename != today_str and dir_basename != "sandbox":
                             remove_file(fp)
@@ -143,7 +161,7 @@ def main():
                 try:
                     size = os.path.getsize(fp)
                     real_fp = os.path.realpath(fp)
-                    if real_fp in open_files:
+                    if is_file_open(fp, open_files):
                         if truncate_file(fp):
                             current_size -= size
                     elif dir_basename != today_str and dir_basename != "sandbox":
@@ -163,7 +181,7 @@ def main():
                 real_fp = os.path.realpath(fp)
                 try:
                     if now - os.path.getmtime(fp) > ttl_seconds:
-                        if real_fp in open_files:
+                        if is_file_open(fp, open_files):
                             truncate_file(fp)
                         else:
                             remove_file(fp)

@@ -56,6 +56,11 @@ def uninstall():
             print(f"{COLOR_GREEN}✔ 已注销 Windows 任务计划: WorkBuddyDailyCheckin{COLOR_RESET}")
         except Exception:
             pass
+        try:
+            subprocess.run(["schtasks", "/delete", "/tn", "WorkBuddyLogGuard", "/f"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            print(f"{COLOR_GREEN}✔ 已注销 Windows 任务计划: WorkBuddyLogGuard{COLOR_RESET}")
+        except Exception:
+            pass
     else:  # Linux
         # systemd
         svc = os.path.join(HOME, ".config", "systemd", "user", "workbuddy-dailycheckin.service")

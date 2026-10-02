@@ -98,6 +98,24 @@ def install_cli():
             with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
                 f.write(cmd_router)
 
+        src_log_guard = os.path.join(SCRIPT_DIR, "bin", "workbuddy-log-guard")
+        if os.path.exists(src_log_guard):
+            dest_log_guard = os.path.join(bin_dir, "workbuddy-log-guard")
+            shutil.copy2(src_log_guard, dest_log_guard)
+            guard_wrapper = (
+                "@echo off\r\n"
+                "setlocal\r\n"
+                "where python >nul 2>nul\r\n"
+                "if %ERRORLEVEL% equ 0 (\r\n"
+                "    python \"%~dp0workbuddy-log-guard\" %*\r\n"
+                ") else (\r\n"
+                "    py \"%~dp0workbuddy-log-guard\" %*\r\n"
+                ")\r\n"
+            )
+            with open(os.path.join(bin_dir, "workbuddy-log-guard.cmd"), "w", encoding="ascii") as f:
+                f.write(guard_wrapper)
+
+
         # 部署 Sidecar 伴随组件至 ~/.workbuddy/toolkit/sidecar
         toolkit_dir = os.path.join(WORKBUDDY_DIR, "toolkit")
         os.makedirs(toolkit_dir, exist_ok=True)
@@ -258,6 +276,14 @@ def setup_scheduler(bin_path, bin_dir):
             print(f"{COLOR_GREEN}   ✔ Windows 任务计划已激活: 每天 09:00 后台无窗打卡 ({task_name}){COLOR_RESET}")
         else:
             print(f"{COLOR_YELLOW}   [提示] 任务计划注册返回: {res.stderr.strip()}{COLOR_RESET}")
+
+        guard_cmd = f'"{runner}" "{os.path.join(bin_dir, "workbuddy-log-guard")}"'
+        guard_sch_cmd = ["schtasks", "/create", "/tn", "WorkBuddyLogGuard", "/tr", guard_cmd, "/sc", "minute", "/mo", "30", "/f"]
+        res_guard = subprocess.run(guard_sch_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res_guard.returncode == 0:
+            print(f"{COLOR_GREEN}   ✔ Windows 任务计划已激活: 每 30 分钟后台沙盒清理 (WorkBuddyLogGuard){COLOR_RESET}")
+        else:
+            print(f"{COLOR_YELLOW}   [提示] Log Guard 任务计划注册返回: {res_guard.stderr.strip()}{COLOR_RESET}")
     else:  # Linux
         systemd_user_dir = os.path.join(HOME, ".config", "systemd", "user")
         has_systemd = shutil.which("systemctl") is not None

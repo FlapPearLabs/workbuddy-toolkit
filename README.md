@@ -410,7 +410,7 @@ WorkBuddy 体系设有**每日连续对话打卡奖励**（连续天数可累积
 2. **操作系统原生守护层 (Zero-Touch 后台静默)**：
    - **macOS (`launchd`)**：`~/Library/LaunchAgents/com.workbuddy.dailycheckin.plist`，开机自启、盒盖休眠唤醒补跑。
    - **Linux (`systemd --user`)**：`~/.config/systemd/user/workbuddy-dailycheckin.timer`，开机自启且支持 `Persistent=true` 唤醒补跑；无 systemd 环境自动降级至用户 `crontab`。
-   - **Windows (任务计划程序 `schtasks`)**：注册 `WorkBuddyDailyCheckin` 计划任务，调用 Windows 内置 `pythonw.exe` 静默后台运行，**绝无黑色 CMD 弹窗干扰**。
+   - **Windows (任务计划程序 `schtasks`)**：注册 `WorkBuddyDailyCheckin` (每天 09:00) 与 `WorkBuddyLogGuard` (每 30 分钟) 计划任务，调用 Windows 内置 `pythonw.exe` 静默后台运行，**绝无黑色 CMD 弹窗干扰**。
 3. **手动模式**：
    若用户不希望后台常驻任何定时任务，只需执行 `wb-checkin` 即可在 0.5 秒内完成手工打卡。
 
