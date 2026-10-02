@@ -1,14 +1,14 @@
 # WorkBuddy Toolkit: Multi-Account Manager & Automated Check-in
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
-[![Release: v0.3.1](https://img.shields.io/badge/Release-v0.3.1-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 26/26 Passed](https://img.shields.io/badge/Tests-26%2F26%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Release: v0.4.1](https://img.shields.io/badge/Release-v0.4.1-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
+[![Tests: 38/38 Passed](https://img.shields.io/badge/Tests-38%2F38%20Passed%20(100%25)-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
 
-> **WorkBuddy (腾讯开源/商业化 AI 编程助手) 多账号无缝轮换、全域工作区打通、自动化静默签到与每日连续对话保活工具箱。**  
-> 深入逆向底层 SQLite 存储隔离机制、腾讯云鉴权、5.6+ 本地凭证加密协议与 `/v2/chat/completions` SSE 流式协议，原生全面适配 **macOS**、**Linux** 与 **Windows** 三大操作系统，打造零侵入、高内聚、零打扰的本地自动化工作流。
+> **WorkBuddy (腾讯开源/商业化 AI 编程助手) 多账号无缝轮换、全域工作区打通、自动化静默签到、容灾路由网关与沙盒日志自愈治理工具箱。**  
+> 深入逆向底层 SQLite 存储隔离机制、腾讯云鉴权、5.6+ 本地凭证加密协议、`/v2/chat/completions` SSE 流式协议与沙盒日志生命周期，原生全面适配 **macOS**、**Linux** 与 **Windows** 三大操作系统，打造零侵入、高内聚、零打扰的本地自动化工作流。
 
 ---
 
@@ -37,7 +37,7 @@
      如实告诉我当前环境没有内置 Agent 调度能力，并请我选择签到方式：
      ① 采用安装脚本已配置的系统原生守护定时打卡（macOS launchd / Linux systemd timer / Windows 任务计划程序，每天 09:00 静默打卡写入日志）；
      ② 完全关闭后台自动打卡，后续每次由我手动在终端输入 `wb-checkin` 随时打卡。
-7. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-switch`（免扫码秒切账号）、`wb-checkin`（签到+对话）、`wb-chat`（CLI 直接调用模型）以及 `wb-doctor`（兼容诊断）。
+7. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-switch`（免扫码秒切账号）、`wb-checkin`（签到+对话）、`wb-chat`（CLI 直接调用模型）、`wb-router`（容灾轮换路由）、`wb-models`（模型透视）以及 `wb-doctor`（兼容诊断）。
 ```
 
 ---
@@ -53,6 +53,9 @@
 | **每日签到积分** | 需每天打开图形界面、手动点开活动、逐个切号点击 | **极速静默打卡 (`wb-checkin`)**：0.5 秒遍历所有账号统一领积分，三端原生系统调度自动运行 |
 | **每日连续对话** | 需打开图形界面手动输入聊天以维持连击奖励 | **全账号自动联动保活**：打卡后自动优先使用免费/超低倍率模型（Hy3/Flash）完成每日对话，维持连击兑换资格 |
 | **终端 CLI 问答** | 官方需打开臃肿 Electron 窗口或配置复杂环境 | **原生秒级直接对话 (`wb-chat`)**：直接在终端向 WorkBuddy 模型提问并流式输出，零 UI 内存占用 |
+| **模型容灾与自愈** | 官方上游模型故障/限流直接报错中断任务 | **透明容灾轮换网关 (`wb-router`)**：`:8047` 代理中介，支持 DeepSeek / Space Bunny / Hy3 瞬态故障自动降级轮换 |
+| **模型资产透视** | 官方隐藏模型实际扣费倍率与调用计费明细 | **动态全景资产透视 (`wb-models`)**：动态拉取全量模型、实时倍率审计与轻量级交互式终端选择器 (TUI) |
+| **沙盒日志暴走** | sandbox-core 狂写 PTY 日志无淘汰机制，几天吞噬 15GB+ 磁盘 | **智能物理看门狗 (`workbuddy-log-guard`)**：36h TTL、2GB 目录硬顶、30MB 物理熔断，`lsof` 句柄感知，只 truncate 不删活动文件 |
 
 ---
 
@@ -72,11 +75,24 @@
   - [5. 每日签到协议逆向与幂等领取架构](#5-每日签到协议逆向与幂等领取架构)
   - [6. 每日连续对话协议逆向与模型倍率智能梯队](#6-每日连续对话协议逆向与模型倍率智能梯队)
   - [7. 三端原生后台定时调度与自适应探测](#7-三端原生后台定时调度与自适应探测)
+  - [8. 容灾轮换路由网关架构 (Failover Router :8047)](#8-容灾轮换路由网关架构-failover-router-8047)
+  - [9. 模型全景资产透视与倍率审计 (Model Inventory)](#9-模型全景资产透视与倍率审计-model-inventory)
+  - [10. 🔥 沙盒日志暴走根因与无感物理看门狗治理 (Log Guardian)](#10--沙盒日志暴走根因与无感物理看门狗治理-log-guardian)
 - [三、快速上手与安装升级](#三快速上手与安装升级)
-  - [老用户平滑升级指南（30 秒升级到 v0.3.1）](#-老用户平滑升级指南30-秒升级到-v031)
+  - [老用户平滑升级指南（30 秒升级到 v0.4.1）](#-老用户平滑升级指南30-秒升级到-v041)
   - [推荐方式：跨平台通用 Python 一键安装](#推荐方式跨平台通用-python-一键安装-macos--linux--windows-通用)
   - [备选方式：系统原生脚本安装](#备选方式系统原生脚本安装)
 - [四、命令行工具使用手册](#四命令行工具使用手册)
+  - [1. 账号快速切换 (wb-switch)](#1-账号快速切换-wb-switch)
+  - [2. 每日签到与连续对话保活 (wb-checkin)](#2-每日签到与连续对话保活-wb-checkin)
+  - [3. 终端极速对话 (wb-chat)](#3-终端极速对话-wb-chat)
+  - [4. 环境与凭证兼容性诊断 (wb-doctor)](#4-环境与凭证兼容性诊断-wb-doctor)
+  - [5. 容灾轮换路由网关 (wb-router)](#5-容灾轮换路由网关-wb-router)
+  - [6. 模型全景资产与倍率透视 (wb-models)](#6-模型全景资产与倍率透视-wb-models)
+  - [7. 沙盒日志看门狗配置与管理 (workbuddy-log-guard)](#7-沙盒日志看门狗配置与管理-workbuddy-log-guard)
+  - [8. 查看账号状态与凭证有效期](#8-查看账号状态与凭证有效期)
+  - [9. 保存新登录的账号](#9-保存新登录的账号)
+  - [10. 常用命令速查表](#10-常用命令速查表)
 - [五、安全与隐私承诺 (Zero-Leakage)](#五安全与隐私承诺-zero-leakage)
 - [六、回滚与卸载指南](#六回滚与卸载指南)
 - [七、开源协议](#七开源协议)
@@ -400,11 +416,79 @@ WorkBuddy 体系设有**每日连续对话打卡奖励**（连续天数可累积
 
 ---
 
+### 8. 容灾轮换路由网关架构 (Failover Router :8047)
+
+在日常多 Agent 并发开发中，官方 API 端点偶尔会因并发瞬态限流（`429 Too Many Requests`）或上游服务抖动（`502 Bad Gateway` / `503 Service Unavailable`）导致任务直接报错中断。为此，Toolkit 引入了轻量级**透明容灾轮换路由网关 (`wb-router`)**：
+
+```
+[本地 IDE / Agent]
+        │
+        ▼ (请求 127.0.0.1:8047)
+┌────────────────────────────────────────────────────────┐
+│     WorkBuddy Failover Router (ThreadedHTTPServer)     │
+│   SO_REUSEADDR 端口就绪 / 自动拦截 429/500/502/503      │
+└──────────────┬─────────────────────────┬───────────────┘
+               │ (正常)                   │ (上游故障触发 Fallback)
+               ▼                         ▼
+      [首选主力模型]               [自动容灾回退梯队]
+   deepseek-v4-flash /          hy3 (混元 3.0 / 限免或极低消耗)
+   space-bunny-free (免额度)     glm-5v-turbo (低倍率兜底)
+```
+
+- **底层高韧性机制**：基于原生多线程 `ThreadedHTTPServer`，开启 `SO_REUSEADDR` 消除快速重启时的 `TIME_WAIT` 绑定冲突；
+- **主力模型零感自愈**：主控配置首选免额度或极低倍率模型（如 DeepSeek、Space Bunny），当遇到网络闪断或限流时，网关在**内存层毫秒级无感降级**至下一梯队（如 `hy3`），上层客户端无需任何重试或感知；
+- **子智能体差异化路由**：支持针对特定子任务类型（代码编写、审计、常规对话）自动路由至最适配的模型，杜绝昂贵倍率消耗。
+
+---
+
+### 9. 模型全景资产透视与倍率审计 (Model Inventory)
+
+WorkBuddy 官方界面通常弱化或隐藏各模型的实际积分扣减倍率与最新状态。通过逆向其模型目录接口与会话历史，工具箱提供了 `wb-models` 全景透视功能：
+
+- **动态全量资产抓取**：实时拉取官方开放的全部可用模型（含限免、折算倍率、输入输出上下文长度）；
+- **倍率与成本透视**：直观展示 `x0.00`（完全免费）、`x0.50`、`x1.00` 等计费阶梯，辅助开发者以极致成本效益组合模型；
+- **交互式轻量终端选择器 (TUI)**：支持在纯终端中方向键浏览与切换，无需启动庞大 Electron 窗口。
+
+---
+
+### 10. 🔥 沙盒日志暴走根因与无感物理看门狗治理 (Log Guardian)
+
+#### (1) 沙盒日志吃满磁盘的底层根因
+WorkBuddy 的 `sandbox-core` 组件负责管理每个独立沙盒进程与交互式终端（PTY）。为了满足审计合规与沙盒拦截追踪，底层会对进程每一次命令执行、标准输入输出（PTY 字节流）以及动态决策进行全量落盘（保存在 `~/.workbuddy/logs/sandbox/YYYYMMDD/sandbox_<pid>_<idx>.log`）。
+虽然单文件按 13MB 自动滚动，但**官方完全未设计任何 TTL 淘汰策略或总量配额上限**！
+在多 Agent 高频编码、编译或跑自动化测试的场景下：
+- 单日产生的日志量即可高达 **5 ~ 7 GB**；
+- 运行 3~4 天即可堆积 **15 GB 以上的纯垃圾日志**，直接将本就不宽裕的系统盘彻底吞干！
+
+#### (2) 四重物理防御网 (`workbuddy-log-guard`)
+为了实现极致克制与绝对自愈，项目设计了高内聚的守护进程组件：
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              WorkBuddy Log Guardian (四重物理防御网)              │
+├──────────────────────────────────────────────────────────────────┤
+│ 1. Open-FD 感知   : lsof 识别活跃句柄，对被持有着只 truncate 不 delete │
+│ 2. 36小时 TTL     : 自动物理淘汰超过 36h (-mmin +2160) 的历史日志   │
+│ 3. 2GB 容量硬顶   : 目录总量突破 2GB 时，按 stat 时间强制修剪至 1.5GB  │
+│ 4. 30MB 单文件熔断: 异常单文件超 30MB 自动 truncate -s 0 即刻释放 APFS│
+└──────────────────────────────────────────────────────────────────┘
+```
+
+1. **Open-FD 句柄安全感知 (Zero Disruption)**：通过 `lsof -F n +D` 递归探测所有正在被 `sandbox-core` 读写的日志文件。**对被进程持有打开的文件只执行 `truncate -s 0`，坚决不 unlink 删除**，杜绝“文件被删但 APFS 物理块被进程死锁无法释放”的陷阱；
+2. **36 小时精细化 TTL 淘汰**：自动清除 36 小时（2160 分钟）前的所有历史沙盒日志，今日目录（`YYYYMMDD`）永久保护，绝不误触当前正在运行的会话；
+3. **2 GB 目录容量硬顶截断 (Hard Cap)**：即便 36 小时内因为高频并发跑测试导致日志激增，只要目录总量超过 2GB，立即按 `mtime` 从最旧的文件开始淘汰，强行将水位拉回 1.5GB，**物理层面彻底封死打满磁盘的可能性**；
+4. **单文件 30MB 物理熔断**：单文件异常暴走超过 30MB 时瞬间清零，零损耗释放磁盘块。
+
+#### (3) 极简无感运行
+macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟静默触发一次，执行耗时 **< 20ms**，平时无事件时线程在内核中纯休眠，CPU 占用保持在绝对 **0.0%**。
+
+---
+
 ## 三、快速上手与安装升级
 
-### 🔄 老用户平滑升级指南（30 秒升级到 v0.3.1）
+### 🔄 老用户平滑升级指南（30 秒升级到 v0.4.1）
 
-如果您之前已经安装过旧版 workbuddy-toolkit，升级到 v0.3.1 极其简单，**无需重新配置任何 Profile，原有数据与账号 100% 平滑保留**：
+如果您之前已经安装过旧版 workbuddy-toolkit，升级到 v0.4.1 极其简单，**无需重新配置任何 Profile，原有数据与账号 100% 平滑保留**：
 
 ```bash
 # 1. 进入本地已有仓库目录，拉取最新发布代码
@@ -575,13 +659,81 @@ API capability        : READY
 RESULT: COMPATIBLE
 ```
 
-### 5. 查看账号状态与凭证有效期
+### 5. 容灾轮换路由网关 (`wb-router`)
+
+提供一站式管理 `:8047` 本地透明容灾轮换服务：
+
+```bash
+# 查看路由网关当前运行状态与监听端口 (默认 8047)
+wb-router status
+
+# 启动容灾轮换网关服务
+wb-router start
+
+# 停止网关服务
+wb-router stop
+
+# 实时追踪容灾轮换日志与故障自动降级流水
+wb-router log
+```
+
+### 6. 模型全景资产与倍率透视 (`wb-models`)
+
+一键呼出终端轻量交互式选择器 (TUI)，直观透视全量模型、折扣倍率与历史偏好：
+
+```bash
+# 启动模型资产透视与终端选择器
+wb-models
+```
+
+输出示例：
+```text
+=== WorkBuddy 模型全景资产与倍率透视 ===
+可用模型列表 (实时拉取):
+  ▶ 1) hy3                 [混元 3.0]      倍率: x0.00 (限免/推荐主力)
+    2) space-bunny-free    [Space Bunny]  倍率: x0.00 (免费额度)
+    3) deepseek-v4-flash   [DeepSeek V4]  倍率: x0.10 (极低消耗)
+    4) glm-5v-turbo        [GLM 5V Turbo] 倍率: x0.50 (低消耗兜底)
+    5) auto                [智能动态路由]   倍率: 动态阶梯
+--------------------------------------------------
+快捷操作: [上下键] 移动选择  [Enter] 确认切换  [q] 退出
+```
+
+### 7. 沙盒日志看门狗配置与管理 (`workbuddy-log-guard`)
+
+彻底根治 WorkBuddy 长期运行后 PTY 沙盒日志吞噬 10GB+ 磁盘积弊：
+
+```bash
+# 手动立即触发一次日志安全审计与物理修剪
+workbuddy-log-guard
+```
+
+#### 自定义配置方案 (`~/.workbuddy/log_guard.json`)
+默认零配置开箱即用。若需自定义清理频次或配额，可创建或编辑配置文件：
+
+```json
+{
+  "ttl_minutes": 2160,       // 日志 TTL 过期淘汰时长 (默认 2160 分钟 = 36 小时)
+  "max_sandbox_mb": 2048,    // 沙盒日志目录容量硬顶 (默认 2048 MB = 2 GB)
+  "target_sandbox_mb": 1536, // 达到硬顶时自动修剪目标回落水位 (默认 1536 MB = 1.5 GB)
+  "max_file_mb": 30          // 单个日志文件物理熔断清零阈值 (默认 30 MB)
+}
+```
+
+#### 环境变量覆盖机制
+亦可通过系统环境变量覆盖以上参数（优先级高于配置文件）：
+- `WB_TTL_MINUTES`：覆盖 TTL 分钟数；
+- `WB_MAX_SANDBOX_MB`：覆盖目录总配额上限；
+- `WB_TARGET_SANDBOX_MB`：覆盖清理目标水位；
+- `WB_MAX_FILE_MB`：覆盖单文件熔断上限。
+
+### 8. 查看账号状态与凭证有效期
 
 ```bash
 workbuddy status
 ```
 
-### 6. 保存新登录的账号
+### 9. 保存新登录的账号
 
 当你在 WorkBuddy 界面退出并用微信扫码登录了新账号后：
 ```bash
@@ -590,7 +742,7 @@ workbuddy save <取一个名字>
 ```
 *注：即使你忘记执行 `save`，下次运行 `wb-checkin` 时脚本也会自动识别新账号并完成自动建档入库。*
 
-### 7. 常用命令速查表
+### 10. 常用命令速查表
 
 | 命令 | 别名 | 功能说明 |
 | :--- | :--- | :--- |
@@ -598,6 +750,9 @@ workbuddy save <取一个名字>
 | `workbuddy checkin [别名]` | `wb-checkin` | 统一执行所有已存账号每日签到 + 自动调用低倍率/免费模型每日对话 |
 | `workbuddy chat [提示词]` | `wb-chat` | 终端极速对话（智能优先使用 `hy3`、`deepseek-flash` 等免费低消耗模型） |
 | `workbuddy chat --all [词]` | `wb-chat --all` | 全账号批量发起对话，一键刷新全账号连续对话奖励资格 |
+| `workbuddy router [子命令]` | `wb-router` | 管理 `:8047` 容灾轮换路由网关（`status` / `start` / `stop` / `log`） |
+| `workbuddy models` | `wb-models` | 呼出模型全景资产、倍率透视与轻量终端选择器 (TUI) |
+| `workbuddy-log-guard` | - | 触发沙盒日志物理看门狗（36h TTL、2GB 硬顶、30MB 熔断、Open-FD 保护） |
 | `workbuddy doctor` | `wb-doctor` | 深度诊断凭据加密套件、本地运行时路径与解密通信就绪度 |
 | `workbuddy status` | `workbuddy list` | 查看当前活跃账号、Token 有效期及全部本地凭证列表 |
 | `workbuddy save <别名>` | - | 将当前活跃登录态固化为一个可切换的 Profile |
