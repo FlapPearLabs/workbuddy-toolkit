@@ -584,14 +584,27 @@ def get_profiles():
                     data = json.load(f)
                     acc = data.get("account", {}) if isinstance(data, dict) else {}
                     nick = get_display_nickname(acc, default_name=name)
+                    uid_raw = acc.get("uid") if isinstance(acc, dict) else ""
+                    uid_str = str(uid_raw).strip() if uid_raw is not None else ""
+                    uin_raw = acc.get("uin") if isinstance(acc, dict) else ""
+                    uin_str = str(uin_raw).strip() if uin_raw is not None else ""
+                    auth_d = data.get("auth", {}) if isinstance(data, dict) and isinstance(data.get("auth"), dict) else {}
+                    try:
+                        exp_at = int(auth_d.get("expiresAt") or 0)
+                    except (ValueError, TypeError):
+                        exp_at = 0
+                    try:
+                        ref_exp_at = int(auth_d.get("refreshExpiresAt") or 0)
+                    except (ValueError, TypeError):
+                        ref_exp_at = 0
                     profiles[name] = {
                         "path": fpath,
                         "data": data,
-                        "uid": acc.get("uid", "") if isinstance(acc, dict) else "",
+                        "uid": uid_str,
                         "nickname": nick,
-                        "uin": acc.get("uin", "") if isinstance(acc, dict) else "",
-                        "expiresAt": data.get("auth", {}).get("expiresAt", 0) if isinstance(data, dict) and isinstance(data.get("auth"), dict) else 0,
-                        "refreshExpiresAt": data.get("auth", {}).get("refreshExpiresAt", 0) if isinstance(data, dict) and isinstance(data.get("auth"), dict) else 0
+                        "uin": uin_str,
+                        "expiresAt": exp_at,
+                        "refreshExpiresAt": ref_exp_at
                     }
             except Exception:
                 pass
@@ -601,10 +614,13 @@ def format_timestamp(ts):
     if not ts:
         return "未知"
     try:
-        dt = datetime.fromtimestamp(ts / 1000)
+        val = float(ts)
+        if val <= 0:
+            return "未知"
+        dt = datetime.fromtimestamp(val / 1000)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
-        return str(ts)
+        return "未知"
 
 def resolve_profile_alias_conflict(alias, current_uid, force=False):
     """
@@ -1055,16 +1071,26 @@ def check_profile_health(profile_info, force=False):
     3. 静默自愈续期：仅当 accessToken 已过期且 refreshToken 有效时，进行单次受控刷新。
     返回: dict(status="HEALTHY"|"REFRESHED"|"EXPIRED", detail=str, cached=bool)
     """
+    if not isinstance(profile_info, dict):
+        return {"status": "EXPIRED", "detail": "无效的凭据数据结构", "cached": False}
     now = int(time.time() * 1000)
-    uid = profile_info.get("uid", "")
-    expires_at = profile_info.get("expiresAt", 0)
-    refresh_expires_at = profile_info.get("refreshExpiresAt", 0)
+    uid = str(profile_info.get("uid") or "").strip()
+    expires_at = profile_info.get("expiresAt")
+    refresh_expires_at = profile_info.get("refreshExpiresAt")
     data_dict = profile_info.get("data", {}) if isinstance(profile_info.get("data"), dict) else {}
     auth_dict = data_dict.get("auth", {}) if isinstance(data_dict.get("auth"), dict) else {}
     if not expires_at:
-        expires_at = auth_dict.get("expiresAt", 0)
+        expires_at = auth_dict.get("expiresAt")
     if not refresh_expires_at:
-        refresh_expires_at = auth_dict.get("refreshExpiresAt", 0)
+        refresh_expires_at = auth_dict.get("refreshExpiresAt")
+    try:
+        expires_at = int(expires_at or 0)
+    except (ValueError, TypeError):
+        expires_at = 0
+    try:
+        refresh_expires_at = int(refresh_expires_at or 0)
+    except (ValueError, TypeError):
+        refresh_expires_at = 0
 
     # 1. 检查本地 30 分钟审计缓存
     cache = get_audit_cache()
@@ -1578,25 +1604,36 @@ def run_login(alias=None, auto_switch=True, force=False):
 def show_status(as_json=False):
     active_data = get_active_account()
     profiles = get_profiles()
-    active_uid = active_data.get("account", {}).get("uid") if isinstance(active_data, dict) else None
+    is_valid_active = bool(
+        isinstance(active_data, dict) and 
+        (active_data.get("account") or active_data.get("auth"))
+    )
+    active_uid = str(active_data.get("account", {}).get("uid") or "").strip() if is_valid_active else ""
 
     if as_json:
         active_dict = None
-        if active_data:
+        if is_valid_active:
             acc = active_data.get("account", {}) if isinstance(active_data, dict) else {}
             auth = active_data.get("auth", {}) if isinstance(active_data, dict) else {}
-            uid = acc.get("uid", "") if isinstance(acc, dict) else ""
+            uid = str(acc.get("uid") or "").strip() if isinstance(acc, dict) else ""
             nickname = get_display_nickname(acc, default_name="未命名")
             raw_token = auth.get("accessToken") if isinstance(auth, dict) else None
             token_fmt = check_token_format(raw_token)
-            expires = auth.get("expiresAt", 0) if isinstance(auth, dict) else 0
-            refresh_expires = auth.get("refreshExpiresAt", 0) if isinstance(auth, dict) else 0
+            try:
+                expires = int(auth.get("expiresAt") or 0) if isinstance(auth, dict) else 0
+            except (ValueError, TypeError):
+                expires = 0
+            try:
+                refresh_expires = int(auth.get("refreshExpiresAt") or 0) if isinstance(auth, dict) else 0
+            except (ValueError, TypeError):
+                refresh_expires = 0
 
             match_name = None
-            for name, p in profiles.items():
-                if p["uid"] == uid:
-                    match_name = name
-                    break
+            if uid:
+                for name, p in profiles.items():
+                    if p.get("uid") and p["uid"] == uid:
+                        match_name = name
+                        break
 
             active_prof = {
                 "data": active_data,
@@ -1605,7 +1642,7 @@ def show_status(as_json=False):
                 "expiresAt": expires,
                 "refreshExpiresAt": refresh_expires
             }
-            act_health = check_profile_health(active_prof, force=False)
+            act_health = check_profile_health(active_prof, force=False) or {}
 
             active_dict = {
                 "profile_name": match_name,
@@ -1617,31 +1654,40 @@ def show_status(as_json=False):
                 "refresh_expires_at": refresh_expires,
                 "refresh_expires_at_formatted": format_timestamp(refresh_expires),
                 "health": {
-                    "status": act_health.get("status"),
-                    "detail": act_health.get("detail"),
+                    "status": act_health.get("status", "EXPIRED"),
+                    "detail": act_health.get("detail", "未知"),
                     "cached": act_health.get("cached", False)
                 }
             }
 
         profiles_list = []
         for name, p in profiles.items():
-            is_active = bool(active_uid and p["uid"] == active_uid)
+            is_active = bool(active_uid and p.get("uid") and p["uid"] == active_uid)
             p_tok = p["data"].get("auth", {}).get("accessToken") if isinstance(p.get("data"), dict) and isinstance(p["data"].get("auth"), dict) else None
             p_fmt = check_token_format(p_tok)
-            h = check_profile_health(p, force=False)
+            h = check_profile_health(p, force=False) or {}
+            try:
+                p_exp = int(p.get("expiresAt") or 0)
+            except (ValueError, TypeError):
+                p_exp = 0
+            try:
+                p_ref_exp = int(p.get("refreshExpiresAt") or 0)
+            except (ValueError, TypeError):
+                p_ref_exp = 0
+
             profiles_list.append({
                 "name": name,
-                "nickname": p["nickname"],
-                "uid": p["uid"],
+                "nickname": p.get("nickname", name),
+                "uid": p.get("uid", ""),
                 "is_active": is_active,
                 "storage_format": p_fmt,
-                "expires_at": p["expiresAt"],
-                "expires_at_formatted": format_timestamp(p["expiresAt"]),
-                "refresh_expires_at": p["refreshExpiresAt"],
-                "refresh_expires_at_formatted": format_timestamp(p["refreshExpiresAt"]),
+                "expires_at": p_exp,
+                "expires_at_formatted": format_timestamp(p_exp),
+                "refresh_expires_at": p_ref_exp,
+                "refresh_expires_at_formatted": format_timestamp(p_ref_exp),
                 "health": {
-                    "status": h.get("status"),
-                    "detail": h.get("detail"),
+                    "status": h.get("status", "EXPIRED"),
+                    "detail": h.get("detail", "未知"),
                     "cached": h.get("cached", False)
                 }
             })
@@ -1656,23 +1702,33 @@ def show_status(as_json=False):
         return
 
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 账号状态 ({sys.platform}) ==={COLOR_RESET}")
-    if not active_data:
+    if not is_valid_active:
         print(f"{COLOR_YELLOW}当前未检测到活跃的登录凭证。{COLOR_RESET}")
     else:
         acc = active_data.get("account", {}) if isinstance(active_data, dict) else {}
         auth = active_data.get("auth", {}) if isinstance(active_data, dict) else {}
-        uid = acc.get("uid", "") if isinstance(acc, dict) else ""
+        uid = str(acc.get("uid") or "").strip() if isinstance(acc, dict) else ""
         nickname = get_display_nickname(acc, default_name="未命名")
         raw_token = auth.get("accessToken") if isinstance(auth, dict) else None
         token_fmt = check_token_format(raw_token)
-        expires = format_timestamp(auth.get("expiresAt", 0) if isinstance(auth, dict) else 0)
-        refresh_expires = format_timestamp(auth.get("refreshExpiresAt", 0) if isinstance(auth, dict) else 0)
+        try:
+            exp_raw = int(auth.get("expiresAt") or 0) if isinstance(auth, dict) else 0
+        except (ValueError, TypeError):
+            exp_raw = 0
+        try:
+            ref_exp_raw = int(auth.get("refreshExpiresAt") or 0) if isinstance(auth, dict) else 0
+        except (ValueError, TypeError):
+            ref_exp_raw = 0
+
+        expires = format_timestamp(exp_raw)
+        refresh_expires = format_timestamp(ref_exp_raw)
 
         match_name = None
-        for name, p in profiles.items():
-            if p["uid"] == uid:
-                match_name = name
-                break
+        if uid:
+            for name, p in profiles.items():
+                if p.get("uid") and p["uid"] == uid:
+                    match_name = name
+                    break
 
         display_name = f"{nickname} ({match_name})" if match_name else nickname
         print(f"当前活跃账号: {COLOR_BOLD}{COLOR_GREEN}{display_name}{COLOR_RESET}")
@@ -1685,35 +1741,48 @@ def show_status(as_json=False):
             "data": active_data,
             "uid": uid,
             "path": AUTH_FILE,
-            "expiresAt": auth.get("expiresAt", 0) if isinstance(auth, dict) else 0,
-            "refreshExpiresAt": auth.get("refreshExpiresAt", 0) if isinstance(auth, dict) else 0
+            "expiresAt": exp_raw,
+            "refreshExpiresAt": ref_exp_raw
         }
-        act_health = check_profile_health(active_prof, force=False)
-        if act_health["status"] == "HEALTHY":
-            act_badge = f"{COLOR_GREEN}✔ 正常 ({act_health['detail']}){COLOR_RESET}"
-        elif act_health["status"] == "REFRESHED":
-            act_badge = f"{COLOR_CYAN}🔄 已自愈续期 ({act_health['detail']}){COLOR_RESET}"
+        act_health = check_profile_health(active_prof, force=False) or {}
+        act_status = act_health.get("status", "EXPIRED")
+        act_detail = act_health.get("detail", "未知状态")
+        if act_status == "HEALTHY":
+            act_badge = f"{COLOR_GREEN}✔ 正常 ({act_detail}){COLOR_RESET}"
+        elif act_status == "REFRESHED":
+            act_badge = f"{COLOR_CYAN}🔄 已自愈续期 ({act_detail}){COLOR_RESET}"
         else:
-            act_badge = f"{COLOR_RED}✖ 已失效 ({act_health['detail']}){COLOR_RESET}"
+            act_badge = f"{COLOR_RED}✖ 已失效 ({act_detail}){COLOR_RESET}"
         print(f"凭证健康状态: {act_badge}")
 
     print(f"\n已保存的账号凭证库 ({len(profiles)} 个):")
     if not profiles:
         print("  (暂无保存的账号凭证，可通过 workbuddy save <别名> 或 workbuddy login <别名> 保存)")
     for name, p in profiles.items():
-        is_active = active_data and isinstance(active_data, dict) and active_data.get("account", {}).get("uid") == p["uid"]
+        is_active = bool(active_uid and p.get("uid") and p["uid"] == active_uid)
         tag = f"{COLOR_GREEN}[当前活动]{COLOR_RESET}" if is_active else "         "
-        masked_uid = f"{p['uid'][:8]}..." if len(p["uid"]) > 8 else p["uid"]
+        p_uid = str(p.get("uid") or "")
+        masked_uid = f"{p_uid[:8]}..." if len(p_uid) > 8 else (p_uid or "无UID")
         p_tok = p["data"].get("auth", {}).get("accessToken") if isinstance(p.get("data"), dict) and isinstance(p["data"].get("auth"), dict) else None
         p_fmt = check_token_format(p_tok)
-        h = check_profile_health(p, force=False)
-        if h["status"] == "HEALTHY":
+        h = check_profile_health(p, force=False) or {}
+        h_status = h.get("status", "EXPIRED")
+        h_detail = h.get("detail", "未知状态")
+        if h_status == "HEALTHY":
             h_badge = f"{COLOR_GREEN}[正常]{COLOR_RESET}"
-        elif h["status"] == "REFRESHED":
+        elif h_status == "REFRESHED":
             h_badge = f"{COLOR_CYAN}[已续期]{COLOR_RESET}"
         else:
             h_badge = f"{COLOR_RED}[已失效]{COLOR_RESET}"
-        print(f" {tag} • {COLOR_BOLD}{name:<12}{COLOR_RESET} 昵称: {p['nickname']} (UID: {masked_uid}) [{p_fmt}] {h_badge} 有效期至: {format_timestamp(p['expiresAt'])}")
+        p_exp = p.get("expiresAt", 0)
+        p_ref = p.get("refreshExpiresAt", 0)
+        if p_exp:
+            exp_label = f"有效期至: {format_timestamp(p_exp)}"
+        elif p_ref:
+            exp_label = f"刷新期至: {format_timestamp(p_ref)}"
+        else:
+            exp_label = "有效期至: 未知"
+        print(f" {tag} • {COLOR_BOLD}{name:<12}{COLOR_RESET} 昵称: {p.get('nickname', name)} (UID: {masked_uid}) [{p_fmt}] {h_badge} {exp_label}")
     print()
 
 def restart_workbuddy():
@@ -2698,7 +2767,8 @@ def main():
             return
         ok = run_audit(force=force, notify_on_expired=True)
         sys.exit(0 if ok else 1)
-    if "list" in prog_name or "status" in prog_name:
+    clean_prog = prog_name.replace(".cmd", "").replace(".exe", "")
+    if clean_prog in ("wb-list", "workbuddy-list", "wb-status", "workbuddy-status") or clean_prog.endswith(("-list", "-status")):
         if any(a in ("-h", "--help", "help") for a in args):
             print(f"用法: {prog_name} [--json]")
             return
@@ -2735,6 +2805,11 @@ def main():
         return
 
     cmd = args[0].lower()
+    if cmd in ["--json", "-j"]:
+        sub_args = args[1:]
+        if not sub_args or any(s in ["list", "ls", "status", "info", "whoami"] for s in sub_args):
+            show_status(as_json=True)
+            return
     if cmd in ["login", "signin", "auth"]:
         sub_args = args[1:]
         if any(a in ("-h", "--help", "help") for a in sub_args):

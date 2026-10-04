@@ -2,7 +2,7 @@
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
 [![Release: v0.5.0](https://img.shields.io/badge/Release-v0.5.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 69/69 Passed](https://img.shields.io/badge/Tests-69%2F69%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests: 70/70 Passed](https://img.shields.io/badge/Tests-70%2F70%20Passed%20(100%25)-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)

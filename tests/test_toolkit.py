@@ -1344,7 +1344,91 @@ class TestWorkBuddyCore(unittest.TestCase):
         self.assertNotIn(secret_canary, plain_text)
         self.assertNotIn("refresh_canary_54321", plain_text)
 
+    def test_t47_show_status_and_health_edge_cases_and_null_timestamps(self):
+        """T47: 校验 null 时间戳、null UID、损坏或空配置下 show_status 与 check_profile_health 的安全兜底"""
+        import io
+
+        # 1. 验证 check_profile_health 对 null 时间戳及非字典输入不崩溃
+        self.assertEqual(workbuddy.check_profile_health(None)["status"], "EXPIRED")
+        self.assertEqual(workbuddy.check_profile_health("not_a_dict")["status"], "EXPIRED")
+
+        null_ts_prof = {
+            "data": {
+                "account": {"uid": "uid_null_ts", "nickname": "NullTsUser"},
+                "auth": {"accessToken": "some_tok", "expiresAt": None, "refreshExpiresAt": None}
+            }
+        }
+        res_null = workbuddy.check_profile_health(null_ts_prof)
+        self.assertIn("status", res_null)
+
+        # 2. 验证 format_timestamp 边界与异常入参
+        self.assertEqual(workbuddy.format_timestamp(None), "未知")
+        self.assertEqual(workbuddy.format_timestamp(0), "未知")
+        self.assertEqual(workbuddy.format_timestamp(-1000), "未知")
+        self.assertEqual(workbuddy.format_timestamp("invalid_non_numeric"), "未知")
+        formatted = workbuddy.format_timestamp(1900000000000)
+        self.assertRegex(formatted, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+        formatted_str = workbuddy.format_timestamp("1900000000000")
+        self.assertEqual(formatted, formatted_str)
+
+        # 3. 构造包含 null 时间戳与 null UID 的异常活跃账号与 Profile
+        bad_active = {
+            "account": {"uid": None, "nickname": "NullUidActive"},
+            "auth": {"accessToken": "act_tok", "expiresAt": None, "refreshExpiresAt": None}
+        }
+        with open(workbuddy.AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump(bad_active, f)
+
+        prof_bad = os.path.join(workbuddy.PROFILES_DIR, "bad_acc.info")
+        with open(prof_bad, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": None, "nickname": "BadAcc"},
+                "auth": {"accessToken": "bad_tok", "expiresAt": None, "refreshExpiresAt": None}
+            }, f)
+
+        # 验证 JSON 输出不崩溃且结构完整
+        buf_json = io.StringIO()
+        with patch("sys.stdout", buf_json):
+            workbuddy.show_status(as_json=True)
+        j_data = json.loads(buf_json.getvalue().strip())
+        self.assertIn("active_account", j_data)
+        self.assertEqual(j_data["total_profiles"], 1)
+        self.assertEqual(j_data["profiles"][0]["expires_at_formatted"], "未知")
+
+        # 验证文本输出不崩溃
+        buf_text = io.StringIO()
+        with patch("sys.stdout", buf_text):
+            workbuddy.show_status(as_json=False)
+        self.assertIn("=== WorkBuddy 账号状态", buf_text.getvalue())
+
+        # 4. 验证完全空的 auth.json
+        with open(workbuddy.AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+
+        buf_empty = io.StringIO()
+        with patch("sys.stdout", buf_empty):
+            workbuddy.show_status(as_json=True)
+        j_empty = json.loads(buf_empty.getvalue().strip())
+        self.assertIsNone(j_empty["active_account"])
+
+        # 5. 验证 CLI 命令 workbuddy --json 直接支持
+        buf_cli = io.StringIO()
+        with patch("sys.stdout", buf_cli):
+            with patch("sys.argv", ["workbuddy", "--json"]):
+                workbuddy.main()
+        j_cli = json.loads(buf_cli.getvalue().strip())
+        self.assertIn("platform", j_cli)
+
+        # 6. 验证 CLI 命令 workbuddy-list --json 别名支持
+        buf_wb_list = io.StringIO()
+        with patch("sys.stdout", buf_wb_list):
+            with patch("sys.argv", ["workbuddy-list", "--json"]):
+                workbuddy.main()
+        j_wb_list = json.loads(buf_wb_list.getvalue().strip())
+        self.assertIn("platform", j_wb_list)
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

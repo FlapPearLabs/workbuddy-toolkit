@@ -52,7 +52,9 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-login.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-audit.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-list.cmd")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-list.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-status.cmd")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-status.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-switch.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-checkin.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-chat.cmd")))
@@ -63,7 +65,9 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-login")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-audit")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-list")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-list")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-status")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-status")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-switch")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-checkin")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-chat")))
@@ -73,6 +77,18 @@ class TestInstallersE2E(unittest.TestCase):
         unres = subprocess.run([sys.executable, uninstaller], input="n\n", cwd=REPO_DIR, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(unres.returncode, 0, f"uninstall.py 失败: {unres.stderr}\n{unres.stdout}")
         self.assertIn("卸载完成", unres.stdout)
+
+        # 4. 验证清理干净
+        if sys.platform == "win32":
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-list.cmd")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-list.cmd")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-status.cmd")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-status.cmd")))
+        else:
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-list")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-list")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-status")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-status")))
 
 if __name__ == "__main__":
     unittest.main()
