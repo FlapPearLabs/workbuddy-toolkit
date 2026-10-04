@@ -69,7 +69,7 @@ jobs:
               (r'C:\\\\Users\\\\(?!runneradmin\b)[a-zA-Z0-9_\-]+', 'Windows local user home path'),
               (r'/home/(?!runner\b)[a-zA-Z0-9_\-]+', 'Linux local user home path'),
               (r'eyJh[A-Za-z0-9_\-\.]{25,}', 'JWT Bearer token'),
-              (r'1[3-9]\d{9}', 'Mainland China 11-digit phone number')
+              (r'(?<!\d)1[3-9]\d{9}(?!\d)', 'Mainland China 11-digit phone number')
           ]
           leaks = []
           for root, dirs, files in os.walk('.'):

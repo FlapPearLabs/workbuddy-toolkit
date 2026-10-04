@@ -1216,7 +1216,7 @@ class TestWorkBuddyCore(unittest.TestCase):
             "auth": {
                 "accessToken": "plain_act_token",
                 "expiresAt": 1900000000000,
-                "refreshExpiresAt": 1950000000000
+                "refreshExpiresAt": 1900000000000
             }
         }
         with open(workbuddy.AUTH_FILE, "w", encoding="utf-8") as f:
@@ -1233,7 +1233,7 @@ class TestWorkBuddyCore(unittest.TestCase):
                 "auth": {
                     "accessToken": "plain_other_token",
                     "expiresAt": 1900000000000,
-                    "refreshExpiresAt": 1950000000000
+                    "refreshExpiresAt": 1900000000000
                 }
             }, f)
 
