@@ -1,0 +1,66 @@
+name: WorkBuddy Remote Compatibility & Encryption Monitor
+
+on:
+  schedule:
+    # 每 2 天在 UTC 02:00 (北京时间 10:00) 自动触发一次监控探测
+    - cron: '0 2 */2 * *'
+  workflow_dispatch:
+
+jobs:
+  compatibility-monitor:
+    name: WorkBuddy Compatibility Monitor (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    env:
+      PYTHONIOENCODING: "utf-8"
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run WorkBuddy Compatibility & Encryption Monitor
+        run: |
+          python scripts/compat_monitor.py
+
+      - name: Upload Failure Diagnostics Artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-failure-report-${{ matrix.os }}
+          path: monitor_failure_report.txt
+          if-no-files-found: ignore
+
+      # GitHub 原生失败邮件机制说明：
+      # 当监控或断言步骤失败时，主 Job 会确定性以 exit 1 退出，
+      # GitHub 官方原生机制会自动向提交者、仓库所有者与 Watchers 发送失败提醒邮件（零配置开箱即用）。
+      #
+      # 下方的自定义 SMTP 步骤为纯可选增强通道（用于向特定第三方邮箱/企业邮件组推送告警）：
+      # 仅在用户显式配置了 MAIL_USERNAME 与 MAIL_PASSWORD Secrets 时执行；未配置直接静默跳过，绝不阻塞。
+      - name: Send Email Alert on Compatibility Failure (Optional Custom SMTP)
+        if: failure() && env.MAIL_USERNAME != '' && env.MAIL_PASSWORD != ''
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        continue-on-error: true
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.MAIL_SERVER || 'smtp.qq.com' }}
+          server_port: ${{ secrets.MAIL_PORT || 465 }}
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "🚨 [WorkBuddy Monitor Alert] 最新版本兼容性断言失败 (${{ matrix.os }})"
+          to: ${{ secrets.MAIL_TO || secrets.MAIL_USERNAME }}
+          from: ${{ secrets.MAIL_FROM || secrets.MAIL_USERNAME }}
+          body: file://monitor_failure_report.txt
+

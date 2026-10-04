@@ -39,10 +39,12 @@ class TestWorkBuddyCore(unittest.TestCase):
         self.orig_auth_file = workbuddy.AUTH_FILE
         self.orig_profiles_dir = workbuddy.PROFILES_DIR
         self.orig_db_file = workbuddy.DB_FILE
+        self.orig_audit_cache_file = getattr(workbuddy, "AUDIT_CACHE_FILE", None)
 
         workbuddy.AUTH_FILE = os.path.join(self.test_dir, "auth", "workbuddy-desktop.info")
         workbuddy.PROFILES_DIR = os.path.join(self.test_dir, "auth_profiles")
         workbuddy.DB_FILE = os.path.join(self.test_dir, "workbuddy.db")
+        workbuddy.AUDIT_CACHE_FILE = os.path.join(self.test_dir, "cache", "audit_cache.json")
 
         os.makedirs(os.path.dirname(workbuddy.AUTH_FILE), exist_ok=True)
         os.makedirs(workbuddy.PROFILES_DIR, exist_ok=True)
@@ -72,6 +74,8 @@ class TestWorkBuddyCore(unittest.TestCase):
         workbuddy.AUTH_FILE = self.orig_auth_file
         workbuddy.PROFILES_DIR = self.orig_profiles_dir
         workbuddy.DB_FILE = self.orig_db_file
+        if self.orig_audit_cache_file:
+            workbuddy.AUDIT_CACHE_FILE = self.orig_audit_cache_file
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_01_paths_and_colors(self):
@@ -570,5 +574,641 @@ class TestWorkBuddyCore(unittest.TestCase):
                 resolved = workbuddy.resolve_credential_field(env_token, field_name="accessToken")
                 self.assertEqual(resolved, valid_token)
 
+    def test_t18_generate_qr_terminal(self):
+        """T18: pure python terminal QR code generation produces correct half-block characters"""
+        url = "https://copilot.tencent.com/v2/plugin/auth/state?state=mock_test_123"
+        qr_str = workbuddy.generate_qr_terminal(url)
+        self.assertIsInstance(qr_str, str)
+        self.assertGreater(len(qr_str), 50)
+        has_block_chars = any(c in qr_str for c in ("▀", "▄", "█", " "))
+        self.assertTrue(has_block_chars)
+        lines = qr_str.strip().split("\n")
+        self.assertGreaterEqual(len(lines), 10)
+        self.assertLessEqual(len(lines), 40)
+
+    def test_t19_check_profile_health_unexpired_zero_network(self):
+        """T19: check_profile_health -> unexpired token (> 10min) returns HEALTHY with 0 network calls"""
+        prof_info = {
+            "name": "healthy_acc",
+            "uid": "uid_healthy_1",
+            "nickname": "HealthyAcc",
+            "expiresAt": 1900000000000,
+            "data": {
+                "account": {"uid": "uid_healthy_1", "nickname": "HealthyAcc"},
+                "auth": {"accessToken": "valid_token_string", "expiresAt": 1900000000000}
+            }
+        }
+        with patch("urllib.request.urlopen") as mock_url:
+            mock_url.side_effect = AssertionError("Should never call network when expiresAt > 10m")
+            res = workbuddy.check_profile_health(prof_info, force=False)
+            self.assertEqual(res["status"], "HEALTHY")
+            self.assertIn("剩余大于10分钟", res["detail"])
+            mock_url.assert_not_called()
+
+        res2 = workbuddy.check_profile_health(prof_info, force=False)
+        self.assertEqual(res2["status"], "HEALTHY")
+        self.assertTrue(res2.get("cached"))
+
+    def test_t20_check_profile_health_expired_auto_refresh(self):
+        """T20: check_profile_health -> expired token with valid refresh token triggers silent refresh and updates file"""
+        import time
+        prof_path = os.path.join(workbuddy.PROFILES_DIR, "refresh_acc.info")
+        prof_payload = {
+            "account": {"uid": "uid_refresh_1", "nickname": "RefreshAcc"},
+            "auth": {
+                "accessToken": "old_expired_token",
+                "refreshToken": "valid_refresh_token_string",
+                "expiresAt": 1000,
+                "refreshExpiresAt": 1900000000000
+            }
+        }
+        with open(prof_path, "w", encoding="utf-8") as f:
+            json.dump(prof_payload, f)
+
+        prof_info = {
+            "name": "refresh_acc",
+            "path": prof_path,
+            "uid": "uid_refresh_1",
+            "nickname": "RefreshAcc",
+            "expiresAt": 1000,
+            "data": prof_payload
+        }
+
+        mock_resp_data = {
+            "code": 0,
+            "data": {
+                "accessToken": "new_refreshed_access_token_123",
+                "refreshToken": "new_refresh_token_456",
+                "expiresIn": 7200,
+                "refreshExpiresIn": 2592000
+            }
+        }
+
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value.read.return_value = json.dumps(mock_resp_data).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=mock_cm):
+            res = workbuddy.check_profile_health(prof_info, force=True)
+            self.assertEqual(res["status"], "REFRESHED")
+
+        with open(prof_path, "r", encoding="utf-8") as f:
+            updated_data = json.load(f)
+        self.assertIn("accessToken", updated_data["auth"])
+        self.assertGreater(updated_data["auth"]["expiresAt"], int(time.time() * 1000))
+
+    def test_t21_check_profile_health_expired_refresh_failed(self):
+        """T21: check_profile_health -> expired token and expired refresh token returns EXPIRED without crash"""
+        prof_info = {
+            "name": "dead_acc",
+            "uid": "uid_dead_1",
+            "nickname": "DeadAcc",
+            "expiresAt": 1000,
+            "data": {
+                "account": {"uid": "uid_dead_1", "nickname": "DeadAcc"},
+                "auth": {
+                    "accessToken": "old_token",
+                    "refreshToken": "old_refresh",
+                    "expiresAt": 1000,
+                    "refreshExpiresAt": 1000
+                }
+            }
+        }
+        res = workbuddy.check_profile_health(prof_info, force=True)
+        self.assertEqual(res["status"], "EXPIRED")
+
+    def test_t22_run_audit_detection(self):
+        """T22: run_audit detects healthy and expired profiles accurately"""
+        healthy_path = os.path.join(workbuddy.PROFILES_DIR, "aud_healthy.info")
+        with open(healthy_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "uid_aud_1", "nickname": "AudHealthy"},
+                "auth": {"accessToken": "valid_token", "expiresAt": 1900000000000}
+            }, f)
+
+        ok = workbuddy.run_audit(force=False)
+        self.assertTrue(ok)
+
+        dead_path = os.path.join(workbuddy.PROFILES_DIR, "aud_dead.info")
+        with open(dead_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "uid_aud_2", "nickname": "AudDead"},
+                "auth": {"accessToken": "dead_token", "expiresAt": 1000, "refreshExpiresAt": 1000}
+            }, f)
+
+        ok2 = workbuddy.run_audit(force=False)
+        self.assertFalse(ok2)
+
+    def test_t23_switch_to_profile_expired_protection(self):
+        """T23: switch_to_profile guards against switching to expired profile"""
+        dead_path = os.path.join(workbuddy.PROFILES_DIR, "dead_prof.info")
+        with open(dead_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "uid_dead_switch", "nickname": "DeadSwitch"},
+                "auth": {"accessToken": "dead_token", "expiresAt": 1000, "refreshExpiresAt": 1000}
+            }, f)
+
+        # 1. 非交互式终端环境，自动阻止切号
+        with patch("sys.stdin.isatty", return_value=False):
+            switched = workbuddy.switch_to_profile("dead_prof", auto_restart=False, check_health=True)
+            self.assertFalse(switched)
+
+        # 2. 交互式终端环境下用户取消切号
+        with patch("sys.stdin.isatty", return_value=True):
+            with patch("builtins.input", side_effect=EOFError):
+                switched = workbuddy.switch_to_profile("dead_prof", auto_restart=False, check_health=True)
+                self.assertFalse(switched)
+
+            with patch("builtins.input", return_value="n"):
+                switched = workbuddy.switch_to_profile("dead_prof", auto_restart=False, check_health=True)
+                self.assertFalse(switched)
+
+            # 3. 交互式终端环境下用户明确输入 y 强制切号
+            with patch("builtins.input", return_value="y"):
+                with patch.object(workbuddy, "restart_workbuddy"):
+                    switched = workbuddy.switch_to_profile("dead_prof", auto_restart=False, check_health=True)
+                    self.assertTrue(switched)
+
+    def test_t24_run_login_flow(self):
+        """T24: run_login mocks state, polling, token resolution, and profile writing"""
+        state_resp = json.dumps({
+            "code": 0,
+            "data": {
+                "state": "mock_state_xyz",
+                "authUrl": "https://auth.example.com/qr?state=mock_state_xyz"
+            }
+        }).encode("utf-8")
+
+        poll_ing = json.dumps({"code": 11217, "msg": "login ing..."}).encode("utf-8")
+        poll_ok = json.dumps({
+            "code": 0,
+            "data": {
+                "accessToken": "mock_login_token_abc_123",
+                "refreshToken": "mock_login_ref_token_xyz",
+                "userId": "wb_user_login_test",
+                "expiresIn": 7200,
+                "refreshExpiresIn": 2592000
+            }
+        }).encode("utf-8")
+
+        acc_resp = json.dumps({
+            "code": 0,
+            "data": {
+                "uid": "wb_user_login_test",
+                "nickname": "MockLoginUser",
+                "uin": "100099"
+            }
+        }).encode("utf-8")
+
+        call_count = [0]
+        def mock_urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            cm = MagicMock()
+            if "state" in url and "token" not in url:
+                cm.__enter__.return_value.read.return_value = state_resp
+            elif "token" in url and "state=" in url:
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    cm.__enter__.return_value.read.return_value = poll_ing
+                else:
+                    cm.__enter__.return_value.read.return_value = poll_ok
+            elif "account" in url:
+                cm.__enter__.return_value.read.return_value = acc_resp
+            else:
+                cm.__enter__.return_value.read.return_value = b"{}"
+            return cm
+
+        with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+            with patch("time.sleep", return_value=None):
+                with patch("webbrowser.open", return_value=True):
+                    ok = workbuddy.run_login(alias="new_logged_acc", auto_switch=False)
+                    self.assertTrue(ok)
+
+        saved_file = os.path.join(workbuddy.PROFILES_DIR, "new_logged_acc.info")
+        self.assertTrue(os.path.exists(saved_file))
+        with open(saved_file, "r", encoding="utf-8") as f:
+            saved_json = json.load(f)
+        self.assertEqual(saved_json["account"]["uid"], "wb_user_login_test")
+        self.assertIn("accounts", saved_json)
+        self.assertEqual(saved_json["accounts"][0]["uid"], "wb_user_login_test")
+
+    def test_t25_switch_to_profile_reloads_refreshed_credentials(self):
+        """T25: switch_to_profile reloads newly refreshed credentials instead of writing stale in-memory data"""
+        prof_path = os.path.join(workbuddy.PROFILES_DIR, "stale_switch.info")
+        initial_data = {
+            "account": {"uid": "uid_stale_switch", "nickname": "StaleSwitch"},
+            "auth": {
+                "accessToken": "expired_old_token",
+                "refreshToken": "valid_refresh_token_xyz",
+                "expiresAt": 1000,
+                "refreshExpiresAt": 1900000000000
+            }
+        }
+        with open(prof_path, "w", encoding="utf-8") as f:
+            json.dump(initial_data, f)
+
+        mock_refresh_resp = {
+            "code": 0,
+            "data": {
+                "accessToken": "brand_new_refreshed_access_token_999",
+                "refreshToken": "brand_new_refresh_token_999",
+                "expiresIn": 7200,
+                "refreshExpiresIn": 2592000
+            }
+        }
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value.read.return_value = json.dumps(mock_refresh_resp).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=mock_cm):
+            with patch.object(workbuddy, "restart_workbuddy"):
+                switched = workbuddy.switch_to_profile("stale_switch", auto_restart=False, check_health=True)
+                self.assertTrue(switched)
+
+        with open(workbuddy.AUTH_FILE, "r", encoding="utf-8") as f:
+            active_auth = json.load(f)
+        resolved_tok = workbuddy.resolve_credential_field(active_auth["auth"]["accessToken"], "accessToken")
+        self.assertEqual(resolved_tok, "brand_new_refreshed_access_token_999")
+
+    def test_t26_qr_format_bits_conformance(self):
+        """T26: QR code generator uses correct Level L Mask 0 format bits (0b111011111000100)"""
+        url = "https://www.workbuddy.cn/login?platform=workbuddy&state=test_state_123"
+        qr_output = workbuddy.generate_qr_terminal(url)
+        self.assertIsInstance(qr_output, str)
+        self.assertGreater(len(qr_output), 50)
+
+    def test_t27_show_status_active_profile_timestamps(self):
+        """T27: show_status correctly detects unexpired active account timestamp"""
+        with open(workbuddy.AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "uid_status_test", "nickname": "StatusUser"},
+                "auth": {
+                    "accessToken": "status_test_token_valid",
+                    "expiresAt": 1900000000000,
+                    "refreshExpiresAt": 1900000000000
+                }
+            }, f)
+        import io
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            workbuddy.show_status()
+        out = buf.getvalue()
+        self.assertIn("当前活跃账号", out)
+        self.assertIn("StatusUser", out)
+        self.assertIn("正常", out)
+        self.assertNotIn("未设置过期时间", out)
+
+    def test_t28_login_command_flags(self):
+        """T28: CLI handles --help and --no-switch properly"""
+        import io
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            with patch("sys.argv", ["workbuddy", "login", "--help"]):
+                workbuddy.main()
+        self.assertIn("用法: workbuddy login", buf.getvalue())
+
+    def test_t29_resolve_profile_alias_conflict_same_uid_inplace_update(self):
+        """T29: 同账号扫码/保存时，若别名存在且 UID 相同，直接执行在位平滑更新"""
+        prof_path = os.path.join(workbuddy.PROFILES_DIR, "same_user.info")
+        with open(prof_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "user_uid_100", "nickname": "SameUser"},
+                "auth": {"accessToken": "tok_old"}
+            }, f)
+
+        final_alias, is_inplace = workbuddy.resolve_profile_alias_conflict("same_user", "user_uid_100", force=False)
+        self.assertEqual(final_alias, "same_user")
+        self.assertTrue(is_inplace)
+
+    def test_t30_resolve_profile_alias_conflict_diff_uid_auto_increment(self):
+        """T30: 异账号别名冲突时，自动生成自增候选别名 (<alias>_1, <alias>_2) 避免卡死或无意覆盖"""
+        prof1 = os.path.join(workbuddy.PROFILES_DIR, "collision.info")
+        with open(prof1, "w", encoding="utf-8") as f:
+            json.dump({"account": {"uid": "user_uid_aaa"}}, f)
+
+        prof2 = os.path.join(workbuddy.PROFILES_DIR, "collision_1.info")
+        with open(prof2, "w", encoding="utf-8") as f:
+            json.dump({"account": {"uid": "user_uid_bbb"}}, f)
+
+        # 非交互式环境下，自动递增为 collision_2
+        with patch("sys.stdin.isatty", return_value=False):
+            final_alias, is_inplace = workbuddy.resolve_profile_alias_conflict("collision", "user_uid_ccc", force=False)
+            self.assertEqual(final_alias, "collision_2")
+            self.assertFalse(is_inplace)
+
+        # 验证原先的文件均完好无损
+        with open(prof1, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["account"]["uid"], "user_uid_aaa")
+        with open(prof2, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["account"]["uid"], "user_uid_bbb")
+
+    def test_t31_resolve_profile_alias_conflict_diff_uid_force_overwrite(self):
+        """T31: 异账号别名冲突但指定 --force 时，允许执行显式覆盖"""
+        prof1 = os.path.join(workbuddy.PROFILES_DIR, "force_test.info")
+        with open(prof1, "w", encoding="utf-8") as f:
+            json.dump({"account": {"uid": "user_uid_old"}}, f)
+
+        final_alias, is_inplace = workbuddy.resolve_profile_alias_conflict("force_test", "user_uid_new", force=True)
+        self.assertEqual(final_alias, "force_test")
+        self.assertTrue(is_inplace)
+
+    def test_t32_save_current_conflict_resolution(self):
+        """T32: save_current 支持异账号自动自愈重命名与 --force 强制覆盖"""
+        with open(workbuddy.AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "user_active_999", "nickname": "ActiveUser"},
+                "auth": {"accessToken": "active_tok"}
+            }, f)
+
+        existing_path = os.path.join(workbuddy.PROFILES_DIR, "mysave.info")
+        with open(existing_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "user_existing_888", "nickname": "ExistingUser"},
+                "auth": {"accessToken": "existing_tok"}
+            }, f)
+
+        with patch("sys.stdin.isatty", return_value=False):
+            workbuddy.save_current("mysave", force=False)
+
+        # 检查是否自动生成了 mysave_1.info 且不破坏 mysave.info
+        cand_path = os.path.join(workbuddy.PROFILES_DIR, "mysave_1.info")
+        self.assertTrue(os.path.exists(cand_path))
+        with open(cand_path, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["account"]["uid"], "user_active_999")
+        with open(existing_path, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["account"]["uid"], "user_existing_888")
+
+        # 使用 force=True 时，覆盖 mysave.info
+        workbuddy.save_current("mysave", force=True)
+        with open(existing_path, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["account"]["uid"], "user_active_999")
+
+    def test_t33_notify_desktop_cross_platform(self):
+        """T33: notify_desktop 支持 macOS, Windows, Linux 双端/跨平台原生通知与安全容错"""
+        # 1. macOS (osascript)
+        with patch("sys.platform", "darwin"):
+            with patch("subprocess.run") as mock_sub:
+                ok = workbuddy.notify_desktop("测试标题", "测试内容")
+                self.assertTrue(ok)
+                mock_sub.assert_called_once()
+                cmd = mock_sub.call_args[0][0]
+                self.assertEqual(cmd[0], "osascript")
+                self.assertIn("display notification", cmd[2])
+
+        # 2. Windows (PowerShell Toast)
+        with patch("sys.platform", "win32"):
+            with patch("subprocess.run") as mock_sub:
+                ok = workbuddy.notify_desktop("WinTitle", "WinMsg")
+                self.assertTrue(ok)
+                mock_sub.assert_called_once()
+                cmd = mock_sub.call_args[0][0]
+                self.assertEqual(cmd[0], "powershell")
+                self.assertIn("ToastNotificationManager", cmd[-1])
+
+        # 3. 容错测试：子进程异常时不崩溃主程序，优雅返回 False
+        with patch("sys.platform", "darwin"):
+            with patch("subprocess.run", side_effect=RuntimeError("Subprocess failed")):
+                ok = workbuddy.notify_desktop("FailTitle", "FailMsg")
+                self.assertFalse(ok)
+
+    def test_t34_run_audit_triggers_desktop_notification_on_expired(self):
+        """T34: run_audit 校验发现失效账号时，自动触发系统级桌面通知；健康时不打扰"""
+        dead_path = os.path.join(workbuddy.PROFILES_DIR, "aud_expired.info")
+        with open(dead_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "uid_dead_audit", "nickname": "DeadAudit"},
+                "auth": {"accessToken": "dead_tok", "expiresAt": 1000, "refreshExpiresAt": 1000}
+            }, f)
+
+        with patch.object(workbuddy, "notify_desktop") as mock_notify:
+            ok = workbuddy.run_audit(force=True, notify_on_expired=True)
+            self.assertFalse(ok)
+            mock_notify.assert_called_once()
+            args = mock_notify.call_args[0]
+            self.assertIn("WorkBuddy", args[0])
+            self.assertIn("DeadAudit", args[1])
+
+        # 移除失效账号，仅保留健康账号
+        os.remove(dead_path)
+        healthy_path = os.path.join(workbuddy.PROFILES_DIR, "aud_ok.info")
+        with open(healthy_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "uid_ok_audit", "nickname": "OkAudit"},
+                "auth": {"accessToken": "ok_tok", "expiresAt": 1900000000000}
+            }, f)
+
+        with patch.object(workbuddy, "notify_desktop") as mock_notify2:
+            ok2 = workbuddy.run_audit(force=False, notify_on_expired=True)
+            self.assertTrue(ok2)
+            mock_notify2.assert_not_called()
+
+    def test_t35_parse_audit_cli_flags_and_daemon(self):
+        """T35: CLI audit 参数解析支持 --interval, --daemon, --force 及其变体"""
+        f1, d1, i1 = workbuddy._parse_audit_cli_args(["--daemon", "12"])
+        self.assertFalse(f1)
+        self.assertTrue(d1)
+        self.assertEqual(i1, 12.0)
+
+        f2, d2, i2 = workbuddy._parse_audit_cli_args(["--interval=3.5", "--force"])
+        self.assertTrue(f2)
+        self.assertTrue(d2)
+        self.assertEqual(i2, 3.5)
+
+        f3, d3, i3 = workbuddy._parse_audit_cli_args(["--daemon"])
+        self.assertFalse(f3)
+        self.assertTrue(d3)
+        self.assertEqual(i3, 6.0)
+
+        f4, d4, i4 = workbuddy._parse_audit_cli_args([])
+        self.assertFalse(f4)
+        self.assertFalse(d4)
+        self.assertEqual(i4, 6.0)
+
+    def test_t36_run_audit_daemon_iteration_and_exit(self):
+        """T36: run_audit_daemon 在休眠中响应 KeyboardInterrupt 优雅退出"""
+        with patch.object(workbuddy, "run_audit") as mock_audit:
+            with patch("time.sleep", side_effect=KeyboardInterrupt):
+                # 守护进程应当捕获 KeyboardInterrupt 并正常返回，绝不向上抛出
+                workbuddy.run_audit_daemon(interval_hours=0.1, force=False)
+                mock_audit.assert_called_once()
+
+    def test_t37_resolve_profile_alias_conflict_interactive_responses(self):
+        """T37: 交互式终端下，用户输入 'y' 确认覆盖，输入 'n' 自动分配候选名"""
+        prof_path = os.path.join(workbuddy.PROFILES_DIR, "inter_acc.info")
+        with open(prof_path, "w", encoding="utf-8") as f:
+            json.dump({"account": {"uid": "user_old_111"}}, f)
+
+        # 1. 用户输入 y 覆盖
+        with patch("sys.stdin.isatty", return_value=True):
+            with patch("builtins.input", return_value="y"):
+                alias, is_inplace = workbuddy.resolve_profile_alias_conflict("inter_acc", "user_new_222", force=False)
+                self.assertEqual(alias, "inter_acc")
+                self.assertTrue(is_inplace)
+
+        # 2. 用户输入 n 取消覆盖，自动递增
+        with patch("sys.stdin.isatty", return_value=True):
+            with patch("builtins.input", return_value="n"):
+                alias, is_inplace = workbuddy.resolve_profile_alias_conflict("inter_acc", "user_new_222", force=False)
+                self.assertEqual(alias, "inter_acc_1")
+                self.assertFalse(is_inplace)
+
+    def test_t38_run_login_with_force_overwrite_diff_uid(self):
+        """T38: run_login 携带 force=True 时，若别名已被其他 UID 占用，强制覆盖原有 Profile"""
+        prof_path = os.path.join(workbuddy.PROFILES_DIR, "force_login_acc.info")
+        with open(prof_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "old_uid_before_login", "nickname": "OldUser"},
+                "auth": {"accessToken": "old_token"}
+            }, f)
+
+        state_resp = json.dumps({"code": 0, "data": {"state": "st1", "authUrl": "https://auth.example.com/qr"}}).encode("utf-8")
+        poll_ok = json.dumps({"code": 0, "data": {"accessToken": "new_tok", "userId": "new_uid_after_login"}}).encode("utf-8")
+        acc_resp = json.dumps({"code": 0, "data": {"uid": "new_uid_after_login", "nickname": "NewUser"}}).encode("utf-8")
+
+        def mock_urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            cm = MagicMock()
+            if "state" in url and "token" not in url:
+                cm.__enter__.return_value.read.return_value = state_resp
+            elif "token" in url and "state=" in url:
+                cm.__enter__.return_value.read.return_value = poll_ok
+            elif "account" in url:
+                cm.__enter__.return_value.read.return_value = acc_resp
+            return cm
+
+        with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+            with patch("time.sleep", return_value=None):
+                with patch("webbrowser.open", return_value=True):
+                    ok = workbuddy.run_login(alias="force_login_acc", auto_switch=False, force=True)
+                    self.assertTrue(ok)
+
+        with open(prof_path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["account"]["uid"], "new_uid_after_login")
+
+    def test_t39_run_login_without_force_diff_uid_auto_renames(self):
+        """T39: run_login 不带 force 且环境非交互时，若别名已被其他 UID 占用，自愈重命名为 <alias>_1 保存"""
+        prof_path = os.path.join(workbuddy.PROFILES_DIR, "auto_ren_acc.info")
+        with open(prof_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "preserved_old_uid", "nickname": "PreservedUser"},
+                "auth": {"accessToken": "preserved_token"}
+            }, f)
+
+        state_resp = json.dumps({"code": 0, "data": {"state": "st2", "authUrl": "https://auth.example.com/qr"}}).encode("utf-8")
+        poll_ok = json.dumps({"code": 0, "data": {"accessToken": "new_tok_2", "userId": "brand_new_uid"}}).encode("utf-8")
+        acc_resp = json.dumps({"code": 0, "data": {"uid": "brand_new_uid", "nickname": "BrandNewUser"}}).encode("utf-8")
+
+        def mock_urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            cm = MagicMock()
+            if "state" in url and "token" not in url:
+                cm.__enter__.return_value.read.return_value = state_resp
+            elif "token" in url and "state=" in url:
+                cm.__enter__.return_value.read.return_value = poll_ok
+            elif "account" in url:
+                cm.__enter__.return_value.read.return_value = acc_resp
+            return cm
+
+        with patch("sys.stdin.isatty", return_value=False):
+            with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+                with patch("time.sleep", return_value=None):
+                    with patch("webbrowser.open", return_value=True):
+                        ok = workbuddy.run_login(alias="auto_ren_acc", auto_switch=False, force=False)
+                        self.assertTrue(ok)
+
+        # 验证原文件未被覆盖
+        with open(prof_path, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["account"]["uid"], "preserved_old_uid")
+
+        # 验证新文件已成功落盘为 auto_ren_acc_1.info
+        cand_path = os.path.join(workbuddy.PROFILES_DIR, "auto_ren_acc_1.info")
+        self.assertTrue(os.path.exists(cand_path))
+        with open(cand_path, "r", encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["account"]["uid"], "brand_new_uid")
+
+    def test_t40_run_audit_daemon_handles_exception_gracefully(self):
+        """T40: run_audit_daemon 单轮巡检抛出异常时自动容错，不导致守护进程崩溃退出"""
+        call_count = [0]
+
+        def mock_audit(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("Transient network timeout in audit")
+            return True
+
+        curr_time = [1000.0]
+        def fake_time():
+            return curr_time[0]
+
+        def mock_sleep(sec):
+            curr_time[0] += (sec or 1.0)
+            if call_count[0] >= 2:
+                raise KeyboardInterrupt
+
+        with patch.object(workbuddy, "run_audit", side_effect=mock_audit):
+            with patch("time.time", side_effect=fake_time):
+                with patch("time.sleep", side_effect=mock_sleep):
+                    workbuddy.run_audit_daemon(interval_hours=0.001, force=False)
+                    # 确认执行了至少 2 轮巡检（第一轮异常未打崩守护进程）
+                    self.assertGreaterEqual(call_count[0], 2)
+
+    def test_t41_notify_desktop_newline_and_windows_toast_handling(self):
+        """T41: notify_desktop 在 macOS 下过滤换行符防语法错误，在 Windows 下包含 System.Drawing 与 AUMID 容错"""
+        # 1. macOS 下换行符与双引号过滤
+        with patch("sys.platform", "darwin"):
+            with patch("subprocess.run") as mock_sub:
+                ok = workbuddy.notify_desktop("标题\n第二行", "消息内容\r\n多行文字")
+                self.assertTrue(ok)
+                mock_sub.assert_called_once()
+                cmd = mock_sub.call_args[0][0]
+                self.assertEqual(cmd[0], "osascript")
+                self.assertNotIn("\n", cmd[2])
+                self.assertNotIn("\r", cmd[2])
+
+        # 2. Windows 下 WinRT Toast 包含 PowerShell 容错 AUMID 与 System.Drawing
+        with patch("sys.platform", "win32"):
+            with patch("subprocess.run") as mock_sub:
+                ok = workbuddy.notify_desktop("WinTitle", "WinMsg")
+                self.assertTrue(ok)
+                cmd = mock_sub.call_args[0][0]
+                ps_script = cmd[-1]
+                self.assertIn("System.Drawing", ps_script)
+                self.assertIn("WindowsPowerShell", ps_script)
+
+    def test_t42_github_workflow_yaml_secrets_not_in_if_condition(self):
+        """T42: 静态断言 .github/workflows/workbuddy-monitor.yml 中严禁在 if: 中直接使用 secrets.*"""
+        repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        wf_path = os.path.join(repo_dir, ".github", "workflows", "workbuddy-monitor.yml")
+        self.assertTrue(os.path.exists(wf_path))
+        with open(wf_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        for idx, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith("if:"):
+                self.assertNotIn(
+                    "secrets.",
+                    stripped,
+                    f"Line {idx} in {wf_path} contains 'secrets.' in if: condition! "
+                    f"GitHub Actions rejects secrets in if expressions; map to env: instead."
+                )
+
+    def test_t43_resolve_profile_alias_conflict_with_userid_field(self):
+        """T43: resolve_profile_alias_conflict 兼容已有 Profile 中仅存在 userId 字段的情况"""
+        prof_path = os.path.join(workbuddy.PROFILES_DIR, "legacy_user.info")
+        with open(prof_path, "w", encoding="utf-8") as f:
+            json.dump({"account": {"userId": "legacy_uid_123"}}, f)
+
+        # 相同 UID (由 userId 提供) -> 在位平滑更新
+        alias, is_inplace = workbuddy.resolve_profile_alias_conflict("legacy_user", "legacy_uid_123", force=False)
+        self.assertEqual(alias, "legacy_user")
+        self.assertTrue(is_inplace)
+
+        # 不同 UID -> 自增消解
+        with patch("sys.stdin.isatty", return_value=False):
+            alias_diff, is_inplace_diff = workbuddy.resolve_profile_alias_conflict("legacy_user", "other_uid_456", force=False)
+            self.assertEqual(alias_diff, "legacy_user_1")
+            self.assertFalse(is_inplace_diff)
+
 if __name__ == "__main__":
     unittest.main()
+

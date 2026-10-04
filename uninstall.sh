@@ -42,6 +42,10 @@ fi
 
 # 3. 移除可执行文件
 rm -f "$INSTALL_BIN/workbuddy"
+rm -f "$INSTALL_BIN/wb-login"
+rm -f "$INSTALL_BIN/workbuddy-login"
+rm -f "$INSTALL_BIN/wb-audit"
+rm -f "$INSTALL_BIN/workbuddy-audit"
 rm -f "$INSTALL_BIN/wb-switch"
 rm -f "$INSTALL_BIN/workbuddy-switch"
 rm -f "$INSTALL_BIN/wb-checkin"
@@ -50,6 +54,10 @@ rm -f "$INSTALL_BIN/wb-chat"
 rm -f "$INSTALL_BIN/workbuddy-chat"
 rm -f "$INSTALL_BIN/wb-doctor"
 rm -f "$INSTALL_BIN/workbuddy-doctor"
+rm -f "$INSTALL_BIN/wb-models"
+rm -f "$INSTALL_BIN/workbuddy-models"
+rm -f "$INSTALL_BIN/wb-router"
+rm -f "$INSTALL_BIN/workbuddy-router"
 echo "✔ 已清理安装的 CLI 脚本"
 
 if [ -t 0 ]; then

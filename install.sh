@@ -27,6 +27,10 @@ echo "1. 正在安装 CLI 工具至 $INSTALL_BIN ..."
 cp "$SCRIPT_DIR/bin/workbuddy" "$INSTALL_BIN/workbuddy"
 chmod +x "$INSTALL_BIN/workbuddy"
 
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-login"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-login"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-audit"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-audit"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-switch"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-switch"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-checkin"
@@ -35,7 +39,11 @@ ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-chat"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-chat"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-doctor"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-doctor"
-echo "   ✔ 已安装: workbuddy, wb-switch, wb-checkin, wb-chat, wb-doctor"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-models"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-models"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-router"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-router"
+echo "   ✔ 已安装: workbuddy, wb-login, wb-audit, wb-switch, wb-checkin, wb-chat, wb-doctor, wb-models, wb-router"
 
 # 3. 检查 PATH
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then

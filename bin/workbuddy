@@ -26,9 +26,12 @@ import re
 import shutil
 import base64
 import unicodedata
+import random
+import webbrowser
 from datetime import datetime
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
+CLIENT_USER_AGENT = "WorkBuddy/5.6.2"
 PREFERRED_CHAT_MODELS = ["hy3", "deepseek-v4.1-flash", "glm-5.3-flash", "auto", "glm-5v-turbo"]
 
 # Windows 控制台编码安全处理与 ANSI 颜色初始化
@@ -79,9 +82,13 @@ def get_db_file():
 def get_profiles_dir():
     return os.path.expanduser("~/.workbuddy/auth_profiles")
 
+def get_audit_cache_file():
+    return os.path.expanduser("~/.workbuddy/cache/audit_cache.json")
+
 AUTH_FILE = get_auth_file()
 PROFILES_DIR = get_profiles_dir()
 DB_FILE = get_db_file()
+AUDIT_CACHE_FILE = get_audit_cache_file()
 
 HAS_COLOR = sys.platform != "win32" or "WT_SESSION" in os.environ or os.environ.get("TERM_PROGRAM") or sys.stdout.isatty()
 COLOR_GREEN = "\033[92m" if HAS_COLOR else ""
@@ -163,24 +170,27 @@ function nativeStorage() {
     return storage;
   } catch (_) { failure('RUNTIME_UNAVAILABLE'); }
 }
-function decrypt(envelope) {
+function getAtRestKey() {
   let payload;
   try { payload = JSON.parse(nativeStorage().loggerGet()); }
   catch (_) { failure('RUNTIME_UNAVAILABLE'); }
-  let key;
+  if (!object(payload) || payload.version !== 1) failure('RUNTIME_UNAVAILABLE');
+  let secret;
+  try { secret = base64(payload.atRestSecretKey, 32); }
+  catch (_) { failure('RUNTIME_UNAVAILABLE'); }
+  const empty = secret.every(b => b === 0);
+  secret.fill(0);
+  if (empty) failure('RUNTIME_UNAVAILABLE');
+  const key = crypto.createHash('sha256').update(payload.atRestSecretKey, 'utf8').digest();
+  const keyId = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
+  return { key, keyId };
+}
+function decrypt(envelope) {
+  let keyState;
   let plaintext;
   try {
-    if (!object(payload) || payload.version !== 1) failure('RUNTIME_UNAVAILABLE');
-    let secret;
-    try { secret = base64(payload.atRestSecretKey, 32); }
-    catch (_) { failure('RUNTIME_UNAVAILABLE'); }
-    const empty = secret.every(b => b === 0);
-    secret.fill(0);
-    if (empty) failure('RUNTIME_UNAVAILABLE');
-    key = crypto.createHash('sha256').update(payload.atRestSecretKey, 'utf8').digest();
-    payload = null;
-    if (crypto.createHash('sha256').update(key).digest('hex').slice(0, 16) !== envelope.keyId)
-      failure('KEY_MISMATCH');
+    keyState = getAtRestKey();
+    if (keyState.keyId !== envelope.keyId) failure('KEY_MISMATCH');
     const lp = s => {
       const bytes = Buffer.from(s, 'utf8');
       const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
@@ -189,7 +199,7 @@ function decrypt(envelope) {
     const aad = Buffer.concat([Buffer.from('WB-AAD\0', 'ascii'), Buffer.from([1]),
       lp('WBEV1'), lp('sym-v1'), Buffer.from([0, 0, 0, 1]), lp(envelope.keyId), Buffer.from([2, 0, 0])]);
     try {
-      const cipher = crypto.createDecipheriv('aes-256-gcm', key, envelope.nonce, {authTagLength: 16});
+      const cipher = crypto.createDecipheriv('aes-256-gcm', keyState.key, envelope.nonce, {authTagLength: 16});
       cipher.setAAD(aad); cipher.setAuthTag(envelope.tag);
       plaintext = Buffer.concat([cipher.update(envelope.ciphertext), cipher.final()]);
     } catch (_) { failure('DECRYPT_FAILED'); }
@@ -198,8 +208,39 @@ function decrypt(envelope) {
       failure('INVALID_FORMAT');
     return text;
   } finally {
-    if (key) key.fill(0);
+    if (keyState && keyState.key) keyState.key.fill(0);
     if (plaintext) plaintext.fill(0);
+  }
+}
+function encrypt(plaintext) {
+  let keyState;
+  try {
+    keyState = getAtRestKey();
+    const nonce = crypto.randomBytes(12);
+    const lp = s => {
+      const bytes = Buffer.from(s, 'utf8');
+      const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
+      return Buffer.concat([length, bytes]);
+    };
+    const aad = Buffer.concat([Buffer.from('WB-AAD\0', 'ascii'), Buffer.from([1]),
+      lp('WBEV1'), lp('sym-v1'), Buffer.from([0, 0, 0, 1]), lp(keyState.keyId), Buffer.from([2, 0, 0])]);
+    const cipher = crypto.createCipheriv('aes-256-gcm', keyState.key, nonce, {authTagLength: 16});
+    cipher.setAAD(aad);
+    const ciphertext = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    const envelope = {
+      suite: 1,
+      keyId: keyState.keyId,
+      nonce: nonce.toString('base64'),
+      authTag: authTag.toString('base64'),
+      ciphertext: ciphertext.toString('base64')
+    };
+    return {
+      $wbEncrypted: 1,
+      envelope: Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64')
+    };
+  } finally {
+    if (keyState && keyState.key) keyState.key.fill(0);
   }
 }
 let chunks = [], size = 0;
@@ -223,6 +264,11 @@ process.stdin.on('end', () => {
     } else if (request.operation === 'decrypt') {
       const decrypted = decrypt(decode(request.value));
       reply({ok: true, value: decrypted, accessToken: decrypted});
+    } else if (request.operation === 'encrypt') {
+      if (typeof request.value !== 'string' || !request.value.length || request.value.length > 32768)
+        failure('INVALID_FORMAT');
+      const encrypted = encrypt(request.value);
+      reply({ok: true, value: encrypted});
     } else failure('HELPER_PROTOCOL');
   } catch (e) {
     const reasons = ['INVALID_FORMAT','UNSUPPORTED_ENVELOPE','RUNTIME_UNAVAILABLE',
@@ -464,6 +510,23 @@ def resolve_credential_field(raw_value, field_name="accessToken"):
             raise CredentialError("INVALID_FORMAT")
         return val
 
+def encrypt_credential_field(plaintext, field_name="accessToken"):
+    """
+    如果 WorkBuddy 客户端运行时可用且支持原生存储加密，将明文字段加密为 $wbEncrypted 信封格式；
+    若运行时不可用或处于测试/回退环境，安全保留原始字符串，由 WorkBuddy 在启动时透明迁移。
+    """
+    if not isinstance(plaintext, str) or not plaintext:
+        return plaintext
+    try:
+        runtime = find_workbuddy_runtime()
+        reply = run_native_resolver(runtime, {"operation": "encrypt", "value": plaintext})
+        val = reply.get("value")
+        if isinstance(val, dict) and val.get("$wbEncrypted") == 1:
+            return val
+    except Exception:
+        pass
+    return plaintext
+
 def get_display_nickname(account_data, default_name=""):
     """
     提取安全的显示昵称，杜绝 dict.lower() crash。
@@ -543,6 +606,69 @@ def format_timestamp(ts):
     except Exception:
         return str(ts)
 
+def resolve_profile_alias_conflict(alias, current_uid, force=False):
+    """
+    解析并智能消除 Profile 别名冲突：
+    1. 若别名尚不存在，直接返回 (alias, False)
+    2. 若别名已存在：
+       a. 同 UID 账号：直接在位平滑更新 (In-place update)，返回 (alias, True)
+       b. 异 UID 账号：
+          - 若指定了 force=True，依据强制标志覆盖，返回 (alias, True)
+          - 若处于交互式终端 (sys.stdin.isatty())，提示用户是否覆盖或自动使用自增别名；
+          - 若用户未确认或处于非交互环境，自动生成自增候选名 (<alias>_1, <alias>_2...)，
+            彻底杜绝 Unhandled Exception 或卡死崩溃，确保 100% 成功落盘。
+    """
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    clean_alias = re.sub(r"[^\w\-]", "_", str(alias or "")).strip("_") or "account_new"
+    target_path = os.path.join(PROFILES_DIR, f"{clean_alias}.info")
+
+    if not os.path.exists(target_path):
+        return clean_alias, False
+
+    # 别名已存在，读取已有 Profile 的 UID
+    existing_uid = None
+    try:
+        with open(target_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            acc = data.get("account", {}) if isinstance(data, dict) else {}
+            existing_uid = acc.get("uid") or acc.get("userId")
+    except Exception:
+        pass
+
+    # 1. 同账号智能更新 (In-place update)
+    if current_uid and existing_uid and str(current_uid) == str(existing_uid):
+        print(f"{COLOR_CYAN}ℹ 检测到别名 '{clean_alias}' 与当前账号 UID ({current_uid}) 一致，执行在位平滑更新。{COLOR_RESET}")
+        return clean_alias, True
+
+    # 2. 异账号别名冲突
+    if force:
+        print(f"{COLOR_YELLOW}▲ 别名 '{clean_alias}' 已被其他账号 (UID: {existing_uid or '未知'}) 占用，依据 --force 参数执行覆盖。{COLOR_RESET}")
+        return clean_alias, True
+
+    # 生成自增候选名 (<alias>_1, <alias>_2, ...)
+    cand_idx = 1
+    cand_alias = f"{clean_alias}_{cand_idx}"
+    while os.path.exists(os.path.join(PROFILES_DIR, f"{cand_alias}.info")):
+        cand_idx += 1
+        cand_alias = f"{clean_alias}_{cand_idx}"
+
+    # 交互式环境下可提示用户确认是否覆盖，还是使用自增重命名
+    if sys.stdin.isatty():
+        try:
+            prompt = (
+                f"{COLOR_YELLOW}▲ 别名 '{clean_alias}' 已被其他账号 (UID: {existing_uid or '未知'}) 占用。\n"
+                f"  [y] 覆盖现有账号 / [N] 自动重命名为 '{cand_alias}' 保存: {COLOR_RESET}"
+            )
+            ans = input(prompt).strip().lower()
+            if ans in ("y", "yes"):
+                print(f"{COLOR_YELLOW}✔ 用户确认覆盖已有 Profile: '{clean_alias}'{COLOR_RESET}")
+                return clean_alias, True
+        except (KeyboardInterrupt, EOFError):
+            pass
+
+    print(f"{COLOR_YELLOW}✔ 为防数据覆盖并消除冲突，已自动自愈重命名为: '{cand_alias}'{COLOR_RESET}")
+    return cand_alias, False
+
 def sync_active_token_to_profiles():
     active_data = get_active_account()
     if not active_data:
@@ -620,6 +746,835 @@ def rollback_shared_workspace(restore_uid=None):
         print(f"{COLOR_RED}回滚失败: {e}{COLOR_RESET}")
         return False
 
+# ==============================================================================
+# Terminal QR Code Generator (Pure-Python Zero-Dependency Implementation)
+# ==============================================================================
+
+_QR_EXP = [0] * 512
+_QR_LOG = [0] * 256
+_qr_x = 1
+for _i in range(255):
+    _QR_EXP[_i] = _qr_x
+    _QR_EXP[_i + 255] = _qr_x
+    _QR_LOG[_qr_x] = _i
+    _qr_x = (_qr_x << 1) ^ (0x11D if (_qr_x & 0x80) else 0)
+
+def _qr_gf_mul(a, b):
+    return _QR_EXP[_QR_LOG[a] + _QR_LOG[b]] if (a != 0 and b != 0) else 0
+
+def _qr_rs_poly(ec_len):
+    g = [1]
+    for i in range(ec_len):
+        factor = _QR_EXP[i]
+        new_g = [0] * (len(g) + 1)
+        for j, c in enumerate(g):
+            new_g[j] ^= c
+            new_g[j + 1] ^= _qr_gf_mul(c, factor)
+        g = new_g
+    return g
+
+def _qr_rs_encode(data, ec_len):
+    gen = _qr_rs_poly(ec_len)
+    msg = list(data) + [0] * ec_len
+    for i in range(len(data)):
+        coef = msg[i]
+        if coef != 0:
+            for j in range(1, len(gen)):
+                msg[i + j] ^= _qr_gf_mul(coef, gen[j])
+    return msg[len(data):]
+
+_QR_EC_TABLE_L = {
+    1: (26, 7, 1, 19, 0, 0),
+    2: (44, 10, 1, 34, 0, 0),
+    3: (70, 15, 1, 55, 0, 0),
+    4: (100, 20, 1, 80, 0, 0),
+    5: (134, 26, 1, 108, 0, 0),
+    6: (172, 18, 2, 68, 0, 0),
+    7: (196, 20, 2, 78, 0, 0),
+    8: (242, 24, 2, 97, 0, 0),
+    9: (292, 30, 2, 116, 0, 0),
+    10: (346, 18, 2, 68, 2, 69),
+}
+
+_QR_VERSION_BITS = {
+    7: [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0],
+    8: [0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0],
+    9: [0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1],
+    10: [0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1],
+}
+
+_QR_ALIGN_LOCS = {
+    1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30],
+    6: [6, 34], 7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46], 10: [6, 28, 50],
+}
+
+def generate_qr_terminal(text, invert=False):
+    """
+    零依赖纯 Python 终端二维码生成器。
+    使用 UTF-8 半块字符 (▀, ▄, █, ' ') 进行双行压缩渲染，在各主流终端完美展示且易于手机扫码。
+    """
+    data_bytes = text.encode("utf-8")
+    data_len = len(data_bytes)
+    version = None
+    for v in range(1, 11):
+        total_cw, ec_cw, b1, d1, b2, d2 = _QR_EC_TABLE_L[v]
+        total_data_cw = b1 * d1 + b2 * d2
+        cc_bits = 8 if v <= 9 else 16
+        if total_data_cw >= data_len + 2 + (cc_bits // 8):
+            version = v
+            break
+    if not version:
+        raise ValueError(f"二维码文本过长 (当前长度: {len(text)})")
+
+    total_cw, ec_cw, b1, d1, b2, d2 = _QR_EC_TABLE_L[version]
+    total_data_cw = b1 * d1 + b2 * d2
+
+    bits = [0, 1, 0, 0]
+    cc_bits = 8 if version <= 9 else 16
+    for i in range(cc_bits - 1, -1, -1):
+        bits.append((data_len >> i) & 1)
+    for b in data_bytes:
+        for i in range(7, -1, -1):
+            bits.append((b >> i) & 1)
+
+    term_len = min(4, total_data_cw * 8 - len(bits))
+    bits.extend([0] * term_len)
+    if len(bits) % 8 != 0:
+        bits.extend([0] * (8 - len(bits) % 8))
+
+    pad_bytes = [0xEC, 0x11]
+    pad_idx = 0
+    codewords = []
+    for i in range(0, len(bits), 8):
+        b = 0
+        for j in range(8):
+            b = (b << 1) | bits[i + j]
+        codewords.append(b)
+
+    while len(codewords) < total_data_cw:
+        codewords.append(pad_bytes[pad_idx % 2])
+        pad_idx += 1
+
+    blocks = []
+    ec_blocks = []
+    idx = 0
+    for _ in range(b1):
+        blk = codewords[idx:idx + d1]
+        blocks.append(blk)
+        ec_blocks.append(_qr_rs_encode(blk, ec_cw))
+        idx += d1
+    for _ in range(b2):
+        blk = codewords[idx:idx + d2]
+        blocks.append(blk)
+        ec_blocks.append(_qr_rs_encode(blk, ec_cw))
+        idx += d2
+
+    final_cw = []
+    max_d = max(d1, d2)
+    for col in range(max_d):
+        for blk in blocks:
+            if col < len(blk):
+                final_cw.append(blk[col])
+    for col in range(ec_cw):
+        for eblk in ec_blocks:
+            final_cw.append(eblk[col])
+
+    data_bits = []
+    for cw in final_cw:
+        for i in range(7, -1, -1):
+            data_bits.append((cw >> i) & 1)
+
+    remainder_bits = {1:0, 2:7, 3:7, 4:7, 5:7, 6:7, 7:0, 8:0, 9:0, 10:0}.get(version, 0)
+    data_bits.extend([0] * remainder_bits)
+
+    size = 21 + (version - 1) * 4
+    matrix = [[None] * size for _ in range(size)]
+    is_reserved = [[False] * size for _ in range(size)]
+
+    def set_finder(r0, c0):
+        for r in range(r0 - 1, r0 + 8):
+            for c in range(c0 - 1, c0 + 8):
+                if 0 <= r < size and 0 <= c < size:
+                    matrix[r][c] = 0
+                    is_reserved[r][c] = True
+        for r in range(r0, r0 + 7):
+            for c in range(c0, c0 + 7):
+                matrix[r][c] = 1 if (r == r0 or r == r0 + 6 or c == c0 or c == c0 + 6 or (2 <= r - r0 <= 4 and 2 <= c - c0 <= 4)) else 0
+                is_reserved[r][c] = True
+
+    set_finder(0, 0)
+    set_finder(0, size - 7)
+    set_finder(size - 7, 0)
+
+    for i in range(8, size - 8):
+        v = 1 if i % 2 == 0 else 0
+        matrix[6][i] = v
+        is_reserved[6][i] = True
+        matrix[i][6] = v
+        is_reserved[i][6] = True
+
+    locs = _QR_ALIGN_LOCS[version]
+    for r in locs:
+        for c in locs:
+            # 仅在与三个 Finder Pattern 重叠时跳过
+            if (r < 9 and c < 9) or (r < 9 and c >= size - 9) or (r >= size - 9 and c < 9):
+                continue
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    matrix[r + dr][c + dc] = 1 if (abs(dr) == 2 or abs(dc) == 2 or (dr == 0 and dc == 0)) else 0
+                    is_reserved[r + dr][c + dc] = True
+
+    if version >= 7:
+        vbits = _QR_VERSION_BITS[version]
+        for i in range(18):
+            b = vbits[17 - i]
+            # Bottom-left: 3 rows (size - 11 to size - 9) x 6 cols (0 to 5)
+            r_bl = (size - 11) + (i % 3)
+            c_bl = i // 3
+            matrix[r_bl][c_bl] = b
+            is_reserved[r_bl][c_bl] = True
+            # Top-right: 6 rows (0 to 5) x 3 cols (size - 11 to size - 9)
+            r_tr = i // 3
+            c_tr = (size - 11) + (i % 3)
+            matrix[r_tr][c_tr] = b
+            is_reserved[r_tr][c_tr] = True
+
+    matrix[4 * version + 9][8] = 1
+    is_reserved[4 * version + 9][8] = True
+
+    for i in range(9):
+        is_reserved[8][i] = True
+        is_reserved[i][8] = True
+    for i in range(size - 8, size):
+        is_reserved[8][i] = True
+        is_reserved[i][8] = True
+
+    bit_idx = 0
+    row = size - 1
+    col = size - 1
+    step = -1
+
+    while col > 0:
+        if col == 6:
+            col -= 1
+        for _ in range(size):
+            for c_off in (0, -1):
+                c = col + c_off
+                r = row
+                if not is_reserved[r][c]:
+                    b = data_bits[bit_idx] if bit_idx < len(data_bits) else 0
+                    bit_idx += 1
+                    matrix[r][c] = b
+            row += step
+        step = -step
+        row += step
+        col -= 2
+
+    # Level L, Mask 0: 01000 BCH(15, 5) XOR 0x5412 = 0b111011111000100
+    format_bits = [1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0]
+
+    for r in range(size):
+        for c in range(size):
+            if not is_reserved[r][c]:
+                if (r + c) % 2 == 0:
+                    matrix[r][c] ^= 1
+
+    for i in range(6):
+        matrix[8][i] = format_bits[i]
+    matrix[8][7] = format_bits[6]
+    matrix[8][8] = format_bits[7]
+    matrix[7][8] = format_bits[8]
+    for i in range(6):
+        matrix[5 - i][8] = format_bits[9 + i]
+
+    for i in range(7):
+        matrix[size - 1 - i][8] = format_bits[i]
+    for i in range(8):
+        matrix[8][size - 8 + i] = format_bits[7 + i]
+
+    quiet_zone = 2
+    full_sz = size + quiet_zone * 2
+    full_mat = [[0] * full_sz for _ in range(quiet_zone)]
+    for r in matrix:
+        full_mat.append([0] * quiet_zone + r + [0] * quiet_zone)
+    full_mat.extend([[0] * full_sz for _ in range(quiet_zone)])
+
+    out = []
+    for r in range(0, len(full_mat), 2):
+        row_top = full_mat[r]
+        row_bot = full_mat[r + 1] if r + 1 < len(full_mat) else [0] * full_sz
+        chars = []
+        for c in range(full_sz):
+            top = row_top[c]
+            bot = row_bot[c]
+            if invert:
+                top = 1 - top
+                bot = 1 - bot
+            if top and bot:
+                chars.append('█')
+            elif top and not bot:
+                chars.append('▀')
+            elif not top and bot:
+                chars.append('▄')
+            else:
+                chars.append(' ')
+        out.append("".join(chars))
+
+    return "\n".join(out)
+
+# ==============================================================================
+# Health Check, Audit Cache & Self-Healing
+# ==============================================================================
+
+def get_audit_cache():
+    if not os.path.exists(AUDIT_CACHE_FILE):
+        return {}
+    try:
+        with open(AUDIT_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_audit_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(AUDIT_CACHE_FILE), exist_ok=True)
+        with open(AUDIT_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+        if sys.platform != "win32":
+            os.chmod(AUDIT_CACHE_FILE, 0o600)
+    except Exception:
+        pass
+
+def check_profile_health(profile_info, force=False):
+    """
+    检测指定账号凭证的健康状态与有效性。
+    严格防风控设计：
+    1. 时间戳预判：若 accessToken 剩余有效期大于 10 分钟，直接视为健康有效，0 次网络请求；
+    2. 本地缓存节流：30 分钟内已检测过的账号直接复用缓存，避免频繁探测；
+    3. 静默自愈续期：仅当 accessToken 已过期且 refreshToken 有效时，进行单次受控刷新。
+    返回: dict(status="HEALTHY"|"REFRESHED"|"EXPIRED", detail=str, cached=bool)
+    """
+    now = int(time.time() * 1000)
+    uid = profile_info.get("uid", "")
+    expires_at = profile_info.get("expiresAt", 0)
+    refresh_expires_at = profile_info.get("refreshExpiresAt", 0)
+    data_dict = profile_info.get("data", {}) if isinstance(profile_info.get("data"), dict) else {}
+    auth_dict = data_dict.get("auth", {}) if isinstance(data_dict.get("auth"), dict) else {}
+    if not expires_at:
+        expires_at = auth_dict.get("expiresAt", 0)
+    if not refresh_expires_at:
+        refresh_expires_at = auth_dict.get("refreshExpiresAt", 0)
+
+    # 1. 检查本地 30 分钟审计缓存
+    cache = get_audit_cache()
+    cached = cache.get(uid)
+    if not force and isinstance(cached, dict):
+        checked_at = cached.get("checked_at", 0)
+        c_status = cached.get("status")
+        # 缓存有效期 30 分钟 (1800 秒)
+        if time.time() - checked_at < 1800:
+            if c_status in ("HEALTHY", "REFRESHED") and (expires_at == 0 or expires_at > now):
+                return {"status": "HEALTHY", "detail": "有效 (缓存)", "cached": True}
+            elif c_status == "EXPIRED" and (refresh_expires_at == 0 or refresh_expires_at <= now):
+                return {"status": "EXPIRED", "detail": "凭据已失效 (缓存)", "cached": True}
+
+    # 2. 时间戳粗筛防风控：如果 accessToken 剩余有效期充足 (大于 10 分钟)，绝不主动网络刷新
+    if not force and expires_at > 0 and (expires_at - now) > 10 * 60 * 1000:
+        cache[uid] = {"status": "HEALTHY", "checked_at": time.time(), "expires_at": expires_at}
+        save_audit_cache(cache)
+        return {"status": "HEALTHY", "detail": "令牌有效 (剩余大于10分钟)", "cached": False}
+
+    raw_token = auth_dict.get("accessToken")
+    token = None
+    if raw_token:
+        try:
+            token = resolve_credential_field(raw_token, field_name="accessToken")
+        except Exception:
+            token = None
+
+    # 若未包含有效时间戳 (例如旧版或测试凭据)，只要 Token 有效解析即视为正常
+    if expires_at == 0:
+        if token:
+            return {"status": "HEALTHY", "detail": "有效 (未设置过期时间)", "cached": False}
+        else:
+            return {"status": "EXPIRED", "detail": "凭据无法解析为有效令牌", "cached": False}
+
+    # 3. 令牌即将过期 (< 10分钟) 但尚未过期：发起幂等探测
+    if now < expires_at and token:
+        status_req = urllib.request.Request(
+            "https://copilot.tencent.com/v2/billing/meter/checkin-activity-status",
+            data=b"{}",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+                "X-User-Id": str(uid),
+                "User-Agent": CLIENT_USER_AGENT
+            }
+        )
+        try:
+            with urllib.request.urlopen(status_req, timeout=8) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if res.get("code") == 0:
+                    cache[uid] = {"status": "HEALTHY", "checked_at": time.time(), "expires_at": expires_at}
+                    save_audit_cache(cache)
+                    return {"status": "HEALTHY", "detail": "有效 (探针响应正常)", "cached": False}
+        except urllib.error.HTTPError as e:
+            try:
+                e.close()
+            except Exception:
+                pass
+            if e.code not in (401, 403):
+                return {"status": "HEALTHY", "detail": f"有效 (服务响应 {e.code})", "cached": False}
+        except Exception:
+            return {"status": "HEALTHY", "detail": "有效 (网络波动)", "cached": False}
+
+    # 4. 令牌已过期或 401 探针失败：检查 Refresh Token
+    if refresh_expires_at > 0 and now >= refresh_expires_at:
+        cache[uid] = {"status": "EXPIRED", "checked_at": time.time()}
+        save_audit_cache(cache)
+        return {"status": "EXPIRED", "detail": "令牌及刷新令牌均已超时失效", "cached": False}
+
+    raw_refresh = auth_dict.get("refreshToken")
+    refresh_token = None
+    if raw_refresh:
+        try:
+            refresh_token = resolve_credential_field(raw_refresh, field_name="refreshToken")
+        except Exception:
+            refresh_token = None
+
+    if not refresh_token:
+        cache[uid] = {"status": "EXPIRED", "checked_at": time.time()}
+        save_audit_cache(cache)
+        return {"status": "EXPIRED", "detail": "缺少有效 Refresh Token", "cached": False}
+
+    # 5. 执行受控单次静默刷新自愈
+    refresh_urls = [
+        "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
+        "https://copilot.tencent.com/v2/auth/token/refresh"
+    ]
+    new_auth = None
+    for r_url in refresh_urls:
+        r_req = urllib.request.Request(
+            r_url,
+            data=b"{}",
+            headers={
+                "Content-Type": "application/json",
+                "X-Refresh-Token": refresh_token,
+                "X-Auth-Refresh-Source": "plugin",
+                "User-Agent": CLIENT_USER_AGENT
+            }
+        )
+        try:
+            with urllib.request.urlopen(r_req, timeout=10) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if res.get("code") == 0 and res.get("data") and res["data"].get("accessToken"):
+                    new_auth = res["data"]
+                    break
+        except urllib.error.HTTPError as e:
+            try:
+                e.close()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    if new_auth:
+        now_ms = int(time.time() * 1000)
+        exp_in = int(new_auth.get("expiresIn", 7200))
+        ref_exp_in = int(new_auth.get("refreshExpiresIn", 2592000))
+        new_exp_at = now_ms + exp_in * 1000
+        new_ref_exp_at = now_ms + ref_exp_in * 1000
+
+        profile_data = profile_info.get("data", {})
+        existing_auth = profile_data.get("auth", {})
+        existing_auth.update({
+            "accessToken": encrypt_credential_field(new_auth["accessToken"], "accessToken"),
+            "refreshToken": encrypt_credential_field(new_auth.get("refreshToken", refresh_token), "refreshToken"),
+            "expiresIn": exp_in,
+            "refreshExpiresIn": ref_exp_in,
+            "expiresAt": new_exp_at,
+            "refreshExpiresAt": new_ref_exp_at,
+            "lastRefreshTime": now_ms
+        })
+        profile_data["auth"] = existing_auth
+        profile_info["expiresAt"] = new_exp_at
+        profile_info["refreshExpiresAt"] = new_ref_exp_at
+
+        prof_path = profile_info.get("path")
+        if prof_path:
+            try:
+                with open(prof_path, "w", encoding="utf-8") as f:
+                    json.dump(profile_data, f, indent=2, ensure_ascii=False)
+                if sys.platform != "win32":
+                    os.chmod(prof_path, 0o600)
+            except Exception:
+                pass
+
+        active_data = get_active_account()
+        if active_data and active_data.get("account", {}).get("uid") == uid:
+            try:
+                with open(AUTH_FILE, "w", encoding="utf-8") as f:
+                    json.dump(profile_data, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+
+        cache[uid] = {"status": "REFRESHED", "checked_at": time.time(), "expires_at": new_exp_at}
+        save_audit_cache(cache)
+        return {"status": "REFRESHED", "detail": "已自动续期并同步更新凭证", "cached": False}
+    else:
+        cache[uid] = {"status": "EXPIRED", "checked_at": time.time()}
+        save_audit_cache(cache)
+        return {"status": "EXPIRED", "detail": "自动续期失败，凭据已彻底失效", "cached": False}
+
+def run_audit(force=False, notify_on_expired=True):
+    """
+    全量审计本地已保存的账号凭证，主动发现失效凭证并进行无感自愈。
+    """
+    profiles = get_profiles()
+    if not profiles:
+        print(f"{COLOR_YELLOW}未在 ~/.workbuddy/auth_profiles 中发现任何保存的账号凭证。{COLOR_RESET}")
+        return True
+
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 账号凭证健康度与失效审计 ==={COLOR_RESET}")
+    if force:
+        print(f"{COLOR_YELLOW}[强制检测模式: 已绕过本地缓存]{COLOR_RESET}")
+    print(f"待检测账号总数: {len(profiles)}\n")
+
+    results = []
+    has_expired = False
+
+    for idx, (name, p) in enumerate(profiles.items()):
+        health = check_profile_health(p, force=force)
+        status = health["status"]
+        detail = health["detail"]
+
+        if status == "EXPIRED":
+            has_expired = True
+
+        results.append((name, p, status, detail))
+
+        if not health.get("cached") and idx < len(profiles) - 1:
+            time.sleep(random.uniform(1.2, 2.0))
+
+    print(f"{'账号别名':<14} {'用户昵称':<16} {'UID':<12} {'有效期至':<20} {'状态':<15}")
+    print("-" * 75)
+    for name, p, status, detail in results:
+        masked_uid = f"{p['uid'][:8]}..." if len(p['uid']) > 8 else p['uid']
+        exp_str = format_timestamp(p.get("expiresAt", 0))
+        if status == "HEALTHY":
+            status_badge = f"{COLOR_GREEN}✔ 正常 ({detail}){COLOR_RESET}"
+        elif status == "REFRESHED":
+            status_badge = f"{COLOR_CYAN}🔄 已自愈续期 ({detail}){COLOR_RESET}"
+        else:
+            status_badge = f"{COLOR_RED}✖ 已失效 ({detail}){COLOR_RESET}"
+        print(f"{name:<14} {p['nickname']:<16} {masked_uid:<12} {exp_str:<20} {status_badge}")
+    print("-" * 75)
+
+    if has_expired:
+        print(f"\n{COLOR_RED}▲ 警告: 检测到存在失效账号！请针对失效账号运行:{COLOR_RESET}")
+        print(f"  {COLOR_BOLD}workbuddy login <账号别名>{COLOR_RESET} 重新扫码授权录入。\n")
+        if notify_on_expired:
+            expired_items = [p.get("nickname") or name for name, p, status, detail in results if status == "EXPIRED"]
+            if expired_items:
+                title = "🚨 WorkBuddy 账号凭证失效告警"
+                if len(expired_items) == 1:
+                    msg = f"账号 [{expired_items[0]}] 凭证已失效且自动续期失败，请重新扫码授权。"
+                else:
+                    msg = f"检测到 {len(expired_items)} 个账号凭证失效 ({', '.join(expired_items[:3])})，请重新扫码授权。"
+                notify_desktop(title, msg)
+        return False
+    else:
+        print(f"\n{COLOR_GREEN}✔ 所有账号凭证均处于健康就绪状态。{COLOR_RESET}\n")
+        return True
+
+def run_audit_daemon(interval_hours=6.0, force=False):
+    """
+    按指定时间间隔持续巡检账号凭据健康度：
+    - 轻量低功耗，线程在操作系统内核中休眠，无活跃轮询消耗
+    - 校验不通过自动触发系统级桌面通知 (macOS & Windows)
+    - 具备异常容错，单轮异常不导致守护进程崩溃退出
+    - 响应 Ctrl+C 优雅退出
+    """
+    try:
+        hours = max(0.0001, float(interval_hours))
+    except (ValueError, TypeError):
+        hours = 6.0
+    interval_sec = max(1, int(hours * 3600))
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 定时巡检守护进程已启动 ==={COLOR_RESET}")
+    print(f"巡检周期: 每 {hours:g} 小时 ({interval_sec} 秒)")
+    print("按 Ctrl+C 可优雅退出\n")
+
+    iteration = 0
+    try:
+        while True:
+            iteration += 1
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n[{now_str}] 正在执行第 {iteration} 轮健康度巡检...")
+            try:
+                run_audit(force=force, notify_on_expired=True)
+            except Exception as e:
+                print(f"{COLOR_RED}本轮巡检执行异常: {e}{COLOR_RESET}")
+            next_ts = time.time() + interval_sec
+            next_str = datetime.fromtimestamp(next_ts).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"{COLOR_CYAN}⏳ 本轮巡检完毕，下次巡检时间: {next_str} (休眠中...){COLOR_RESET}")
+            sleep_end = time.time() + interval_sec
+            while time.time() < sleep_end:
+                time.sleep(min(1.0, max(0.0, sleep_end - time.time())))
+    except KeyboardInterrupt:
+        print(f"\n\n{COLOR_YELLOW}WorkBuddy 定时巡检守护进程已安全退出。{COLOR_RESET}")
+
+
+def run_login(alias=None, auto_switch=True, force=False):
+    """
+    独立免登扫码录入系统：主客户端不退出当前工作任务，命令行独立发起扫码、收回 Token 并落盘。
+    支持同一账号在位平滑更新、异账号冲突自动自愈重命名与 --force 覆盖。
+    """
+    print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 独立免登扫码录入 ==={COLOR_RESET}\n")
+
+    if not alias:
+        try:
+            val = input(f"{COLOR_BOLD}请输入新账号别名 (直接回车将自动生成): {COLOR_RESET}").strip()
+            alias = val if val else None
+        except (KeyboardInterrupt, EOFError):
+            print("\n已取消录入。")
+            return False
+
+    if not alias:
+        alias = f"acc_{int(time.time()) % 100000}"
+    alias = re.sub(r"[^\w\-]", "_", alias).strip("_")
+    if not alias:
+        alias = "account_new"
+
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    target_path = os.path.join(PROFILES_DIR, f"{alias}.info")
+    if os.path.exists(target_path):
+        print(f"{COLOR_CYAN}ℹ 别名 '{alias}' 当前已存在，扫码完成后将自动识别：同一账号在位平滑更新，异账号智能消除冲突。{COLOR_RESET}\n")
+
+    state_urls = [
+        "https://copilot.tencent.com/v2/plugin/auth/state?platform=workbuddy",
+        "https://copilot.tencent.com/v2/auth/state?platform=workbuddy"
+    ]
+    state_data = None
+    last_err = None
+    for url in state_urls:
+        req = urllib.request.Request(
+            url,
+            data=b"{}",
+            headers={
+                "Content-Type": "application/json",
+                "X-No-Authorization": "true",
+                "X-No-User-Id": "true",
+                "X-No-Enterprise-Id": "true",
+                "X-No-Department-Info": "true",
+                "User-Agent": CLIENT_USER_AGENT
+            }
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if res.get("code") == 0 and res.get("data"):
+                    state_data = res.get("data")
+                    break
+                else:
+                    last_err = res.get("msg", "未知响应")
+        except urllib.error.HTTPError as e:
+            last_err = f"HTTP {e.code}"
+            try:
+                e.close()
+            except Exception:
+                pass
+        except Exception as e:
+            last_err = str(e)
+
+    if not state_data or not state_data.get("state") or not state_data.get("authUrl"):
+        print(f"{COLOR_RED}错误: 无法获取登录授权凭证 ({last_err}){COLOR_RESET}")
+        return False
+
+    state = state_data["state"]
+    auth_url = state_data["authUrl"]
+
+    print(f"{COLOR_GREEN}✔ 已成功获取微信扫码授权会话 (State ID: {state[:8]}...){COLOR_RESET}\n")
+    print(f"{COLOR_BOLD}【微信扫码登录】请使用手机微信扫描下方二维码：{COLOR_RESET}\n")
+
+    try:
+        qr_text = generate_qr_terminal(auth_url)
+        print(qr_text)
+    except Exception as e:
+        print(f"{COLOR_YELLOW}(终端字符二维码生成受限: {e}){COLOR_RESET}")
+
+    print(f"\n{COLOR_CYAN}🔗 授权链接 (可在浏览器中直接打开):{COLOR_RESET} {auth_url}")
+
+    try:
+        webbrowser.open(auth_url)
+        print(f"{COLOR_GREEN}✔ 已尝试在默认浏览器中打开官方扫码页面{COLOR_RESET}")
+    except Exception:
+        pass
+
+    print(f"\n{COLOR_YELLOW}📱 正在等待手机扫码授权（有效等待 3 分钟，按 Ctrl+C 可取消）...{COLOR_RESET}")
+
+    poll_urls = [
+        f"https://copilot.tencent.com/v2/plugin/auth/token?state={state}",
+        f"https://copilot.tencent.com/v2/auth/token?state={state}"
+    ]
+    t0 = time.time()
+    auth_result = None
+
+    try:
+        while time.time() - t0 < 180:
+            time.sleep(2.5 + random.uniform(0.1, 0.4))
+            elapsed = int(time.time() - t0)
+            sys.stdout.write(f"\r⏳ 等待手机微信扫码授权中 [{elapsed}s]... ")
+            sys.stdout.flush()
+
+            for p_url in poll_urls:
+                p_req = urllib.request.Request(
+                    p_url,
+                    headers={
+                        "X-No-Authorization": "true",
+                        "X-No-User-Id": "true",
+                        "X-No-Enterprise-Id": "true",
+                        "X-No-Department-Info": "true",
+                        "User-Agent": CLIENT_USER_AGENT
+                    }
+                )
+                try:
+                    with urllib.request.urlopen(p_req, timeout=8) as resp:
+                        res = json.loads(resp.read().decode("utf-8"))
+                        code = res.get("code")
+                        if code == 11217:
+                            break
+                        elif code == 0 and res.get("data") and res["data"].get("accessToken"):
+                            auth_result = res["data"]
+                            break
+                        elif code not in (0, 11217):
+                            break
+                except urllib.error.HTTPError as e:
+                    try:
+                        e.close()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            if auth_result:
+                break
+    except KeyboardInterrupt:
+        print(f"\n\n{COLOR_YELLOW}扫码登录已取消。{COLOR_RESET}")
+        return False
+
+    print()
+    if not auth_result:
+        print(f"\n{COLOR_RED}扫码超时（180 秒无响应），请重试。{COLOR_RESET}")
+        return False
+
+    access_token = auth_result.get("accessToken")
+    now_ms = int(time.time() * 1000)
+    exp_in = int(auth_result.get("expiresIn", 7200))
+    ref_exp_in = int(auth_result.get("refreshExpiresIn", 2592000))
+    auth_result["expiresAt"] = now_ms + exp_in * 1000
+    auth_result["refreshExpiresAt"] = now_ms + ref_exp_in * 1000
+    auth_result["lastRefreshTime"] = now_ms
+
+    account_data = None
+    account_urls = [
+        "https://copilot.tencent.com/v2/plugin/account",
+        "https://copilot.tencent.com/v2/accounts"
+    ]
+    for a_url in account_urls:
+        a_req = urllib.request.Request(
+            a_url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": CLIENT_USER_AGENT
+            }
+        )
+        try:
+            with urllib.request.urlopen(a_req, timeout=8) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if res.get("code") == 0 and res.get("data"):
+                    d = res.get("data")
+                    if isinstance(d, dict):
+                        account_data = d
+                    elif isinstance(d, list) and d:
+                        account_data = d[0]
+                    break
+        except urllib.error.HTTPError as e:
+            try:
+                e.close()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    if not account_data:
+        account_data = {
+            "uid": auth_result.get("userId", f"user_{int(time.time()) % 100000}"),
+            "nickname": alias,
+            "uin": ""
+        }
+    else:
+        if not account_data.get("uid"):
+            account_data["uid"] = account_data.get("userId") or auth_result.get("userId", f"user_{int(time.time()) % 100000}")
+
+    enc_nickname = encrypt_credential_field(account_data.get("nickname", alias), "nickname")
+    enc_account = {
+        **account_data,
+        "nickname": enc_nickname
+    }
+    auth_result.setdefault("tokenType", "Bearer")
+    auth_result.setdefault("domain", "www.workbuddy.cn")
+    auth_result.setdefault("sessionState", state)
+
+    profile_data = {
+        "account": enc_account,
+        "auth": {
+            **auth_result,
+            "accessToken": encrypt_credential_field(auth_result["accessToken"], "accessToken"),
+            "refreshToken": encrypt_credential_field(auth_result.get("refreshToken", ""), "refreshToken")
+        },
+        "accounts": [enc_account],
+        "allAccounts": [enc_account]
+    }
+
+    uid = account_data.get("uid", "")
+    final_alias, is_inplace = resolve_profile_alias_conflict(alias, uid, force=force)
+    final_target_path = os.path.join(PROFILES_DIR, f"{final_alias}.info")
+
+    with open(final_target_path, "w", encoding="utf-8") as f:
+        json.dump(profile_data, f, indent=2, ensure_ascii=False)
+    if sys.platform != "win32":
+        os.chmod(final_target_path, 0o600)
+
+    cache = get_audit_cache()
+    if uid:
+        cache[uid] = {
+            "status": "HEALTHY",
+            "checked_at": time.time(),
+            "expires_at": auth_result["expiresAt"]
+        }
+        save_audit_cache(cache)
+
+    nick = account_data.get("nickname", final_alias)
+    if is_inplace:
+        print(f"\n{COLOR_BOLD}{COLOR_GREEN}✔ 账号更新成功！已同步更新 Profile: '{final_alias}'{COLOR_RESET}")
+    else:
+        print(f"\n{COLOR_BOLD}{COLOR_GREEN}✔ 账号录入成功！已保存为 Profile: '{final_alias}'{COLOR_RESET}")
+    print(f"用户昵称: {COLOR_BOLD}{nick}{COLOR_RESET}")
+    print(f"用户 UID: {uid}")
+    print(f"配置文件: {final_target_path}\n")
+
+    if auto_switch:
+        try:
+            choice = input(f"{COLOR_BOLD}是否立即切换到该新录入的账号？[Y/n]: {COLOR_RESET}").strip().lower()
+            if choice in ("", "y", "yes"):
+                switch_to_profile(final_alias, auto_restart=True)
+        except (KeyboardInterrupt, EOFError):
+            print("\n已保存凭证，暂未切换。")
+
+    return True
+
 def show_status():
     active_data = get_active_account()
     profiles = get_profiles()
@@ -649,6 +1604,22 @@ def show_status():
         print(f"Token 有效期: {expires}")
         print(f"刷新令牌过期: {refresh_expires}")
 
+        active_prof = {
+            "data": active_data,
+            "uid": uid,
+            "path": AUTH_FILE,
+            "expiresAt": auth.get("expiresAt", 0) if isinstance(auth, dict) else 0,
+            "refreshExpiresAt": auth.get("refreshExpiresAt", 0) if isinstance(auth, dict) else 0
+        }
+        act_health = check_profile_health(active_prof, force=False)
+        if act_health["status"] == "HEALTHY":
+            act_badge = f"{COLOR_GREEN}✔ 正常 ({act_health['detail']}){COLOR_RESET}"
+        elif act_health["status"] == "REFRESHED":
+            act_badge = f"{COLOR_CYAN}🔄 已自愈续期 ({act_health['detail']}){COLOR_RESET}"
+        else:
+            act_badge = f"{COLOR_RED}✖ 已失效 ({act_health['detail']}){COLOR_RESET}"
+        print(f"凭证健康状态: {act_badge}")
+
     print(f"\n已保存的账号凭证库 ({len(profiles)} 个):")
     for name, p in profiles.items():
         is_active = active_data and isinstance(active_data, dict) and active_data.get("account", {}).get("uid") == p["uid"]
@@ -656,7 +1627,14 @@ def show_status():
         masked_uid = f"{p['uid'][:8]}..." if len(p["uid"]) > 8 else p["uid"]
         p_tok = p["data"].get("auth", {}).get("accessToken") if isinstance(p.get("data"), dict) and isinstance(p["data"].get("auth"), dict) else None
         p_fmt = check_token_format(p_tok)
-        print(f" {tag} • {COLOR_BOLD}{name:<12}{COLOR_RESET} 昵称: {p['nickname']} (UID: {masked_uid}) [{p_fmt}] 有效期至: {format_timestamp(p['expiresAt'])}")
+        h = check_profile_health(p, force=False)
+        if h["status"] == "HEALTHY":
+            h_badge = f"{COLOR_GREEN}[正常]{COLOR_RESET}"
+        elif h["status"] == "REFRESHED":
+            h_badge = f"{COLOR_CYAN}[已续期]{COLOR_RESET}"
+        else:
+            h_badge = f"{COLOR_RED}[已失效]{COLOR_RESET}"
+        print(f" {tag} • {COLOR_BOLD}{name:<12}{COLOR_RESET} 昵称: {p['nickname']} (UID: {masked_uid}) [{p_fmt}] {h_badge} 有效期至: {format_timestamp(p['expiresAt'])}")
     print()
 
 def restart_workbuddy():
@@ -723,7 +1701,7 @@ def restart_workbuddy():
 
     print(f"{COLOR_GREEN}✔ WorkBuddy 已成功重启！{COLOR_RESET}")
 
-def switch_to_profile(target_name, auto_restart=True):
+def switch_to_profile(target_name, auto_restart=True, check_health=True):
     profiles = get_profiles()
     target = None
     for name, p in profiles.items():
@@ -736,6 +1714,31 @@ def switch_to_profile(target_name, auto_restart=True):
         print(f"{COLOR_RED}错误: 未找到名为 '{target_name}' 的账号凭证。{COLOR_RESET}")
         print(f"可用账号列表: {', '.join(profiles.keys())}")
         return False
+
+    if check_health:
+        health = check_profile_health(target, force=False)
+        if health.get("status") == "REFRESHED":
+            prof_path = target.get("path")
+            if prof_path and os.path.exists(prof_path):
+                try:
+                    with open(prof_path, "r", encoding="utf-8") as f:
+                        target["data"] = json.load(f)
+                except Exception:
+                    pass
+        elif health.get("status") == "EXPIRED":
+            print(f"\n{COLOR_RED}▲ 警告: 目标账号 '{target_name}' 凭证已失效 ({health.get('detail')})！{COLOR_RESET}")
+            print(f"建议运行: {COLOR_BOLD}workbuddy login {target_name}{COLOR_RESET} 重新扫码授权录入。")
+            if not sys.stdin.isatty():
+                print(f"{COLOR_RED}非交互式运行环境，已阻止切换到已失效账号。{COLOR_RESET}")
+                return False
+            try:
+                ans = input(f"{COLOR_YELLOW}是否仍要强制切换到该已失效账号？[y/N]: {COLOR_RESET}").strip().lower()
+                if ans not in ("y", "yes"):
+                    print("已取消切换。")
+                    return False
+            except (KeyboardInterrupt, EOFError):
+                print("\n已取消切换。")
+                return False
 
     active_data = get_active_account()
     if active_data and active_data.get("account", {}).get("uid") == target["uid"]:
@@ -970,14 +1973,93 @@ def parse_and_run_chat(args):
     run_chat(target_name=target_name, prompt=prompt, model=model, send_all=send_all)
 
 def notify_desktop(title, message):
+    """
+    跨平台操作系统级系统通知 (macOS & Windows & Linux)
+    - macOS: osascript 原生 display notification
+    - Windows: PowerShell 原生 Toast (WinRT) / BalloonTip 降级回退
+    - Linux: notify-send 桌面通知
+    全异常拦截 + 严格超时保护，绝不阻塞主程序或抛出未捕获异常。
+    """
+    title_str = str(title)
+    msg_str = str(message)
+
     if sys.platform == "darwin":
         try:
-            safe_title = str(title).replace('"', '\\"')
-            safe_msg = str(message).replace('"', '\\"')
+            safe_title = title_str.replace('\\', '\\\\').replace('"', '\\"').replace('\r', ' ').replace('\n', ' ')
+            safe_msg = msg_str.replace('\\', '\\\\').replace('"', '\\"').replace('\r', ' ').replace('\n', ' ')
             script = f'display notification "{safe_msg}" with title "{safe_title}"'
-            subprocess.run(["osascript", "-e", script], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["osascript", "-e", script],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5.0
+            )
+            return True
         except Exception:
-            pass
+            return False
+
+    elif sys.platform == "win32":
+        try:
+            # 采用 Base64 编码传递字符串，彻底杜绝任何 PowerShell 引号或转义攻击
+            title_b64 = base64.b64encode(title_str.encode("utf-8")).decode("ascii")
+            msg_b64 = base64.b64encode(msg_str.encode("utf-8")).decode("ascii")
+            ps_cmd = (
+                f"$t=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{title_b64}'));"
+                f"$m=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{msg_b64}'));"
+                "try{"
+                "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;"
+                "$tmpl=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
+                "$txts=$tmpl.GetElementsByTagName('text');"
+                "$txts[0].AppendChild($tmpl.CreateTextNode($t)) | Out-Null;"
+                "$txts[1].AppendChild($tmpl.CreateTextNode($m)) | Out-Null;"
+                "$toast=[Windows.UI.Notifications.ToastNotification]::new($tmpl);"
+                "try{"
+                "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('WorkBuddy').Show($toast);"
+                "}catch{"
+                "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show($toast);"
+                "}"
+                "}catch{"
+                "try{"
+                "Add-Type -AssemblyName System.Windows.Forms | Out-Null;"
+                "Add-Type -AssemblyName System.Drawing | Out-Null;"
+                "$n=New-Object System.Windows.Forms.NotifyIcon;"
+                "$n.Icon=[System.Drawing.SystemIcons]::Warning;"
+                "$n.BalloonTipTitle=$t;"
+                "$n.BalloonTipText=$m;"
+                "$n.BalloonTipIcon=[System.Windows.Forms.ToolTipIcon]::Warning;"
+                "$n.Visible=$True;"
+                "$n.ShowBalloonTip(4000);"
+                "Start-Sleep -Milliseconds 500;"
+                "$n.Dispose();"
+                "}catch{}"
+                "}"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8.0
+            )
+            return True
+        except Exception:
+            return False
+
+    else:  # Linux / Unix
+        try:
+            if shutil.which("notify-send"):
+                subprocess.run(
+                    ["notify-send", title_str, msg_str],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5.0
+                )
+                return True
+        except Exception:
+            return False
+    return False
 
 def run_checkin(target_name=None, with_chat=True):
     sync_active_token_to_profiles()
@@ -1180,7 +2262,13 @@ def interactive_menu():
         is_cur = (p["uid"] == active_uid)
         prefix = f"{COLOR_GREEN}▶{COLOR_RESET}" if is_cur else " "
         cur_text = f" {COLOR_GREEN}(当前使用中){COLOR_RESET}" if is_cur else ""
-        print(f" {prefix} {COLOR_BOLD}{idx}){COLOR_RESET} {name:<12} [昵称: {p['nickname']}]{cur_text}")
+        h = check_profile_health(p, force=False)
+        status_text = ""
+        if h["status"] == "EXPIRED":
+            status_text = f" {COLOR_RED}[已失效: 请重新 workbuddy login]{COLOR_RESET}"
+        elif h["status"] == "REFRESHED":
+            status_text = f" {COLOR_CYAN}[已续期]{COLOR_RESET}"
+        print(f" {prefix} {COLOR_BOLD}{idx}){COLOR_RESET} {name:<12} [昵称: {p['nickname']}]{status_text}{cur_text}")
 
     print(f"\n   {COLOR_BOLD}q){COLOR_RESET} 退出 (Cancel)")
     print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}")
@@ -1201,7 +2289,7 @@ def interactive_menu():
     except (KeyboardInterrupt, EOFError):
         print("\n已取消。")
 
-def save_current(name):
+def save_current(name, force=False):
     active_data = get_active_account()
     if not active_data:
         print(f"{COLOR_RED}错误: 当前没有检测到已登录的 WorkBuddy 凭证。{COLOR_RESET}")
@@ -1210,12 +2298,17 @@ def save_current(name):
     nickname = get_display_nickname(acc, default_name=name)
     uid = acc.get("uid", "") if isinstance(acc, dict) else ""
     os.makedirs(PROFILES_DIR, exist_ok=True)
-    target_path = os.path.join(PROFILES_DIR, f"{name}.info")
+
+    final_name, is_inplace = resolve_profile_alias_conflict(name, uid, force=force)
+    target_path = os.path.join(PROFILES_DIR, f"{final_name}.info")
     with open(target_path, "w", encoding="utf-8") as f:
         json.dump(active_data, f, indent=2, ensure_ascii=False)
     if sys.platform != "win32":
         os.chmod(target_path, 0o600)
-    print(f"{COLOR_GREEN}✔ 当前登录态已成功保存为 Profile: '{name}' (昵称: {nickname}, UID: {uid}){COLOR_RESET}")
+    if is_inplace:
+        print(f"{COLOR_GREEN}✔ 当前登录态已在位平滑更新至 Profile: '{final_name}' (昵称: {nickname}, UID: {uid}){COLOR_RESET}")
+    else:
+        print(f"{COLOR_GREEN}✔ 当前登录态已成功保存为 Profile: '{final_name}' (昵称: {nickname}, UID: {uid}){COLOR_RESET}")
     print(f"{COLOR_GREEN}  凭证已按原生格式保存（保持加密格式，解密仅在内存中执行）。{COLOR_RESET}")
 
 def run_doctor():
@@ -1408,18 +2501,66 @@ def run_router_cmd(args):
     else:
         print(f"用法: workbuddy router [status|start|stop|restart]")
 
+def _parse_audit_cli_args(args_list):
+    force = any(a in ("--force", "-f") for a in args_list)
+    daemon_mode = False
+    interval_hours = 6.0
+    i = 0
+    while i < len(args_list):
+        arg = args_list[i]
+        if arg in ("--daemon", "-d"):
+            daemon_mode = True
+            if i + 1 < len(args_list) and not args_list[i + 1].startswith("-"):
+                try:
+                    interval_hours = float(args_list[i + 1])
+                    i += 1
+                except ValueError:
+                    pass
+        elif arg.startswith("--daemon="):
+            daemon_mode = True
+            try:
+                interval_hours = float(arg.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif arg in ("--interval", "-i"):
+            daemon_mode = True
+            if i + 1 < len(args_list) and not args_list[i + 1].startswith("-"):
+                try:
+                    interval_hours = float(args_list[i + 1])
+                    i += 1
+                except ValueError:
+                    pass
+        elif arg.startswith("--interval="):
+            daemon_mode = True
+            try:
+                interval_hours = float(arg.split("=", 1)[1])
+            except ValueError:
+                pass
+        i += 1
+    return force, daemon_mode, interval_hours
+
 def print_help():
     print(f"""
 {COLOR_BOLD}WorkBuddy 账号切换与自动化管理工具 (workbuddy CLI v{VERSION}){COLOR_RESET}
 
 核心特性:
   ★ 免重新扫码账号切换：保存已验证凭证 Profile，切号即时生效。
+  ★ 独立免登扫码录入：主客户端无需退出当前工作任务，命令行独立扫码授权并落盘。
+  ★ 智能别名冲突消解：同账号平滑更新，异账号自动自愈重命名 (<alias>_1)，支持 --force 覆盖。
+  ★ 凭据健康审计与自愈：智能巡检已存账号健康度，自动刷新续期近过期凭据，标红阻断失效账号。
+  ★ 定时巡检与双端通知：支持按指定时间间隔巡检 (--interval / --daemon)，失效触发原生桌面通知 (macOS/Win)。
   ★ 模型全景资产与倍率透视：实时聚合官方倍率与三方模型，历史高频使用自动置顶。
   ★ 容灾轮换路由 (Auto Pilot)：首包防挂起、429 秒级轮换、冷却熔断，保障长任务不断流。
   ★ 每日打卡与每日连续对话任务联动：一次打卡自动获得积分与连续对话活跃奖励！
   ★ 状态深度自检：自带 doctor 命令，快速诊断本地解密运行时与 API 就绪能力。
 
 用法:
+  workbuddy login [账号别名] [选项]   独立免登扫码录入系统（支持 --force 覆盖与冲突自愈）
+                                  [--force | --overwrite] [--no-switch]
+  workbuddy audit [选项]          全量审计已存账号健康度，失效触发桌面通知 (macOS/Win)
+                                  [--force] [--interval HOURS | --daemon [HOURS]]
+  workbuddy save <账号别名> [选项]    将当前活跃登录态保存为新 Profile（支持 --force 覆盖与冲突自愈）
+                                  [--force | --overwrite]
   workbuddy models [选项]         呼出模型全景资产与优先级轻量选择器 (TUI)
                                   --list (文本清单) | --json | --smart-apply (一键智能生效)
   workbuddy router [子命令]       管理容灾网关服务 (status / start / stop / restart)
@@ -1428,20 +2569,23 @@ def print_help():
   workbuddy chat [提示词]         向当前活跃账号发送对话（智能优先免费/最低倍率模型）
   workbuddy chat --all [提示词]   对所有已保存账号批量发送对话，维持连续对话奖励
   workbuddy doctor              检查当前凭据格式、本地解密运行时及兼容状态
-  workbuddy status              查看当前登录账号状态及凭据格式
-  workbuddy list                列出本地已保存的所有账号凭证
-  workbuddy save <账号别名>       将当前活跃的登录态保存为一个新账号 Profile
+  workbuddy status              查看当前登录账号状态及凭据格式与健康状态
+  workbuddy list                列出本地已保存的所有账号凭证与健康状态
   workbuddy init                一键对本地数据库打补丁，实现全账号工作区共享
   workbuddy rollback            移除共享触发器，恢复官方默认数据隔离
   workbuddy restart             重启 WorkBuddy 客户端
 
 快捷别名:
+  wb-login [账号名] [--force] [--no-switch]
+  wb-audit [--force] [--interval HOURS | --daemon [HOURS]]
   wb-models [选项]
   wb-router [子命令]
   wb-switch [账号名]
   wb-checkin [账号名]
   wb-chat [提示词]
   wb-doctor
+  workbuddy-login
+  workbuddy-audit
   workbuddy-models
   workbuddy-router
 """)
@@ -1451,6 +2595,26 @@ def main():
     args = sys.argv[1:]
 
     # 如果通过快捷别名调用
+    if "login" in prog_name:
+        if any(a in ("-h", "--help", "help") for a in args):
+            print("用法: wb-login [账号别名] [--force] [--no-switch]")
+            return
+        force = any(a in ("--force", "-f", "--overwrite") for a in args)
+        auto_switch = ("--no-switch" not in args)
+        clean_args = [a for a in args if not a.startswith("--") and not a.startswith("-")]
+        alias = clean_args[0] if clean_args else None
+        run_login(alias=alias, auto_switch=auto_switch, force=force)
+        return
+    if "audit" in prog_name:
+        if any(a in ("-h", "--help", "help") for a in args):
+            print("用法: wb-audit [--force] [--interval HOURS | --daemon [HOURS]]")
+            return
+        force, daemon_mode, interval_hours = _parse_audit_cli_args(args)
+        if daemon_mode:
+            run_audit_daemon(interval_hours=interval_hours, force=force)
+            return
+        ok = run_audit(force=force, notify_on_expired=True)
+        sys.exit(0 if ok else 1)
     if "doctor" in prog_name:
         ok = run_doctor()
         sys.exit(0 if ok else 1)
@@ -1481,7 +2645,28 @@ def main():
         return
 
     cmd = args[0].lower()
-    if cmd in ["models", "model"]:
+    if cmd in ["login", "signin", "auth"]:
+        sub_args = args[1:]
+        if any(a in ("-h", "--help", "help") for a in sub_args):
+            print("用法: workbuddy login [账号别名] [--force] [--no-switch]")
+            return
+        force = any(a in ("--force", "-f", "--overwrite") for a in sub_args)
+        auto_switch = ("--no-switch" not in sub_args)
+        clean_args = [a for a in sub_args if not a.startswith("--") and not a.startswith("-")]
+        alias = clean_args[0] if clean_args else None
+        run_login(alias=alias, auto_switch=auto_switch, force=force)
+    elif cmd in ["audit", "verify", "health"]:
+        sub_args = args[1:]
+        if any(a in ("-h", "--help", "help") for a in sub_args):
+            print("用法: workbuddy audit [--force] [--interval HOURS | --daemon [HOURS]]")
+            return
+        force, daemon_mode, interval_hours = _parse_audit_cli_args(sub_args)
+        if daemon_mode:
+            run_audit_daemon(interval_hours=interval_hours, force=force)
+            return
+        ok = run_audit(force=force, notify_on_expired=True)
+        sys.exit(0 if ok else 1)
+    elif cmd in ["models", "model"]:
         run_models_cmd(args[1:])
     elif cmd in ["router"]:
         run_router_cmd(args[1:])
@@ -1505,10 +2690,16 @@ def main():
     elif cmd in ["list", "ls"]:
         show_status()
     elif cmd in ["save", "backup"]:
-        if len(args) > 1:
-            save_current(args[1])
+        sub_args = args[1:]
+        if any(a in ("-h", "--help", "help") for a in sub_args):
+            print("用法: workbuddy save <账号别名> [--force]")
+            return
+        force = any(a in ("--force", "-f", "--overwrite") for a in sub_args)
+        clean_args = [a for a in sub_args if not a.startswith("--") and not a.startswith("-")]
+        if clean_args:
+            save_current(clean_args[0], force=force)
         else:
-            print(f"{COLOR_RED}请提供保存的名称，例如: workbuddy save myaccount{COLOR_RESET}")
+            print(f"{COLOR_RED}请提供保存的名称，例如: workbuddy save myaccount [--force]{COLOR_RESET}")
     elif cmd in ["init", "patch"]:
         init_shared_workspace()
     elif cmd in ["rollback", "unpatch"]:

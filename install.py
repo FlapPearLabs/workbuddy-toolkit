@@ -88,6 +88,16 @@ def install_cli():
             with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
                 f.write(cmd_doctor)
 
+        cmd_login = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" login %*\r\n"
+        for name in ["wb-login.cmd", "workbuddy-login.cmd"]:
+            with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
+                f.write(cmd_login)
+
+        cmd_audit = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" audit %*\r\n"
+        for name in ["wb-audit.cmd", "workbuddy-audit.cmd"]:
+            with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
+                f.write(cmd_audit)
+
         cmd_models = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" models %*\r\n"
         for name in ["wb-models.cmd", "workbuddy-models.cmd"]:
             with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
@@ -167,6 +177,8 @@ def install_cli():
             os.chmod(dest_log_guard, 0o755)
 
         for alias in [
+            "wb-login", "workbuddy-login",
+            "wb-audit", "workbuddy-audit",
             "wb-switch", "workbuddy-switch",
             "wb-checkin", "workbuddy-checkin",
             "wb-chat", "workbuddy-chat",
