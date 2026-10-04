@@ -1209,6 +1209,142 @@ class TestWorkBuddyCore(unittest.TestCase):
             self.assertEqual(alias_diff, "legacy_user_1")
             self.assertFalse(is_inplace_diff)
 
+    def test_t44_show_status_json_format_active_and_profiles(self):
+        """T44: show_status(as_json=True) 输出完整的程序化 JSON 结构且字段完备"""
+        active_payload = {
+            "account": {"uid": "uid_json_act", "nickname": "JsonActive"},
+            "auth": {
+                "accessToken": "plain_act_token",
+                "expiresAt": 1900000000000,
+                "refreshExpiresAt": 1950000000000
+            }
+        }
+        with open(workbuddy.AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump(active_payload, f)
+
+        prof_act = os.path.join(workbuddy.PROFILES_DIR, "act_profile.info")
+        with open(prof_act, "w", encoding="utf-8") as f:
+            json.dump(active_payload, f)
+
+        prof_other = os.path.join(workbuddy.PROFILES_DIR, "other_profile.info")
+        with open(prof_other, "w", encoding="utf-8") as f:
+            json.dump({
+                "account": {"uid": "uid_json_other", "nickname": "OtherUser"},
+                "auth": {
+                    "accessToken": "plain_other_token",
+                    "expiresAt": 1900000000000,
+                    "refreshExpiresAt": 1950000000000
+                }
+            }, f)
+
+        import io
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            workbuddy.show_status(as_json=True)
+
+        raw = buf.getvalue().strip()
+        data = json.loads(raw)
+
+        self.assertEqual(data["platform"], sys.platform)
+        self.assertEqual(data["total_profiles"], 2)
+
+        # 检查 active_account 字段完备性
+        act = data["active_account"]
+        self.assertIsNotNone(act)
+        self.assertEqual(act["uid"], "uid_json_act")
+        self.assertEqual(act["nickname"], "JsonActive")
+        self.assertEqual(act["profile_name"], "act_profile")
+        self.assertEqual(act["storage_format"], "plaintext")
+        self.assertEqual(act["expires_at"], 1900000000000)
+        self.assertEqual(act["health"]["status"], "HEALTHY")
+
+        # 检查 profiles 列表字段完备性
+        profs = data["profiles"]
+        self.assertEqual(len(profs), 2)
+        names = [p["name"] for p in profs]
+        self.assertIn("act_profile", names)
+        self.assertIn("other_profile", names)
+
+        act_p = next(p for p in profs if p["name"] == "act_profile")
+        self.assertTrue(act_p["is_active"])
+        self.assertEqual(act_p["uid"], "uid_json_act")
+        self.assertEqual(act_p["storage_format"], "plaintext")
+
+        other_p = next(p for p in profs if p["name"] == "other_profile")
+        self.assertFalse(other_p["is_active"])
+        self.assertEqual(other_p["uid"], "uid_json_other")
+        self.assertEqual(other_p["storage_format"], "plaintext")
+
+    def test_t45_cli_list_and_status_aliases_and_json_flag(self):
+        """T45: CLI 命令 (list/status/wb-list/wb-status) 及 --json / --help 正确分发"""
+        import io
+
+        # 1. workbuddy list --json
+        buf1 = io.StringIO()
+        with patch("sys.stdout", buf1):
+            with patch("sys.argv", ["workbuddy", "list", "--json"]):
+                workbuddy.main()
+        json_out1 = json.loads(buf1.getvalue().strip())
+        self.assertIn("profiles", json_out1)
+
+        # 2. wb-list --json
+        buf2 = io.StringIO()
+        with patch("sys.stdout", buf2):
+            with patch("sys.argv", ["wb-list", "--json"]):
+                workbuddy.main()
+        json_out2 = json.loads(buf2.getvalue().strip())
+        self.assertIn("active_account", json_out2)
+
+        # 3. wb-status --help
+        buf3 = io.StringIO()
+        with patch("sys.stdout", buf3):
+            with patch("sys.argv", ["wb-status", "--help"]):
+                workbuddy.main()
+        self.assertIn("用法:", buf3.getvalue())
+
+        # 4. workbuddy list --help
+        buf4 = io.StringIO()
+        with patch("sys.stdout", buf4):
+            with patch("sys.argv", ["workbuddy", "list", "--help"]):
+                workbuddy.main()
+        self.assertIn("用法:", buf4.getvalue())
+
+    def test_t46_show_status_zero_token_leak(self):
+        """T46: show_status 在文本与 JSON 模式下均严禁输出任何敏感 Token 明文或私密字段"""
+        secret_canary = "super_secret_canary_token_strictly_prohibited_98765"
+        active_payload = {
+            "account": {"uid": "uid_canary", "nickname": "CanaryUser"},
+            "auth": {
+                "accessToken": secret_canary,
+                "refreshToken": "refresh_canary_54321",
+                "expiresAt": 1900000000000
+            }
+        }
+        with open(workbuddy.AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump(active_payload, f)
+
+        prof_file = os.path.join(workbuddy.PROFILES_DIR, "canary.info")
+        with open(prof_file, "w", encoding="utf-8") as f:
+            json.dump(active_payload, f)
+
+        import io
+        # 1. 验证 JSON 模式零泄漏
+        buf_json = io.StringIO()
+        with patch("sys.stdout", buf_json):
+            workbuddy.show_status(as_json=True)
+        json_text = buf_json.getvalue()
+        self.assertNotIn(secret_canary, json_text)
+        self.assertNotIn("refresh_canary_54321", json_text)
+
+        # 2. 验证文本模式零泄漏
+        buf_text = io.StringIO()
+        with patch("sys.stdout", buf_text):
+            workbuddy.show_status(as_json=False)
+        plain_text = buf_text.getvalue()
+        self.assertNotIn(secret_canary, plain_text)
+        self.assertNotIn("refresh_canary_54321", plain_text)
+
 if __name__ == "__main__":
     unittest.main()
+
 

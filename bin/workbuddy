@@ -1575,9 +1575,86 @@ def run_login(alias=None, auto_switch=True, force=False):
 
     return True
 
-def show_status():
+def show_status(as_json=False):
     active_data = get_active_account()
     profiles = get_profiles()
+    active_uid = active_data.get("account", {}).get("uid") if isinstance(active_data, dict) else None
+
+    if as_json:
+        active_dict = None
+        if active_data:
+            acc = active_data.get("account", {}) if isinstance(active_data, dict) else {}
+            auth = active_data.get("auth", {}) if isinstance(active_data, dict) else {}
+            uid = acc.get("uid", "") if isinstance(acc, dict) else ""
+            nickname = get_display_nickname(acc, default_name="未命名")
+            raw_token = auth.get("accessToken") if isinstance(auth, dict) else None
+            token_fmt = check_token_format(raw_token)
+            expires = auth.get("expiresAt", 0) if isinstance(auth, dict) else 0
+            refresh_expires = auth.get("refreshExpiresAt", 0) if isinstance(auth, dict) else 0
+
+            match_name = None
+            for name, p in profiles.items():
+                if p["uid"] == uid:
+                    match_name = name
+                    break
+
+            active_prof = {
+                "data": active_data,
+                "uid": uid,
+                "path": AUTH_FILE,
+                "expiresAt": expires,
+                "refreshExpiresAt": refresh_expires
+            }
+            act_health = check_profile_health(active_prof, force=False)
+
+            active_dict = {
+                "profile_name": match_name,
+                "nickname": nickname,
+                "uid": uid,
+                "storage_format": token_fmt,
+                "expires_at": expires,
+                "expires_at_formatted": format_timestamp(expires),
+                "refresh_expires_at": refresh_expires,
+                "refresh_expires_at_formatted": format_timestamp(refresh_expires),
+                "health": {
+                    "status": act_health.get("status"),
+                    "detail": act_health.get("detail"),
+                    "cached": act_health.get("cached", False)
+                }
+            }
+
+        profiles_list = []
+        for name, p in profiles.items():
+            is_active = bool(active_uid and p["uid"] == active_uid)
+            p_tok = p["data"].get("auth", {}).get("accessToken") if isinstance(p.get("data"), dict) and isinstance(p["data"].get("auth"), dict) else None
+            p_fmt = check_token_format(p_tok)
+            h = check_profile_health(p, force=False)
+            profiles_list.append({
+                "name": name,
+                "nickname": p["nickname"],
+                "uid": p["uid"],
+                "is_active": is_active,
+                "storage_format": p_fmt,
+                "expires_at": p["expiresAt"],
+                "expires_at_formatted": format_timestamp(p["expiresAt"]),
+                "refresh_expires_at": p["refreshExpiresAt"],
+                "refresh_expires_at_formatted": format_timestamp(p["refreshExpiresAt"]),
+                "health": {
+                    "status": h.get("status"),
+                    "detail": h.get("detail"),
+                    "cached": h.get("cached", False)
+                }
+            })
+
+        result = {
+            "platform": sys.platform,
+            "active_account": active_dict,
+            "profiles": profiles_list,
+            "total_profiles": len(profiles_list)
+        }
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy 账号状态 ({sys.platform}) ==={COLOR_RESET}")
     if not active_data:
         print(f"{COLOR_YELLOW}当前未检测到活跃的登录凭证。{COLOR_RESET}")
@@ -1621,6 +1698,8 @@ def show_status():
         print(f"凭证健康状态: {act_badge}")
 
     print(f"\n已保存的账号凭证库 ({len(profiles)} 个):")
+    if not profiles:
+        print("  (暂无保存的账号凭证，可通过 workbuddy save <别名> 或 workbuddy login <别名> 保存)")
     for name, p in profiles.items():
         is_active = active_data and isinstance(active_data, dict) and active_data.get("account", {}).get("uid") == p["uid"]
         tag = f"{COLOR_GREEN}[当前活动]{COLOR_RESET}" if is_active else "         "
@@ -2569,8 +2648,8 @@ def print_help():
   workbuddy chat [提示词]         向当前活跃账号发送对话（智能优先免费/最低倍率模型）
   workbuddy chat --all [提示词]   对所有已保存账号批量发送对话，维持连续对话奖励
   workbuddy doctor              检查当前凭据格式、本地解密运行时及兼容状态
-  workbuddy status              查看当前登录账号状态及凭据格式与健康状态
-  workbuddy list                列出本地已保存的所有账号凭证与健康状态
+  workbuddy status [选项]        查看当前登录账号状态及凭据格式与健康状态 [--json]
+  workbuddy list [选项]          列出本地已保存的所有账号凭证与健康状态 [--json]
   workbuddy init                一键对本地数据库打补丁，实现全账号工作区共享
   workbuddy rollback            移除共享触发器，恢复官方默认数据隔离
   workbuddy restart             重启 WorkBuddy 客户端
@@ -2578,6 +2657,8 @@ def print_help():
 快捷别名:
   wb-login [账号名] [--force] [--no-switch]
   wb-audit [--force] [--interval HOURS | --daemon [HOURS]]
+  wb-list [--json]
+  wb-status [--json]
   wb-models [选项]
   wb-router [子命令]
   wb-switch [账号名]
@@ -2586,6 +2667,8 @@ def print_help():
   wb-doctor
   workbuddy-login
   workbuddy-audit
+  workbuddy-list
+  workbuddy-status
   workbuddy-models
   workbuddy-router
 """)
@@ -2615,6 +2698,13 @@ def main():
             return
         ok = run_audit(force=force, notify_on_expired=True)
         sys.exit(0 if ok else 1)
+    if "list" in prog_name or "status" in prog_name:
+        if any(a in ("-h", "--help", "help") for a in args):
+            print(f"用法: {prog_name} [--json]")
+            return
+        as_json = any(a in ("--json", "-j") for a in args)
+        show_status(as_json=as_json)
+        return
     if "doctor" in prog_name:
         ok = run_doctor()
         sys.exit(0 if ok else 1)
@@ -2685,10 +2775,13 @@ def main():
         run_checkin(target, with_chat=with_chat)
     elif cmd in ["chat", "ask", "tell"]:
         parse_and_run_chat(args[1:])
-    elif cmd in ["status", "info", "whoami"]:
-        show_status()
-    elif cmd in ["list", "ls"]:
-        show_status()
+    elif cmd in ["status", "info", "whoami", "list", "ls"]:
+        sub_args = args[1:]
+        if any(a in ("-h", "--help", "help") for a in sub_args):
+            print(f"用法: workbuddy {cmd} [--json]")
+            return
+        as_json = any(a in ("--json", "-j") for a in sub_args)
+        show_status(as_json=as_json)
     elif cmd in ["save", "backup"]:
         sub_args = args[1:]
         if any(a in ("-h", "--help", "help") for a in sub_args):

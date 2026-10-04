@@ -103,6 +103,8 @@ def uninstall():
             "workbuddy", "workbuddy-log-guard",
             "wb-login", "workbuddy-login",
             "wb-audit", "workbuddy-audit",
+            "wb-list", "workbuddy-list",
+            "wb-status", "workbuddy-status",
             "wb-switch", "workbuddy-switch",
             "wb-checkin", "workbuddy-checkin",
             "wb-chat", "workbuddy-chat",
