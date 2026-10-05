@@ -2,7 +2,7 @@
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
 [![Release: v0.5.0](https://img.shields.io/badge/Release-v0.5.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 70/70 Passed](https://img.shields.io/badge/Tests-70%2F70%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests: 72/72 Passed](https://img.shields.io/badge/Tests-72%2F72%20Passed%20(100%25)-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
@@ -37,7 +37,7 @@
      如实告诉我当前环境没有内置 Agent 调度能力，并请我选择签到方式：
      ① 采用安装脚本已配置的系统原生守护定时打卡（macOS launchd / Linux systemd timer / Windows 任务计划程序，每天 09:00 静默打卡写入日志）；
      ② 完全关闭后台自动打卡，后续每次由我手动在终端输入 `wb-checkin` 随时打卡。
-7. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-login`（免打开客户端扫码入库）、`wb-list` / `wb-status`（账号状态全景与 JSON）、`wb-switch`（免扫码秒切账号）、`wb-checkin`（签到+对话）、`wb-chat`（CLI 直接调用模型）、`wb-router`（容灾轮换路由）、`wb-models`（模型透视）以及 `wb-doctor`（兼容诊断）。
+7. 向我汇报最终安装与配置结果，并指导我如何使用 `wb-help`（查看可用命令与功能列表）、`wb-login`（免打开客户端扫码入库）、`wb-list` / `wb-status`（账号状态全景与 JSON）、`wb-switch`（免扫码秒切账号）、`wb-checkin`（签到+对话）、`wb-chat`（CLI 直接调用模型）、`wb-router`（容灾轮换路由）、`wb-models`（模型透视）以及 `wb-doctor`（兼容诊断）。
 ```
 
 ---
@@ -92,6 +92,7 @@
   - [推荐方式：跨平台通用 Python 一键安装](#推荐方式跨平台通用-python-一键安装-macos--linux--windows-通用)
   - [备选方式：系统原生脚本安装](#备选方式系统原生脚本安装)
 - [四、命令行工具使用手册](#四命令行工具使用手册)
+  - [0. 可用命令与功能清单速查 (wb-help / workbuddy help)](#0-可用命令与功能清单速查-wb-help--workbuddy-help)
   - [1. 独立免登扫码录入 (wb-login)](#1-独立免登扫码录入-wb-login)
   - [2. 账号快速切换 (wb-switch)](#2-账号快速切换-wb-switch)
   - [3. 账号状态全景与程序化导出 (wb-list / wb-status)](#3-账号状态全景与程序化导出-wb-list--wb-status)
@@ -671,7 +672,23 @@ cd $HOME\.workbuddy\toolkit
 
 ## 四、命令行工具使用手册
 
-安装后，全局提供 `workbuddy` 以及 `wb-login`、`wb-list`、`wb-status`、`wb-audit`、`wb-switch`、`wb-checkin`、`wb-chat`、`wb-doctor`、`wb-models`、`wb-router` 快捷命令：
+安装后，全局提供 `workbuddy` 以及 `wb-help`、`wb-login`、`wb-list`、`wb-status`、`wb-audit`、`wb-switch`、`wb-checkin`、`wb-chat`、`wb-doctor`、`wb-models`、`wb-router` 快捷命令：
+
+### 0. 可用命令与功能清单速查 (`wb-help` / `workbuddy help`)
+
+随时在终端中运行 `wb-help` 或 `workbuddy-help`，即可打印当前 Toolkit 的完整功能特性、命令用法与快捷别名清单，无需记忆繁琐参数：
+
+```bash
+# 方式 A：使用极简快捷别名（推荐）
+wb-help
+
+# 方式 B：全称快捷别名
+workbuddy-help
+
+# 方式 C：主程序 help 子命令或参数
+workbuddy help
+workbuddy --help
+```
 
 ### 1. 独立免登扫码录入 (`wb-login`)
 
@@ -985,6 +1002,7 @@ workbuddy-log-guard
 
 | 命令 | 别名 | 功能说明 |
 | :--- | :--- | :--- |
+| `workbuddy help` | `wb-help` / `workbuddy-help` | 查看完整帮助信息与可用命令和功能列表 |
 | `workbuddy login [别名]` | `wb-login` | 终端 1:1 ANSI 扫码独立录入新账号，免开客户端 UI，支持冲突自愈与 `--force` |
 | `workbuddy switch [别名]` | `wb-switch` | 交互式选择或直接切换到指定账号并优雅重启 |
 | `workbuddy list [--json]` | `wb-list` | 查看当前活跃账号、到期时间及已存凭证清单（支持标准 `--json` 输出） |

@@ -49,6 +49,8 @@ class TestInstallersE2E(unittest.TestCase):
             bin_dir = os.path.join(self.temp_home, ".workbuddy", "bin")
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy.cmd")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-help.cmd")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-help.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-login.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-audit.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-list.cmd")))
@@ -62,6 +64,8 @@ class TestInstallersE2E(unittest.TestCase):
         else:
             bin_dir = os.path.join(self.temp_home, ".local", "bin")
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-help")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-help")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-login")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-audit")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-list")))
@@ -80,11 +84,15 @@ class TestInstallersE2E(unittest.TestCase):
 
         # 4. 验证清理干净
         if sys.platform == "win32":
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-help.cmd")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-help.cmd")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-list.cmd")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-list.cmd")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-status.cmd")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-status.cmd")))
         else:
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-help")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-help")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-list")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-list")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-status")))

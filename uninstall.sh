@@ -42,6 +42,8 @@ fi
 
 # 3. 移除可执行文件
 rm -f "$INSTALL_BIN/workbuddy"
+rm -f "$INSTALL_BIN/wb-help"
+rm -f "$INSTALL_BIN/workbuddy-help"
 rm -f "$INSTALL_BIN/wb-login"
 rm -f "$INSTALL_BIN/workbuddy-login"
 rm -f "$INSTALL_BIN/wb-audit"

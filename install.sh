@@ -27,6 +27,8 @@ echo "1. 正在安装 CLI 工具至 $INSTALL_BIN ..."
 cp "$SCRIPT_DIR/bin/workbuddy" "$INSTALL_BIN/workbuddy"
 chmod +x "$INSTALL_BIN/workbuddy"
 
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-help"
+ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-help"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-login"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-login"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-audit"
@@ -47,7 +49,7 @@ ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-models"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-models"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-router"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-router"
-echo "   ✔ 已安装: workbuddy, wb-login, wb-audit, wb-list, wb-status, wb-switch, wb-checkin, wb-chat, wb-doctor, wb-models, wb-router"
+echo "   ✔ 已安装: workbuddy, wb-help, wb-login, wb-audit, wb-list, wb-status, wb-switch, wb-checkin, wb-chat, wb-doctor, wb-models, wb-router"
 
 # 3. 检查 PATH
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then

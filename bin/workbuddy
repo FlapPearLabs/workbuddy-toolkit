@@ -2703,6 +2703,7 @@ def print_help():
   ★ 状态深度自检：自带 doctor 命令，快速诊断本地解密运行时与 API 就绪能力。
 
 用法:
+  workbuddy help                  查看帮助信息与可用命令列表
   workbuddy login [账号别名] [选项]   独立免登扫码录入系统（支持 --force 覆盖与冲突自愈）
                                   [--force | --overwrite] [--no-switch]
   workbuddy audit [选项]          全量审计已存账号健康度，失效触发桌面通知 (macOS/Win)
@@ -2724,6 +2725,7 @@ def print_help():
   workbuddy restart             重启 WorkBuddy 客户端
 
 快捷别名:
+  wb-help / workbuddy-help      查看可用命令和功能列表
   wb-login [账号名] [--force] [--no-switch]
   wb-audit [--force] [--interval HOURS | --daemon [HOURS]]
   wb-list [--json]
@@ -2734,6 +2736,7 @@ def print_help():
   wb-checkin [账号名]
   wb-chat [提示词]
   wb-doctor
+  workbuddy-help
   workbuddy-login
   workbuddy-audit
   workbuddy-list
@@ -2744,7 +2747,13 @@ def print_help():
 
 def main():
     prog_name = os.path.basename(sys.argv[0]).lower()
+    clean_prog = prog_name.replace(".cmd", "").replace(".exe", "")
     args = sys.argv[1:]
+
+    # 如果通过快捷帮助别名调用 (wb-help / workbuddy-help)
+    if clean_prog in ("wb-help", "workbuddy-help") or clean_prog.endswith("-help"):
+        print_help()
+        return
 
     # 如果通过快捷别名调用
     if "login" in prog_name:
@@ -2767,7 +2776,6 @@ def main():
             return
         ok = run_audit(force=force, notify_on_expired=True)
         sys.exit(0 if ok else 1)
-    clean_prog = prog_name.replace(".cmd", "").replace(".exe", "")
     if clean_prog in ("wb-list", "workbuddy-list", "wb-status", "workbuddy-status") or clean_prog.endswith(("-list", "-status")):
         if any(a in ("-h", "--help", "help") for a in args):
             print(f"用法: {prog_name} [--json]")

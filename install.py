@@ -118,6 +118,11 @@ def install_cli():
             with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
                 f.write(cmd_router)
 
+        cmd_help = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" help %*\r\n"
+        for name in ["wb-help.cmd", "workbuddy-help.cmd"]:
+            with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
+                f.write(cmd_help)
+
         src_log_guard = os.path.join(SCRIPT_DIR, "bin", "workbuddy-log-guard")
         if os.path.exists(src_log_guard):
             dest_log_guard = os.path.join(bin_dir, "workbuddy-log-guard")
@@ -187,6 +192,7 @@ def install_cli():
             os.chmod(dest_log_guard, 0o755)
 
         for alias in [
+            "wb-help", "workbuddy-help",
             "wb-login", "workbuddy-login",
             "wb-audit", "workbuddy-audit",
             "wb-list", "workbuddy-list",
@@ -213,7 +219,7 @@ def install_cli():
         if bin_dir not in path_env:
             print(f"{COLOR_YELLOW}   [提示] {bin_dir} 暂不在当前 PATH 中，建议将其加入 ~/.bashrc 或 ~/.zshrc{COLOR_RESET}")
 
-        print(f"{COLOR_GREEN}1. ✔ CLI 工具已安装至: {bin_dir} (workbuddy, wb-models, wb-router, wb-switch, wb-checkin){COLOR_RESET}")
+        print(f"{COLOR_GREEN}1. ✔ CLI 工具已安装至: {bin_dir} (workbuddy, wb-help, wb-models, wb-router, wb-switch, wb-checkin){COLOR_RESET}")
         return dest_bin, bin_dir
 
 def init_db():

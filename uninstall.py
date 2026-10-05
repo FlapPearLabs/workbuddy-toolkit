@@ -101,6 +101,7 @@ def uninstall():
         bin_dir = os.path.join(HOME, ".local", "bin")
         for name in [
             "workbuddy", "workbuddy-log-guard",
+            "wb-help", "workbuddy-help",
             "wb-login", "workbuddy-login",
             "wb-audit", "workbuddy-audit",
             "wb-list", "workbuddy-list",
