@@ -1428,7 +1428,7 @@ class TestWorkBuddyCore(unittest.TestCase):
         self.assertIn("platform", j_wb_list)
 
     def test_t48_cli_help_aliases_and_subcommand(self):
-        """T48: CLI 命令 wb-help / workbuddy-help / workbuddy help 输出完整帮助与功能清单"""
+        """T48: CLI 命令 wb-help / workbuddy-help / workbuddy help 输出精简操作提示与功能清单"""
         import io
         bin_script = os.path.join(REPO_DIR, "bin", "workbuddy")
 
@@ -1438,10 +1438,11 @@ class TestWorkBuddyCore(unittest.TestCase):
             with patch("sys.argv", ["wb-help"]):
                 workbuddy.main()
         out1 = buf_wb_help.getvalue()
-        self.assertIn("WorkBuddy 账号切换与自动化管理工具", out1)
-        self.assertIn("workbuddy help", out1)
-        self.assertIn("wb-help / workbuddy-help", out1)
-        self.assertIn("快捷别名:", out1)
+        self.assertIn("WorkBuddy CLI", out1)
+        self.assertIn("常用命令:", out1)
+        self.assertIn("wb-help", out1)
+        self.assertIn("workbuddy-help", out1)
+        self.assertIn("README.md", out1)
 
         # 2. 验证 sys.argv[0] == "workbuddy-help"
         buf_wb_full_help = io.StringIO()
@@ -1449,8 +1450,8 @@ class TestWorkBuddyCore(unittest.TestCase):
             with patch("sys.argv", ["workbuddy-help"]):
                 workbuddy.main()
         out2 = buf_wb_full_help.getvalue()
-        self.assertIn("WorkBuddy 账号切换与自动化管理工具", out2)
-        self.assertIn("wb-help / workbuddy-help", out2)
+        self.assertIn("WorkBuddy CLI", out2)
+        self.assertIn("wb-help", out2)
 
         # 3. 验证 Windows 风格垫片程序名 "wb-help.cmd"
         buf_cmd = io.StringIO()
@@ -1458,7 +1459,7 @@ class TestWorkBuddyCore(unittest.TestCase):
             with patch("sys.argv", ["wb-help.cmd"]):
                 workbuddy.main()
         out3 = buf_cmd.getvalue()
-        self.assertIn("WorkBuddy 账号切换与自动化管理工具", out3)
+        self.assertIn("WorkBuddy CLI", out3)
 
         # 4. 验证 workbuddy help 子命令
         buf_sub = io.StringIO()
@@ -1466,19 +1467,19 @@ class TestWorkBuddyCore(unittest.TestCase):
             with patch("sys.argv", ["workbuddy", "help"]):
                 workbuddy.main()
         out4 = buf_sub.getvalue()
-        self.assertIn("WorkBuddy 账号切换与自动化管理工具", out4)
+        self.assertIn("WorkBuddy CLI", out4)
 
         # 5. 验证 workbuddy --help 与 -h 标志
         buf_flag = io.StringIO()
         with patch("sys.stdout", buf_flag):
             with patch("sys.argv", ["workbuddy", "--help"]):
                 workbuddy.main()
-        self.assertIn("WorkBuddy 账号切换与自动化管理工具", buf_flag.getvalue())
+        self.assertIn("WorkBuddy CLI", buf_flag.getvalue())
 
         # 6. 真实外部进程执行 Smoke Test
         res = subprocess.run([sys.executable, bin_script, "help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(res.returncode, 0)
-        self.assertIn("WorkBuddy 账号切换与自动化管理工具", res.stdout)
+        self.assertIn("WorkBuddy CLI", res.stdout)
         self.assertIn("wb-help", res.stdout)
 
 if __name__ == "__main__":

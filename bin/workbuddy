@@ -2689,60 +2689,28 @@ def _parse_audit_cli_args(args_list):
 
 def print_help():
     print(f"""
-{COLOR_BOLD}WorkBuddy 账号切换与自动化管理工具 (workbuddy CLI v{VERSION}){COLOR_RESET}
-
-核心特性:
-  ★ 免重新扫码账号切换：保存已验证凭证 Profile，切号即时生效。
-  ★ 独立免登扫码录入：主客户端无需退出当前工作任务，命令行独立扫码授权并落盘。
-  ★ 智能别名冲突消解：同账号平滑更新，异账号自动自愈重命名 (<alias>_1)，支持 --force 覆盖。
-  ★ 凭据健康审计与自愈：智能巡检已存账号健康度，自动刷新续期近过期凭据，标红阻断失效账号。
-  ★ 定时巡检与双端通知：支持按指定时间间隔巡检 (--interval / --daemon)，失效触发原生桌面通知 (macOS/Win)。
-  ★ 模型全景资产与倍率透视：实时聚合官方倍率与三方模型，历史高频使用自动置顶。
-  ★ 容灾轮换路由 (Auto Pilot)：首包防挂起、429 秒级轮换、冷却熔断，保障长任务不断流。
-  ★ 每日打卡与每日连续对话任务联动：一次打卡自动获得积分与连续对话活跃奖励！
-  ★ 状态深度自检：自带 doctor 命令，快速诊断本地解密运行时与 API 就绪能力。
+{COLOR_BOLD}WorkBuddy CLI (v{VERSION}){COLOR_RESET}
 
 用法:
-  workbuddy help                  查看帮助信息与可用命令列表
-  workbuddy login [账号别名] [选项]   独立免登扫码录入系统（支持 --force 覆盖与冲突自愈）
-                                  [--force | --overwrite] [--no-switch]
-  workbuddy audit [选项]          全量审计已存账号健康度，失效触发桌面通知 (macOS/Win)
-                                  [--force] [--interval HOURS | --daemon [HOURS]]
-  workbuddy save <账号别名> [选项]    将当前活跃登录态保存为新 Profile（支持 --force 覆盖与冲突自愈）
-                                  [--force | --overwrite]
-  workbuddy models [选项]         呼出模型全景资产与优先级轻量选择器 (TUI)
-                                  --list (文本清单) | --json | --smart-apply (一键智能生效)
-  workbuddy router [子命令]       管理容灾网关服务 (status / start / stop / restart)
-  workbuddy switch [账号名]       切换到指定账号（省略参数则进入交互式菜单）
-  workbuddy checkin [账号名]      自动执行每日签到与每日连续对话（默认遍历所有已存账号）
-  workbuddy chat [提示词]         向当前活跃账号发送对话（智能优先免费/最低倍率模型）
-  workbuddy chat --all [提示词]   对所有已保存账号批量发送对话，维持连续对话奖励
-  workbuddy doctor              检查当前凭据格式、本地解密运行时及兼容状态
-  workbuddy status [选项]        查看当前登录账号状态及凭据格式与健康状态 [--json]
-  workbuddy list [选项]          列出本地已保存的所有账号凭证与健康状态 [--json]
-  workbuddy init                一键对本地数据库打补丁，实现全账号工作区共享
-  workbuddy rollback            移除共享触发器，恢复官方默认数据隔离
-  workbuddy restart             重启 WorkBuddy 客户端
+  workbuddy <命令> [选项]
+  或使用快捷别名 (如 wb-login, wb-switch)
 
-快捷别名:
-  wb-help / workbuddy-help      查看可用命令和功能列表
-  wb-login [账号名] [--force] [--no-switch]
-  wb-audit [--force] [--interval HOURS | --daemon [HOURS]]
-  wb-list [--json]
-  wb-status [--json]
-  wb-models [选项]
-  wb-router [子命令]
-  wb-switch [账号名]
-  wb-checkin [账号名]
-  wb-chat [提示词]
-  wb-doctor
-  workbuddy-help
-  workbuddy-login
-  workbuddy-audit
-  workbuddy-list
-  workbuddy-status
-  workbuddy-models
-  workbuddy-router
+常用命令:
+  workbuddy help                  查看本帮助信息 (别名: wb-help, workbuddy-help)
+  workbuddy login [别名] [--force] 独立免登扫码录入 (别名: wb-login)
+  workbuddy switch [账号名]        免重新扫码切换账号 (别名: wb-switch)
+  workbuddy list / status [--json] 查看账号列表与凭证状态 (别名: wb-list, wb-status)
+  workbuddy audit [--daemon]      凭据健康审计与常驻巡检 (别名: wb-audit)
+  workbuddy checkin [账号名]      每日签到与保活对话 (别名: wb-checkin)
+  workbuddy chat [提示词] [--all]  终端快速调用模型对话 (别名: wb-chat)
+  workbuddy models [--list|--json] 查看/切换可用模型与倍率 (别名: wb-models)
+  workbuddy router [子命令]        容灾轮换路由网关管理 (别名: wb-router)
+  workbuddy doctor                诊断凭据解密与运行环境 (别名: wb-doctor)
+  workbuddy save <别名> [--force]  保存当前活跃账号为 Profile
+  workbuddy init / rollback       开启 / 撤销全域工作区打通
+  workbuddy restart               重启 WorkBuddy 客户端
+
+详细功能与原理解析请参阅: README.md
 """)
 
 def main():
