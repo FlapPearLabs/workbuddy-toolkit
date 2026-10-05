@@ -8,10 +8,14 @@ import shutil
 import subprocess
 from datetime import datetime
 
+import socket
+
 HOME = os.path.expanduser("~")
 LOG_DIR = os.environ.get("WB_LOG_DIR", os.path.join(HOME, ".workbuddy", "logs"))
 SANDBOX_DIR = os.path.join(LOG_DIR, "sandbox")
 TRACES_DIR = os.environ.get("WB_TRACES_DIR", os.path.join(HOME, ".workbuddy", "traces"))
+SESSIONS_DIR = os.environ.get("WB_SESSIONS_DIR", os.path.join(HOME, ".workbuddy", "workspace", "sessions"))
+SHELL_SNAPSHOTS_DIR = os.environ.get("WB_SHELL_SNAPSHOTS_DIR", os.path.join(HOME, ".workbuddy", "shell-snapshots"))
 CONFIG_FILE = os.environ.get("WB_LOG_GUARD_CONFIG", os.path.join(HOME, ".workbuddy", "log_guard.json"))
 
 def load_config():
@@ -20,7 +24,11 @@ def load_config():
         "ttl_minutes": 2160,       # 36 hours
         "max_sandbox_mb": 2048,    # 2GB hard limit
         "target_sandbox_mb": 1536, # 1.5GB target limit when cleaning
-        "max_file_mb": 30          # Single file max 30MB
+        "max_file_mb": 30,         # Single file max 30MB
+        "sessions_ttl_hours": 72,   # 3 days
+        "max_sessions_keep": 10,    # Max active sessions to retain
+        "heal_seatbelt_rules": True, # Auto-inject temp rules into sandbox-center
+        "reap_orphaned_daemons": True # Clean up orphaned daemons when GUI is closed
     }
     # Env var overrides
     if "WB_TTL_MINUTES" in os.environ:
@@ -31,6 +39,14 @@ def load_config():
         config["target_sandbox_mb"] = int(os.environ["WB_TARGET_SANDBOX_MB"])
     if "WB_MAX_FILE_MB" in os.environ:
         config["max_file_mb"] = int(os.environ["WB_MAX_FILE_MB"])
+    if "WB_SESSIONS_TTL_HOURS" in os.environ:
+        config["sessions_ttl_hours"] = int(os.environ["WB_SESSIONS_TTL_HOURS"])
+    if "WB_MAX_SESSIONS_KEEP" in os.environ:
+        config["max_sessions_keep"] = int(os.environ["WB_MAX_SESSIONS_KEEP"])
+    if "WB_HEAL_SEATBELT_RULES" in os.environ:
+        config["heal_seatbelt_rules"] = os.environ["WB_HEAL_SEATBELT_RULES"].lower() in ("1", "true", "yes")
+    if "WB_REAP_ORPHANED_DAEMONS" in os.environ:
+        config["reap_orphaned_daemons"] = os.environ["WB_REAP_ORPHANED_DAEMONS"].lower() in ("1", "true", "yes")
 
     if os.path.exists(CONFIG_FILE):
         try:
@@ -100,6 +116,308 @@ def get_dir_size(directory):
             if not os.path.islink(fp) and os.path.isfile(fp):
                 total += os.path.getsize(fp)
     return total
+
+def clean_session_snapshots(sessions_dir, open_files_set, ttl_hours=72, max_keep=10):
+    """
+    Surgically cleans up old WorkBuddy session snapshots and modify backups.
+    Protects active sessions, open files, and recent sessions (< ttl_hours).
+    """
+    if not os.path.exists(sessions_dir):
+        return 0, 0
+    now = time.time()
+    ttl_seconds = ttl_hours * 3600
+    cleaned_sessions = 0
+    freed_bytes = 0
+
+    sessions = []
+    try:
+        entries = os.listdir(sessions_dir)
+    except Exception:
+        return 0, 0
+
+    for item in entries:
+        sp = os.path.join(sessions_dir, item)
+        if os.path.isdir(sp):
+            try:
+                st = os.stat(sp)
+                sessions.append((st.st_mtime, sp, item))
+            except Exception:
+                pass
+
+    # Sort descending: newest sessions first
+    sessions.sort(key=lambda x: x[0], reverse=True)
+
+    for idx, (mtime, sp, item) in enumerate(sessions):
+        # Keep the most recent active sessions unless older than TTL
+        is_older_than_ttl = (now - mtime) > ttl_seconds
+        exceeds_keep = (idx >= max_keep)
+
+        if not (is_older_than_ttl or exceeds_keep):
+            continue
+
+        # Check if session lockfile or files are open
+        lock_file = os.path.join(sp, "center.backup.lock")
+        if os.path.exists(lock_file) and is_file_open(lock_file, open_files_set):
+            continue
+
+        # Targeted surgical deletion of snapshot artifacts only
+        for target_subdir in ["modify_backup", ".modify_backup_meta", "snapfile"]:
+            target_path = os.path.join(sp, target_subdir)
+            if os.path.exists(target_path):
+                try:
+                    freed_bytes += get_dir_size(target_path)
+                    shutil.rmtree(target_path, ignore_errors=True)
+                except Exception:
+                    pass
+
+        # If session is old (> ttl) and essentially empty, clean up directory
+        if is_older_than_ttl:
+            try:
+                remaining = [f for f in os.listdir(sp) if f != "center.backup.lock"]
+                if not remaining or all(f.endswith(".json") for f in remaining):
+                    shutil.rmtree(sp, ignore_errors=True)
+                    cleaned_sessions += 1
+            except Exception:
+                pass
+
+    return cleaned_sessions, freed_bytes
+
+def clean_shell_snapshots(snapshots_dir, ttl_hours=72):
+    """
+    Cleans up stale shell snapshot bundles.
+    """
+    if not os.path.exists(snapshots_dir):
+        return 0
+    now = time.time()
+    ttl_seconds = ttl_hours * 3600
+    cleaned = 0
+    for root, _, filenames in os.walk(snapshots_dir):
+        for f in filenames:
+            fp = os.path.join(root, f)
+            try:
+                if now - os.path.getmtime(fp) > ttl_seconds:
+                    if remove_file(fp):
+                        cleaned += 1
+            except Exception:
+                pass
+    return cleaned
+
+def find_sandbox_center_socket(socket_dir=None):
+    """
+    Locates active sandbox-center Unix domain socket.
+    """
+    if os.name == 'nt':
+        return None
+    search_dir = socket_dir or "/tmp"
+    if not os.path.exists(search_dir):
+        return None
+    candidates = []
+    try:
+        for f in os.listdir(search_dir):
+            if f.startswith("workbuddy-sandbox-center-") and f.endswith(".sock"):
+                fp = os.path.join(search_dir, f)
+                try:
+                    st = os.stat(fp)
+                    candidates.append((st.st_mtime, fp))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+def send_sandbox_ipc(socket_path, command, data, uid="default", timeout=2.0):
+    """
+    Sends a structured IPC request to sandbox-center and returns parsed JSON.
+    """
+    if not socket_path or not os.path.exists(socket_path) or os.name == 'nt':
+        return None
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(socket_path)
+        req = {
+            "messageId": f"wb-guard:{int(time.time()*1000)}",
+            "command": command,
+            "uid": uid,
+            "data": {
+                **data,
+                "_client": {"role": "agent-cli", "pid": os.getpid()}
+            }
+        }
+        s.sendall(json.dumps(req).encode("utf-8") + b"\n")
+        res = b""
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            res += chunk
+            if b"\n" in chunk:
+                break
+        return json.loads(res.decode("utf-8"))
+    except Exception:
+        return None
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+def find_active_uid():
+    """Locates active WorkBuddy user UID from desktop auth info or profiles."""
+    candidates = [
+        os.path.expanduser("~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info"),
+        os.path.expanduser("~/.workbuddy/auth/workbuddy-desktop.info")
+    ]
+    for af in candidates:
+        if os.path.exists(af):
+            try:
+                with open(af, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    uid = data.get("account", {}).get("uid") or data.get("uid")
+                    if uid:
+                        return uid
+            except Exception:
+                pass
+    profiles_dir = os.path.expanduser("~/.workbuddy/auth_profiles")
+    if os.path.exists(profiles_dir):
+        for f in os.listdir(profiles_dir):
+            if f.endswith(".info"):
+                try:
+                    with open(os.path.join(profiles_dir, f), "r", encoding="utf-8") as pf:
+                        data = json.load(pf)
+                        uid = data.get("account", {}).get("uid") or data.get("uid")
+                        if uid:
+                            return uid
+                except Exception:
+                    pass
+    return "default"
+
+def heal_sandbox_center_rules(socket_path=None, uid=None):
+    """
+    Ensures macOS/Linux temp wildcard rules are active in sandbox-center
+    and prunes bloated auto_grant rules to prevent SBPL compilation lockup.
+    """
+    target_uid = uid or find_active_uid()
+    sock = socket_path or find_sandbox_center_socket()
+    if not sock:
+        return {"status": "no_socket"}
+
+    # 1. Probe current rules
+    rules_resp = send_sandbox_ipc(sock, "sandbox.rules.get_rules", {}, uid=target_uid)
+    if not rules_resp or not rules_resp.get("success"):
+        return {"status": "unresponsive"}
+
+    existing_rules = rules_resp.get("data", {}).get("fileRules", [])
+    existing_paths = {r.get("path") for r in existing_rules if isinstance(r, dict)}
+
+    temp_paths = [
+        "/var/folders/**",
+        "/private/var/folders/**",
+        "/tmp/**",
+        "/private/tmp/**",
+        "/var/tmp/**",
+        "/private/var/tmp/**"
+    ]
+    missing = [p for p in temp_paths if p not in existing_paths]
+
+    added_count = 0
+    if missing:
+        to_add = [{"path": p, "action": "read=allow|write=allow|delete=allow", "isDirectory": True} for p in missing]
+        add_resp = send_sandbox_ipc(sock, "sandbox.rules.add_file_rule", {"category": "global", "rules": to_add}, uid=target_uid)
+        if add_resp and add_resp.get("success"):
+            added_count = len(missing)
+
+    # 2. Prune auto_grant rules if bloated (> 500 rules)
+    cleared_auto_grant = False
+    if len(existing_rules) > 500:
+        send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "auto_grant", "rules": []}, uid=target_uid)
+        send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "temp", "rules": []}, uid=target_uid)
+        cleared_auto_grant = True
+
+    return {
+        "status": "ok",
+        "total_rules": len(existing_rules) + added_count,
+        "added_temp_rules": added_count,
+        "cleared_auto_grant": cleared_auto_grant
+    }
+
+def is_workbuddy_gui_running():
+    """
+    Checks if WorkBuddy desktop GUI application is actively running.
+    """
+    try:
+        res = subprocess.run(["pgrep", "-f", "WorkBuddy.app/Contents/MacOS/WorkBuddy"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+        return bool(res.stdout.strip())
+    except Exception:
+        return False
+
+def reap_orphaned_daemons(protected_keywords=None):
+    """
+    Reaps orphaned sandbox-center, sandbox-cli-gc, and codebuddy daemons
+    ONLY IF WorkBuddy GUI is closed AND no protected user workloads are running.
+    """
+    if protected_keywords is None:
+        protected_keywords = ["zhihu", "zhihugrabber", "cargo", "pytest", "python", "node"]
+
+    if is_workbuddy_gui_running():
+        return {"reaped": False, "reason": "gui_running"}
+
+    # Inspect running processes for protected workloads
+    try:
+        ps_out = subprocess.run(["ps", "-A", "-o", "pid,command"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5).stdout
+    except Exception:
+        return {"reaped": False, "reason": "ps_failed"}
+
+    daemon_pids = []
+    has_protected_task = False
+
+    for line in ps_out.splitlines()[1:]:
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        pid_str, cmd = parts
+        cmd_lower = cmd.lower()
+
+        # Check for protected tasks (never kill if user workload running)
+        for kw in protected_keywords:
+            if kw.lower() in cmd_lower and "sandbox" not in cmd_lower and "workbuddy-log-guard" not in cmd_lower:
+                has_protected_task = True
+                break
+
+        if "sandbox-center" in cmd or "sandbox-cli-gc" in cmd or ("codebuddy" in cmd and "--prewarm" in cmd):
+            try:
+                daemon_pids.append(int(pid_str))
+            except ValueError:
+                pass
+
+    if has_protected_task:
+        return {"reaped": False, "reason": "user_workload_active"}
+
+    reaped_pids = []
+    for pid in daemon_pids:
+        try:
+            os.kill(pid, 15)  # SIGTERM
+            reaped_pids.append(pid)
+        except OSError:
+            pass
+
+    # Clean up lockfiles if all daemons stopped
+    if reaped_pids:
+        time.sleep(0.5)
+        for lock_name in ["workbuddy-sandbox-center", "workbuddy-sandbox-cli-gc"]:
+            for f in os.listdir("/tmp"):
+                if f.startswith(lock_name) and f.endswith(".lock"):
+                    try:
+                        os.remove(os.path.join("/tmp", f))
+                    except Exception:
+                        pass
+
+    return {"reaped": len(reaped_pids) > 0, "pids": reaped_pids}
 
 def main():
     config = load_config()
@@ -213,6 +531,28 @@ def main():
                     os.rmdir(dirpath)
                 except Exception:
                     pass
+
+    # 6. Clean WorkBuddy session snapshots and modify backups (default TTL: 72h / 3 days)
+    sessions_ttl = config.get("sessions_ttl_hours", 72)
+    max_sessions = config.get("max_sessions_keep", 10)
+    clean_session_snapshots(SESSIONS_DIR, open_files, ttl_hours=sessions_ttl, max_keep=max_sessions)
+
+    # 7. Clean shell snapshots
+    clean_shell_snapshots(SHELL_SNAPSHOTS_DIR, ttl_hours=sessions_ttl)
+
+    # 8. Auto-heal Seatbelt rules in live sandbox-center
+    if config.get("heal_seatbelt_rules", True):
+        try:
+            heal_sandbox_center_rules()
+        except Exception:
+            pass
+
+    # 9. Reap orphaned sandbox daemons if GUI is closed
+    if config.get("reap_orphaned_daemons", True):
+        try:
+            reap_orphaned_daemons()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()

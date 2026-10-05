@@ -1,8 +1,8 @@
 # WorkBuddy Toolkit: Multi-Account Manager & Automated Check-in
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
-[![Release: v0.5.0](https://img.shields.io/badge/Release-v0.5.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 72/72 Passed](https://img.shields.io/badge/Tests-72%2F72%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Release: v0.6.0](https://img.shields.io/badge/Release-v0.6.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
+[![Tests: 74/74 Passed](https://img.shields.io/badge/Tests-74%2F74%20Passed%20(100%25)-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
@@ -87,8 +87,9 @@
   - [13. 账号健康度定时巡检与双端原生桌面通知 (Health Audit & Desktop Notification)](#13-账号健康度定时巡检与双端原生桌面通知-health-audit--desktop-notification)
   - [14. 远端 CI 跨机双端健康监控与零配置邮件告警 (Dual-Runner CI Monitor)](#14-远端-ci-跨机双端健康监控与零配置邮件告警-dual-runner-ci-monitor)
   - [15. 🔥 深度踩坑记录与底层逆向突破全景 ("问题→原因→解决")](#15--深度踩坑记录与底层逆向突破全景-问题原因解决)
+  - [16. 🔥 生产事故深水排查：Seatbelt 1.7 万行规则雪崩、PTY 5s 延迟与四大“草台班子”工程缺陷](#16--生产事故深水排查seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷)
 - [三、快速上手与安装升级](#三快速上手与安装升级)
-  - [老用户平滑升级指南（30 秒升级到 v0.5.0）](#-老用户平滑升级指南30-秒升级到-v050)
+  - [老用户平滑升级指南（30 秒升级到 v0.6.0）](#-老用户平滑升级指南30-秒升级到-v050)
   - [推荐方式：跨平台通用 Python 一键安装](#推荐方式跨平台通用-python-一键安装-macos--linux--windows-通用)
   - [备选方式：系统原生脚本安装](#备选方式系统原生脚本安装)
 - [四、命令行工具使用手册](#四命令行工具使用手册)
@@ -103,7 +104,8 @@
   - [8. 容灾轮换路由网关 (wb-router)](#8-容灾轮换路由网关-wb-router)
   - [9. 模型全景资产与倍率透视 (wb-models)](#9-模型全景资产与倍率透视-wb-models)
   - [10. 沙盒日志看门狗配置与管理 (workbuddy-log-guard)](#10-沙盒日志看门狗配置与管理-workbuddy-log-guard)
-  - [11. 常用命令速查表](#11-常用命令速查表)
+  - [11. 沙盒状态自愈与会话快照治理 (wb-sandbox)](#11-沙盒状态自愈与会话快照治理-wb-sandbox)
+  - [12. 常用命令速查表](#12-常用命令速查表)
 - [五、安全与隐私承诺 (Zero-Leakage)](#五安全与隐私承诺-zero-leakage)
 - [六、回滚与卸载指南](#六回滚与卸载指南)
 - [七、开源协议](#七开源协议)
@@ -595,6 +597,42 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 
 ---
 
+### 16. 🔥 生产事故深水排查：Seatbelt 1.7 万行规则雪崩、PTY 5s 延迟与四大“草台班子”工程缺陷
+
+作为重度依赖 AI 协同构建系统的独立开发者（二本文科生身份，GitHub: FlapPearLabs），在长期使用腾讯所谓“拳头级”AI 编程工具 WorkBuddy 的过程中，遭遇了一系列极其荒谬、令资深系统工程师窒息的底层生产事故。通过 `sample` 堆栈采样、动态系统跟踪、底层逆向分析与白盒物理凭证，我们对其底层工程的积弊进行了深水溯源，并在此公开这四大暴露出大厂内部“实习生 vibe-coding 无架构审查”本质的生产事故：
+
+#### 事故一：沙盒 PTY 日志堆积吞噬磁盘与数十万 Session 快照泄漏
+- **现象**：客户端常驻 3~4 天后，系统盘急剧减少 15GB 以上；更严重的是在 `~/.workbuddy/workspace/sessions` 目录下堆积了超过 32 万个 `modify_backup` 与 `.modify_backup_meta` 快照文件，导致文件系统 `stat` 与目录遍历极度卡顿。
+- **根因**：WorkBuddy 的 `sandbox-core` 在执行命令时无脑记录全量 PTY 终端输出，虽然有 13MB 单文件滚动，但**完全没有设计生命周期淘汰（TTL）与目录配额上限**；同时每次修改文件生成的快照在会话结束后从未执行级联清理。
+- **解决**：在 `workbuddy-log-guard` 与 `wb-sandbox clean` 中落地四重物理看门狗：`lsof` 句柄感知防误杀、36h TTL 淘汰历史日志、2GB 目录总量硬顶截断、72h 会话快照外科手术式定向修剪。
+
+#### 事故二：Cargo 编译多个子 Agent 缺乏全局共享缓存 (sccache) 导致编译风暴
+- **现象**：在多 Agent 并发开发模式下，每个子 Agent 派发独立工作区编译同一个 Rust 工程时，系统风扇狂转、CPU 100% 满载，磁盘数分钟内被多个独立 `target` 目录吃掉几十 GB。
+- **根因**：WorkBuddy 官方虽然声称支持智能 Agent 协作，但在底层构建系统治理上极其业余——**完全没有为子 Agent 构建环境接入 `sccache` 等跨工作区全局对象缓存机制**，导致每一个子任务都在独立的沙盒里从零拉取 crates 重复编译，造成巨大的 CPU、网络与磁盘浪费。
+- **解决**：在 `wb-doctor` 中引入 Check 6 (Cargo sccache reuse 审计)，并在工程规范中固化 APFS 稀疏盘物理回收与多智能体共享 `sccache` 标准（配置 `~/.cargo/config.toml` 指向全局预编译缓存），实现跨工作区 0ms 读取共享对象。
+
+#### 事故三：Git 工作区代码莫名丢失（Safe-Delete 粗暴拦截导致 npm ci 崩溃与 59 个文件蒸发）
+- **现象**：用户在终端执行合法的 `npm ci` 时被强行中断；更致命的是在日常工程迭代中，Git 工作树内的代码文件出现莫名其妙被永久删除的严重现象（实测单次瞬态蒸发 59 个工作树文件）。
+- **根因**：详见我们公开的取证仓库 [FlapPearLabs/workbuddy-safedelete-rootcause](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause)。WorkBuddy 团队在底层搞了一个所谓的 `genie-safe-delete.cjs` 与 `safe-delete-bulk-guard.cjs` 垫片试图“保护用户误删”，却粗暴地在 Node 层面硬编码了“单次删除超过 20 个文件即抛出异常拦截”的粗糙逻辑；由于拦截是在物理删除部分文件之后触发的，导致目录留下残缺半成品脏状态。而底层沙盒原生过滤层（`tsbx.dll` / safe-delete 过滤器）更存在不可控的文件系统拦截缺陷，在特定竞争态下直接诱发了真实工作树文件的物理丢失。该严重事故已由我们整理完整复现实验并向腾讯工程师正式提交反馈。
+
+#### 事故四：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死
+- **现象**：macOS 客户端频繁出现所有终端命令卡死、超时 120 秒被前端 SIGKILL 强杀（退出码 137）；即使最简单的 `date` 或 `echo 1` 都有长达 5 秒的非预期卡顿；且关闭 WorkBuddy 主窗口后，后台残留的 `sandbox-center` 进程 CPU 占用持续 100% 狂转超过 1 小时，电脑发烫电池迅速耗尽。
+- **根因（物理堆栈取证）**：
+  1. 使用 macOS `sample` 对打满单个 CPU 核心持续 64 分钟的 PID 1442 (`sandbox-center`) 进行现场采样，抓获深水死锁堆栈：
+     ```text
+     _RNvNtNtCsjRzdfub9oCi_14sandbox_center5rules7profile4sbpl20compile_sbpl_clauses -> shadowed_verdicts::dim_covered
+     ```
+  2. 逆向检查其沙盒规则配置 `tsbx_rules.json`，发现官方配置中竟然**只声明了 Windows 的 Temp 通配符 (`%LOCALAPPDATA%\Temp\**`)，完全遗漏了 macOS 的 `$TMPDIR` (`/var/folders/.../T/`)**！
+  3. 导致在 macOS 下，任何工具只要触碰一下临时目录（例如生成一个临时文件），沙盒中心因为没有预置通配规则，全部动态回退到 IPC 向 `sandbox-center` 注册单条 `auto_grant` 绝对路径规则。随着开发进行，动态规则迅速堆积超过 **17,500 条**！
+  4. 致命的是，`compile_sbpl_clauses` 在将规则编译为 macOS Seatbelt 沙盒底层 SBPL 语法时，去重与覆盖判定算法竟然写成了双重嵌套循环 $O(N^2)$ 的线性扫描（$\frac{17500^2}{2} \approx 153,000,000$ 次比对）！1.5 亿次比对彻底打死 `center-io` 线程，导致所有后续命令的 IPC 握手因 3000ms 超时被全部拒绝，前端等待 120s 最终无情 SIGKILL。
+  5. 逆向还发现其 `sandbox-cli` 在命令退出清理 PTY 时，主线程在 `pthread_join(reader_thread)` 上竟然硬编码等待超时为 5000ms，人为凭空制造 5 秒假死！
+  6. 此外，主窗口退出时从未向后台守护进程发送级联退出信号，导致僵尸守护进程在后台永久常驻并占满 CPU。
+- **解决**：
+  - 研发 `wb-sandbox heal`：通过 Unix Domain Socket 直连沙盒守护进程 IPC，在用户态动态向 `sandbox-center` 注入 macOS 临时目录全量通配规则（`/var/folders/**`, `/private/var/folders/**`, `/tmp/**` 等），并在规则数膨胀时原子重置 `auto_grant` 规则集，瞬间将规则数从 17,500 条降至 48 条，SBPL 编译耗时从 64 分钟回归 0.2ms；
+  - 研发 `wb-sandbox clean`：在检测到 GUI 退出且无活跃用户任务时，安全级联回收孤儿守护进程，彻底根治发烫与卡死。
+
+---
+
 ## 三、快速上手与安装升级
 
 ### 🔄 老用户平滑升级指南（30 秒升级到 v0.5.0）
@@ -998,7 +1036,35 @@ workbuddy-log-guard
 
 ---
 
-### 11. 常用命令速查表
+### 11. 沙盒状态自愈与会话快照治理 (`wb-sandbox`)
+
+专为根治 macOS 下 Seatbelt 1.7 万条规则雪崩、SBPL 编译 100% CPU 卡死 64 分钟、PTY 延迟与 Session 快照泄漏而设计：
+
+```bash
+# 1. 查看当前沙盒中心运行状态、Seatbelt 规则总数、临时通配规则状态与历史会话快照
+wb-sandbox status   # 或: workbuddy sandbox status
+
+# 2. 一键自愈：直连 sandbox-center IPC 动态补齐 macOS 临时目录通配规则，清理膨胀的 auto_grant 规则
+wb-sandbox heal     # 或: workbuddy sandbox heal
+
+# 3. 外科手术式清理：TTL 轮转清理 72 小时前陈旧 modify_backup 会话快照，并在主窗口退出时级联清理孤儿守护进程
+wb-sandbox clean    # 或: workbuddy sandbox clean
+```
+
+输出示例：
+```text
+=== WorkBuddy Sandbox & Seatbelt Status ===
+
+Sandbox daemon        : ONLINE (socket: /tmp/workbuddy-sandbox-center-3f3e52095ab29df9-432.sock)
+File rules count      : 48
+Temp wildcard rules   : ACTIVE (macOS Temp Wildcards Installed)
+Session workspace     : 14 active session histories
+WorkBuddy GUI status  : RUNNING
+```
+
+---
+
+### 12. 常用命令速查表
 
 | 命令 | 别名 | 功能说明 |
 | :--- | :--- | :--- |
@@ -1013,8 +1079,9 @@ workbuddy-log-guard
 | `workbuddy chat --all [词]` | `wb-chat --all` | 全账号批量发起对话，一键刷新全账号连续对话奖励资格 |
 | `workbuddy router [子命令]` | `wb-router` | 管理 `:8047` 容灾轮换路由网关（`status` / `start` / `stop` / `log`） |
 | `workbuddy models` | `wb-models` | 呼出模型全景资产、倍率透视与轻量终端选择器 (TUI) |
+| `workbuddy sandbox [子命令]` | `wb-sandbox` | 沙盒运行状态自愈、Seatbelt 通配规则注入与会话快照清理 (`status`/`heal`/`clean`) |
 | `workbuddy-log-guard` | - | 触发沙盒日志物理看门狗（36h TTL、2GB 硬顶、30MB 熔断、Open-FD 保护） |
-| `workbuddy doctor` | `wb-doctor` | 深度诊断凭据加密套件、本地运行时路径与解密通信就绪度 |
+| `workbuddy doctor` | `wb-doctor` | 深度诊断凭据加密套件、本地运行时路径、沙盒规则健康与 sccache 就绪度 |
 | `workbuddy save <别名>` | - | 将当前活跃登录态固化为一个可切换的 Profile（支持 `--force`） |
 | `workbuddy init` | - | 一键应用 SQLite 全域工作区打通补丁 |
 | `workbuddy rollback` | - | 撤销 SQLite 触发器，恢复官方严格数据隔离 |

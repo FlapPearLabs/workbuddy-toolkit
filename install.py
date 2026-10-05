@@ -118,6 +118,11 @@ def install_cli():
             with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
                 f.write(cmd_router)
 
+        cmd_sandbox = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" sandbox %*\r\n"
+        for name in ["wb-sandbox.cmd", "workbuddy-sandbox.cmd"]:
+            with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
+                f.write(cmd_sandbox)
+
         cmd_help = "@echo off\r\ncall \"%~dp0workbuddy.cmd\" help %*\r\n"
         for name in ["wb-help.cmd", "workbuddy-help.cmd"]:
             with open(os.path.join(bin_dir, name), "w", encoding="ascii") as f:
@@ -202,7 +207,8 @@ def install_cli():
             "wb-chat", "workbuddy-chat",
             "wb-doctor", "workbuddy-doctor",
             "wb-models", "workbuddy-models",
-            "wb-router", "workbuddy-router"
+            "wb-router", "workbuddy-router",
+            "wb-sandbox", "workbuddy-sandbox"
         ]:
             link_path = os.path.join(bin_dir, alias)
             if os.path.islink(link_path) or os.path.exists(link_path):

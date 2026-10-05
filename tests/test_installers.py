@@ -61,6 +61,7 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-checkin.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-chat.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-doctor.cmd")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-sandbox.cmd")))
         else:
             bin_dir = os.path.join(self.temp_home, ".local", "bin")
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy")))
@@ -76,6 +77,7 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-checkin")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-chat")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-doctor")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-sandbox")))
 
         # 3. 运行卸载器（输入 n 回答不回滚数据库）
         unres = subprocess.run([sys.executable, uninstaller], input="n\n", cwd=REPO_DIR, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -90,6 +92,7 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-list.cmd")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-status.cmd")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-status.cmd")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-sandbox.cmd")))
         else:
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-help")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-help")))
@@ -97,6 +100,7 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-list")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-status")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-status")))
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-sandbox")))
 
 if __name__ == "__main__":
     unittest.main()

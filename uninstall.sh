@@ -64,6 +64,8 @@ rm -f "$INSTALL_BIN/wb-models"
 rm -f "$INSTALL_BIN/workbuddy-models"
 rm -f "$INSTALL_BIN/wb-router"
 rm -f "$INSTALL_BIN/workbuddy-router"
+rm -f "$INSTALL_BIN/wb-sandbox"
+rm -f "$INSTALL_BIN/workbuddy-sandbox"
 echo "✔ 已清理安装的 CLI 脚本"
 
 if [ -t 0 ]; then

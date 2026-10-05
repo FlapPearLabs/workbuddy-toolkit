@@ -111,7 +111,8 @@ def uninstall():
             "wb-chat", "workbuddy-chat",
             "wb-doctor", "workbuddy-doctor",
             "wb-models", "workbuddy-models",
-            "wb-router", "workbuddy-router"
+            "wb-router", "workbuddy-router",
+            "wb-sandbox", "workbuddy-sandbox"
         ]:
             fpath = os.path.join(bin_dir, name)
             if os.path.islink(fpath) or os.path.exists(fpath):
