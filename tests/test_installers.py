@@ -62,9 +62,11 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-chat.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-doctor.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-sandbox.cmd")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-log-guard.cmd")))
         else:
             bin_dir = os.path.join(self.temp_home, ".local", "bin")
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-log-guard")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-help")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-help")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-login")))
@@ -94,6 +96,7 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-status.cmd")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-sandbox.cmd")))
         else:
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-log-guard")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-help")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-help")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-list")))

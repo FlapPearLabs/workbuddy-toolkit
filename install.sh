@@ -27,6 +27,11 @@ echo "1. 正在安装 CLI 工具至 $INSTALL_BIN ..."
 cp "$SCRIPT_DIR/bin/workbuddy" "$INSTALL_BIN/workbuddy"
 chmod +x "$INSTALL_BIN/workbuddy"
 
+if [ -f "$SCRIPT_DIR/bin/workbuddy-log-guard" ]; then
+    cp "$SCRIPT_DIR/bin/workbuddy-log-guard" "$INSTALL_BIN/workbuddy-log-guard"
+    chmod +x "$INSTALL_BIN/workbuddy-log-guard"
+fi
+
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-help"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-help"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-login"
@@ -51,7 +56,7 @@ ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-router"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-router"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/wb-sandbox"
 ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/workbuddy-sandbox"
-echo "   ✔ 已安装: workbuddy, wb-help, wb-login, wb-audit, wb-list, wb-status, wb-switch, wb-checkin, wb-chat, wb-doctor, wb-models, wb-router, wb-sandbox"
+echo "   ✔ 已安装: workbuddy, workbuddy-log-guard, wb-help, wb-login, wb-audit, wb-list, wb-status, wb-switch, wb-checkin, wb-chat, wb-doctor, wb-models, wb-router, wb-sandbox"
 
 # 3. 检查 PATH
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
@@ -67,15 +72,34 @@ else
     echo "2. [跳过] 未检测到 $DB_FILE，首次启动 WorkBuddy 后可运行 'workbuddy init' 打补丁。"
 fi
 
-# 5. 配置系统级每日 09:00 定时自动签到
+# 5. 配置系统级定时调度与常驻服务
 OS="$(uname -s)"
 if [ "$OS" = "Darwin" ] && [ -d "$LAUNCH_AGENTS_DIR" ]; then
     echo "3. 正在配置 macOS 系统定时任务 (LaunchAgent)..."
-    PLIST_TARGET="$LAUNCH_AGENTS_DIR/com.workbuddy.dailycheckin.plist"
-    sed "s|{{HOME}}|$HOME|g" "$SCRIPT_DIR/launchd/com.workbuddy.dailycheckin.plist" > "$PLIST_TARGET"
-    launchctl unload "$PLIST_TARGET" 2>/dev/null || true
-    launchctl load "$PLIST_TARGET"
+    # 每日签到
+    PLIST_CHECKIN="$LAUNCH_AGENTS_DIR/com.workbuddy.dailycheckin.plist"
+    sed "s|{{HOME}}|$HOME|g" "$SCRIPT_DIR/launchd/com.workbuddy.dailycheckin.plist" > "$PLIST_CHECKIN"
+    launchctl unload "$PLIST_CHECKIN" 2>/dev/null || true
+    launchctl load "$PLIST_CHECKIN"
     echo "   ✔ LaunchAgent 已激活: 每天早晨 09:00 自动执行后台签到"
+
+    # 容灾路由网关 (:8047)
+    if [ -f "$SCRIPT_DIR/launchd/com.workbuddy.failover-router.plist" ]; then
+        PLIST_ROUTER="$LAUNCH_AGENTS_DIR/com.workbuddy.failover-router.plist"
+        sed "s|{{HOME}}|$HOME|g" "$SCRIPT_DIR/launchd/com.workbuddy.failover-router.plist" > "$PLIST_ROUTER"
+        launchctl unload "$PLIST_ROUTER" 2>/dev/null || true
+        launchctl load -w "$PLIST_ROUTER" 2>/dev/null || true
+        echo "   ✔ LaunchAgent 已激活: Failover Router 容灾轮换路由 (:8047)"
+    fi
+
+    # Log Guard 沙盒看门狗
+    if [ -f "$SCRIPT_DIR/launchd/com.workbuddy.log-guard.plist" ]; then
+        PLIST_GUARD="$LAUNCH_AGENTS_DIR/com.workbuddy.log-guard.plist"
+        sed "s|{{HOME}}|$HOME|g" "$SCRIPT_DIR/launchd/com.workbuddy.log-guard.plist" > "$PLIST_GUARD"
+        launchctl unload "$PLIST_GUARD" 2>/dev/null || true
+        launchctl load -w "$PLIST_GUARD" 2>/dev/null || true
+        echo "   ✔ LaunchAgent 已激活: Log Guard 沙盒看门狗 (每 30 分钟治理)"
+    fi
 elif [ "$OS" = "Linux" ]; then
     echo "3. 正在配置 Linux 系统定时任务..."
     SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
@@ -93,8 +117,9 @@ elif [ "$OS" = "Linux" ]; then
     fi
     if [ "$CONFIGURED" -eq 0 ] && command -v crontab >/dev/null 2>&1; then
         CRON_CMD="0 9 * * * $INSTALL_BIN/workbuddy checkin >> $HOME/.workbuddy/logs/checkin.log 2>&1"
-        (crontab -l 2>/dev/null | grep -Fv "workbuddy checkin" ; echo "$CRON_CMD") | crontab -
-        echo "   ✔ crontab 已配置: 每天早晨 09:00 自动执行后台签到"
+        CRON_GUARD="0,30 * * * * $INSTALL_BIN/workbuddy-log-guard >> $HOME/.workbuddy/logs/log-guard.log 2>&1"
+        (crontab -l 2>/dev/null | grep -Fv "workbuddy checkin" | grep -Fv "workbuddy-log-guard" ; echo "$CRON_CMD" ; echo "$CRON_GUARD") | crontab -
+        echo "   ✔ crontab 已配置: 自动打卡与沙盒守护"
     fi
 fi
 

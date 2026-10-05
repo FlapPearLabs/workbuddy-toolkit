@@ -2711,26 +2711,57 @@ def get_log_guard_module():
 
 def run_sandbox_cmd(args):
     """管理 WorkBuddy 沙盒核心健康状态、Seatbelt 规则自愈与快照存储治理 (status / heal / clean)"""
-    action = args[0].lower() if args else "status"
+    as_json = "--json" in args
+    filtered_args = [a for a in args if a != "--json"]
+    action = filtered_args[0].lower() if filtered_args else "status"
     guard = get_log_guard_module()
     if not guard:
         print(f"{COLOR_RED}错误: 无法定位 workbuddy-log-guard 模块。{COLOR_RESET}")
         sys.exit(1)
 
     if action == "status":
-        print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy Sandbox & Seatbelt Status ==={COLOR_RESET}\n")
         sock = guard.find_sandbox_center_socket()
         target_uid = guard.find_active_uid()
+        total_rules = 0
+        has_temp_wildcard = False
+        rule_status_ok = False
+
         if sock:
-            print(f"Sandbox daemon        : {COLOR_GREEN}ONLINE{COLOR_RESET} (socket: {sock})")
             resp = guard.send_sandbox_ipc(sock, "sandbox.rules.get_rules", {}, uid=target_uid)
             if resp and resp.get("success"):
+                rule_status_ok = True
                 file_rules = resp.get("data", {}).get("fileRules", [])
                 total_rules = len(file_rules)
                 paths = {r.get("path") for r in file_rules if isinstance(r, dict)}
                 temp_paths = ["/var/folders/**", "/tmp/**"]
                 has_temp_wildcard = any(p in paths for p in temp_paths)
 
+        session_count = 0
+        sessions_dir = os.path.expanduser("~/.workbuddy/workspace/sessions")
+        if os.path.exists(sessions_dir):
+            try:
+                session_count = len([d for d in os.listdir(sessions_dir) if os.path.isdir(os.path.join(sessions_dir, d))])
+            except Exception:
+                pass
+
+        gui_running = guard.is_workbuddy_gui_running()
+
+        if as_json:
+            result = {
+                "sandbox_daemon": "ONLINE" if sock else "STOPPED",
+                "socket": sock,
+                "file_rules_count": total_rules if (sock and rule_status_ok) else None,
+                "temp_wildcard_rules": has_temp_wildcard if (sock and rule_status_ok) else False,
+                "sessions_count": session_count,
+                "gui_running": gui_running
+            }
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+
+        print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy Sandbox & Seatbelt Status ==={COLOR_RESET}\n")
+        if sock:
+            print(f"Sandbox daemon        : {COLOR_GREEN}ONLINE{COLOR_RESET} (socket: {sock})")
+            if rule_status_ok:
                 rule_color = COLOR_GREEN if total_rules < 500 else (COLOR_YELLOW if total_rules < 2000 else COLOR_RED)
                 print(f"File rules count      : {rule_color}{total_rules}{COLOR_RESET}")
                 wildcard_status = f"{COLOR_GREEN}ACTIVE (macOS Temp Wildcards Installed){COLOR_RESET}" if has_temp_wildcard else f"{COLOR_RED}MISSING (High Risk of Rule Explosion){COLOR_RESET}"
@@ -2740,15 +2771,7 @@ def run_sandbox_cmd(args):
         else:
             print(f"Sandbox daemon        : {COLOR_YELLOW}STOPPED (No active center socket){COLOR_RESET}")
 
-        sessions_dir = os.path.expanduser("~/.workbuddy/workspace/sessions")
-        if os.path.exists(sessions_dir):
-            try:
-                session_count = len([d for d in os.listdir(sessions_dir) if os.path.isdir(os.path.join(sessions_dir, d))])
-                print(f"Session workspace     : {session_count} active session histories")
-            except Exception:
-                pass
-
-        gui_running = guard.is_workbuddy_gui_running()
+        print(f"Session workspace     : {session_count} active session histories")
         print(f"WorkBuddy GUI status  : {COLOR_GREEN}RUNNING{COLOR_RESET}" if gui_running else f"WorkBuddy GUI status  : {COLOR_YELLOW}CLOSED{COLOR_RESET}")
         print()
 
@@ -2769,6 +2792,8 @@ def run_sandbox_cmd(args):
     elif action == "clean":
         print(f"\n{COLOR_CYAN}正在外科手术式治理 WorkBuddy 会话快照与孤儿进程...{COLOR_RESET}")
         open_files = guard.get_open_files(guard.LOG_DIR)
+        if os.path.exists(guard.SESSIONS_DIR):
+            open_files.update(guard.get_open_files(guard.SESSIONS_DIR))
         cleaned_sessions, freed_bytes = guard.clean_session_snapshots(guard.SESSIONS_DIR, open_files, ttl_hours=72, max_keep=10)
         cleaned_shells = guard.clean_shell_snapshots(guard.SHELL_SNAPSHOTS_DIR, ttl_hours=72)
         freed_mb = freed_bytes / (1024 * 1024)
@@ -2780,9 +2805,11 @@ def run_sandbox_cmd(args):
             print(f"  (WorkBuddy GUI 运行中，跳过孤儿进程回收)")
         elif reap_res.get("reason") == "user_workload_active":
             print(f"  (检测到用户活跃进程，跳过守护进程回收以保护工作现场)")
+        elif reap_res.get("reason") == "sandbox_cli_active":
+            print(f"  (检测到沙盒中存在活跃任务，跳过守护进程回收)")
         print()
     else:
-        print(f"用法: workbuddy sandbox [status|heal|clean] (别名: wb-sandbox)")
+        print(f"用法: workbuddy sandbox [status|heal|clean] [--json] (别名: wb-sandbox)")
 
 def _parse_audit_cli_args(args_list):
     force = any(a in ("--force", "-f") for a in args_list)

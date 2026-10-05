@@ -18,6 +18,20 @@ if [ -f "$PLIST_TARGET" ]; then
     echo "✔ 已注销并删除 macOS LaunchAgent 定时任务"
 fi
 
+PLIST_ROUTER="$HOME/Library/LaunchAgents/com.workbuddy.failover-router.plist"
+if [ -f "$PLIST_ROUTER" ]; then
+    launchctl unload "$PLIST_ROUTER" 2>/dev/null || true
+    rm -f "$PLIST_ROUTER"
+    echo "✔ 已注销并删除 failover-router LaunchAgent 服务"
+fi
+
+PLIST_GUARD="$HOME/Library/LaunchAgents/com.workbuddy.log-guard.plist"
+if [ -f "$PLIST_GUARD" ]; then
+    launchctl unload "$PLIST_GUARD" 2>/dev/null || true
+    rm -f "$PLIST_GUARD"
+    echo "✔ 已注销并删除 log-guard LaunchAgent 定时任务"
+fi
+
 SYSTEMD_TIMER="$HOME/.config/systemd/user/workbuddy-dailycheckin.timer"
 SYSTEMD_SERVICE="$HOME/.config/systemd/user/workbuddy-dailycheckin.service"
 if [ -f "$SYSTEMD_TIMER" ]; then
@@ -29,7 +43,7 @@ fi
 
 if command -v crontab >/dev/null 2>&1; then
     crontab -l 2>/dev/null | grep -F "workbuddy checkin" >/dev/null && {
-        crontab -l 2>/dev/null | grep -Fv "workbuddy checkin" | crontab -
+        crontab -l 2>/dev/null | grep -Fv "workbuddy checkin" | grep -Fv "workbuddy-log-guard" | crontab -
         echo "✔ 已从 crontab 移除定时任务"
     } || true
 fi
@@ -42,6 +56,7 @@ fi
 
 # 3. 移除可执行文件
 rm -f "$INSTALL_BIN/workbuddy"
+rm -f "$INSTALL_BIN/workbuddy-log-guard"
 rm -f "$INSTALL_BIN/wb-help"
 rm -f "$INSTALL_BIN/workbuddy-help"
 rm -f "$INSTALL_BIN/wb-login"

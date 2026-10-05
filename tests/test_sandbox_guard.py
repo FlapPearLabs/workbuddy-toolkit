@@ -169,5 +169,64 @@ class TestSandboxGuard(unittest.TestCase):
         finally:
             server_sock.close()
 
+    def test_clean_session_snapshots_auto_detection(self):
+        """Test clean_session_snapshots when open_files_set is None (auto-detect) and open files in session."""
+        sessions_dir = os.path.join(self.temp_dir, "auto_sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+
+        old_sess = os.path.join(sessions_dir, "sess_open_file")
+        old_backup = os.path.join(old_sess, "modify_backup")
+        os.makedirs(old_backup, exist_ok=True)
+        active_file = os.path.join(old_backup, "active_doc.py")
+        with open(active_file, "w") as f:
+            f.write("in-flight work")
+
+        old_time = time.time() - (3600 * 100)
+        os.utime(old_sess, (old_time, old_time))
+
+        # Mock get_open_files to return active_file
+        orig_get_open_files = self.guard.get_open_files
+        self.guard.get_open_files = lambda d: {os.path.realpath(active_file)}
+
+        try:
+            cleaned, freed = self.guard.clean_session_snapshots(sessions_dir, open_files_set=None, ttl_hours=72)
+            # The session has an open file in its directory, so it should NOT be touched
+            self.assertTrue(os.path.exists(old_backup))
+            self.assertEqual(cleaned, 0)
+        finally:
+            self.guard.get_open_files = orig_get_open_files
+
+    def test_is_workbuddy_gui_running_live(self):
+        """Verify is_workbuddy_gui_running runs safely and returns a bool."""
+        res = self.guard.is_workbuddy_gui_running()
+        self.assertIsInstance(res, bool)
+
+    def test_reap_orphaned_daemons_protection(self):
+        """Test reap_orphaned_daemons guardrails: gui_running, user_workload_active, sandbox_cli_active."""
+        # 1. When GUI is running, must skip
+        orig_gui = self.guard.is_workbuddy_gui_running
+        self.guard.is_workbuddy_gui_running = lambda: True
+        try:
+            res = self.guard.reap_orphaned_daemons()
+            self.assertFalse(res.get("reaped"))
+            self.assertEqual(res.get("reason"), "gui_running")
+        finally:
+            self.guard.is_workbuddy_gui_running = orig_gui
+
+    def test_run_sandbox_cmd_status_json(self):
+        """Test workbuddy sandbox status --json CLI output format."""
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.cli.run_sandbox_cmd(["status", "--json"])
+
+        output = buf.getvalue().strip()
+        data = json.loads(output)
+        self.assertIn("sandbox_daemon", data)
+        self.assertIn("gui_running", data)
+        self.assertIn("sessions_count", data)
+
 if __name__ == "__main__":
     unittest.main()

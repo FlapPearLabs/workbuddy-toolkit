@@ -41,6 +41,15 @@ def uninstall():
             except Exception:
                 pass
             print(f"{COLOR_GREEN}✔ 已注销并删除 macOS LaunchAgent 定时任务{COLOR_RESET}")
+
+        router_plist_path = os.path.join(HOME, "Library", "LaunchAgents", "com.workbuddy.failover-router.plist")
+        if os.path.exists(router_plist_path):
+            subprocess.run(["launchctl", "unload", router_plist_path], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            try:
+                os.remove(router_plist_path)
+            except Exception:
+                pass
+            print(f"{COLOR_GREEN}✔ 已注销并删除 failover-router LaunchAgent 服务{COLOR_RESET}")
             
         guard_plist_path = os.path.join(HOME, "Library", "LaunchAgents", "com.workbuddy.log-guard.plist")
         if os.path.exists(guard_plist_path):

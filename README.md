@@ -2,7 +2,7 @@
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
 [![Release: v0.6.0](https://img.shields.io/badge/Release-v0.6.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 74/74 Passed](https://img.shields.io/badge/Tests-74%2F74%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests: 78/78 Passed](https://img.shields.io/badge/Tests-78%2F78%20Passed%20(100%25)-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
@@ -563,7 +563,7 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 
 ### 15. 🔥 深度踩坑记录与底层逆向突破全景 ("问题→原因→解决")
 
-在本项目从 v0.1.0 到 v0.5.0 的持续演进中，我们记录并攻克了多个系统底层、加解密协议与跨平台工程踩坑：
+在本项目从 v0.1.0 到 v0.6.0 的持续演进中，我们记录并攻克了多个系统底层、加解密协议与跨平台工程踩坑：
 
 #### 踩坑 1：终端打印二维码在不同终端行高字体拉伸变形导致扫码失败
 - **问题**：在某些终端（如 iTerm2、VS Code 内置终端、Windows CMD）中运行免登扫码时，终端虽然打印出了字符点阵，但手机微信扫描完全没有反应，无法识别。
@@ -635,9 +635,9 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 
 ## 三、快速上手与安装升级
 
-### 🔄 老用户平滑升级指南（30 秒升级到 v0.5.0）
+### 🔄 老用户平滑升级指南（30 秒升级到 v0.6.0）
 
-如果您之前已经安装过旧版 workbuddy-toolkit，升级到 v0.5.0 极其简单，**无需重新配置任何 Profile，原有数据与账号 100% 平滑保留**：
+如果您之前已经安装过旧版 workbuddy-toolkit，升级到 v0.6.0 极其简单，**无需重新配置任何 Profile，原有数据与账号 100% 平滑保留**：
 
 ```bash
 # 1. 进入本地已有仓库目录，拉取最新发布代码
