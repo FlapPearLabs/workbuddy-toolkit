@@ -87,7 +87,13 @@
   - [13. 账号健康度定时巡检与双端原生桌面通知 (Health Audit & Desktop Notification)](#13-账号健康度定时巡检与双端原生桌面通知-health-audit--desktop-notification)
   - [14. 远端 CI 跨机双端健康监控与零配置邮件告警 (Dual-Runner CI Monitor)](#14-远端-ci-跨机双端健康监控与零配置邮件告警-dual-runner-ci-monitor)
   - [15. 🔥 深度踩坑记录与底层逆向突破全景 ("问题→原因→解决")](#15--深度踩坑记录与底层逆向突破全景-问题原因解决)
-  - [16. 🔥 生产事故深水排查：Seatbelt 1.7 万行规则雪崩、PTY 5s 延迟与四大“草台班子”工程缺陷](#16--生产事故深水排查seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷)
+  - [16. 🔥 生产事故深水排查与白盒物理凭证库 (事故一、二、三、四)](#16--生产事故深水排查seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷)
+    - [📁 docs/incidents/ 事故排查与白盒凭证总览入口](docs/incidents/README.md)
+    - [⚡ 事故一：沙盒 PTY 日志无底洞与 32 万快照文件瘫痪系统 I/O 深度取证](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md)
+    - [⚡ 事故二：多 Agent 并发构建缺乏全局编译缓存 sccache 诱发计算风暴深度取证](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md)
+    - [⚡ 事故三：Git 工作区代码莫名丢失 (Safe-Delete 缺陷导致 59 个文件蒸发)](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause)
+    - [⚡ 事故四：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死深度取证](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
+    - [🎬 抖音爆款口播解说脚本：二本文科生手撕腾讯大厂底层屎山](docs/DOUYIN_WORKBUDDY_TEARDOWN.md)
 - [三、快速上手与安装升级](#三快速上手与安装升级)
   - [老用户平滑升级指南（30 秒升级到 v0.6.0）](#-老用户平滑升级指南30-秒升级到-v050)
   - [推荐方式：跨平台通用 Python 一键安装](#推荐方式跨平台通用-python-一键安装-macos--linux--windows-通用)
@@ -597,23 +603,39 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 
 ---
 
-### 16. 🔥 生产事故深水排查：Seatbelt 1.7 万行规则雪崩、PTY 5s 延迟与四大“草台班子”工程缺陷
+### 16. 🔥 生产事故深水排查与白盒物理凭证库：Seatbelt 1.7 万行规则雪崩、PTY 5s 延迟与四大“草台班子”工程缺陷
 
-作为重度依赖 AI 协同构建系统的独立开发者（二本文科生身份，GitHub: FlapPearLabs），在长期使用腾讯所谓“拳头级”AI 编程工具 WorkBuddy 的过程中，遭遇了一系列极其荒谬、令资深系统工程师窒息的底层生产事故。通过 `sample` 堆栈采样、动态系统跟踪、底层逆向分析与白盒物理凭证，我们对其底层工程的积弊进行了深水溯源，并在此公开这四大暴露出大厂内部“实习生 vibe-coding 无架构审查”本质的生产事故：
+> **权威凭证专区**：我们在 [`docs/incidents/`](docs/incidents/README.md) 建立了完整的**白盒物理取证库**。拒绝模糊推诿、拒绝空洞脑补，拿 macOS 内核 `sample` 调用堆栈、反编译符号（`nm -C`）、真实物理文件计数（32 万+）与毫秒级基准测试说话！
+
+#### 📌 生产事故导航与证据矩阵
+
+| 事故编号 | 故障等级 | 事故名称与核心现象 | 核心根因与白盒证据摘要 | Toolkit 治愈命令与方案 | 深度物理取证报告 |
+| :---: | :---: | :--- | :--- | :--- | :---: |
+| **01** | `P0` | **沙盒 PTY 日志无底洞与 32 万快照文件瘫痪系统 I/O**<br>运行 3~4 天系统盘缩减 15GB+，整机卡顿 | PTY 日志零 TTL 累积 14.8GB；321,489 个快照小文件；`sandbox-cli-gc` RSS 达 471MB 遍历打满 IOPS | `workbuddy-log-guard` 四重物理看门狗；`clean_session_snapshots` 句柄感知修剪；`wb-sandbox clean` | [📄 事故一完整报告](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md) |
+| **02** | `P1` | **多 Agent 并发构建缺乏全局编译缓存诱发计算风暴**<br>风扇狂转、CPU 100%、磁盘被多份 `target` 吞噬 | 多 Agent 独立沙盒重复拉取 crates 并冷编译，构建耗时 128s，无共享 `sccache`，缓存命中率 0% | `wb-doctor` Check 6 (Cargo sccache reuse 审计)；配置全局 `[build] rustc-wrapper` 与 10GB 缓存硬顶；构建提速 30 倍 (4.2s) | [📄 事故二完整报告](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) |
+| **03** | `P0` | **Git 工作区代码莫名丢失 (Safe-Delete 缺陷导致 59 个文件蒸发)**<br>包管理器被拦截留脏状态，工作树代码丢失 | `genie-safe-delete.cjs` 硬编码删除超 20 个文件抛错；底层沙盒过滤层在竞争态下直接诱发文件系统物理丢失 | 建立独立可复现工程向官方提交严肃 Bug 报告；Toolkit 建立未入库工作区保护准则 | [🔗 独立证据仓库](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause) |
+| **04** | `P0` | **Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死**<br>终端命令 120s 超时报 137，后台 CPU 100% | `tsbx_rules.json` 遗漏 macOS 临时目录；动态生成 17,542 条单路径；$O(N^2)$ 比对 1.53 亿次死锁 64 分钟；PTY drop join 硬卡 5 秒 | `wb-sandbox heal`（Unix Socket IPC 动态注入通配规则降至 48 条，0.2ms 编译）；`wb-sandbox clean`（libproc C-FFI 安全收割孤儿守护）；`wb-doctor` Check 5 | [📄 事故四完整报告](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md) |
+
+---
+
+作为重度依赖 AI 协同构建系统的独立开发者（二本文科生身份，GitHub: [FlapPearLabs](https://github.com/FlapPearLabs)），在长期使用腾讯所谓“拳头级”AI 编程工具 WorkBuddy 的过程中，遭遇了一系列极其荒谬、令资深系统工程师窒息的底层生产事故。通过 `sample` 堆栈采样、动态系统跟踪、底层逆向分析与白盒物理凭证，我们对其底层工程的积弊进行了深水溯源，并在此公开这四大暴露出大厂内部“实习生 vibe-coding 无架构审查”本质的生产事故：
 
 #### 事故一：沙盒 PTY 日志堆积吞噬磁盘与数十万 Session 快照泄漏
-- **现象**：客户端常驻 3~4 天后，系统盘急剧减少 15GB 以上；更严重的是在 `~/.workbuddy/workspace/sessions` 目录下堆积了超过 32 万个 `modify_backup` 与 `.modify_backup_meta` 快照文件，导致文件系统 `stat` 与目录遍历极度卡顿。
+- **现象**：客户端常驻 3~4 天后，系统盘急剧减少 15GB 以上；更严重的是在 `~/.workbuddy/workspace/sessions` 目录下堆积了超过 32 万个 `modify_backup` 与 `.modify_backup_meta` 快照文件，导致文件系统 `stat` 与目录遍历极度卡顿。后台 `sandbox-cli-gc` 内存飙升至 471.2MB，高频深度遍历 APFS 使得系统 I/O 持续瘫痪。
 - **根因**：WorkBuddy 的 `sandbox-core` 在执行命令时无脑记录全量 PTY 终端输出，虽然有 13MB 单文件滚动，但**完全没有设计生命周期淘汰（TTL）与目录配额上限**；同时每次修改文件生成的快照在会话结束后从未执行级联清理。
 - **解决**：在 `workbuddy-log-guard` 与 `wb-sandbox clean` 中落地四重物理看门狗：`lsof` 句柄感知防误杀、36h TTL 淘汰历史日志、2GB 目录总量硬顶截断、72h 会话快照外科手术式定向修剪。
+- 🔗 **深度物理凭证报告**：👉 [阅读《事故一深度取证报告：沙盒 PTY 日志无底洞与 32 万会话快照吞噬磁盘致系统 I/O 瘫痪》](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md)
 
 #### 事故二：Cargo 编译多个子 Agent 缺乏全局共享缓存 (sccache) 导致编译风暴
-- **现象**：在多 Agent 并发开发模式下，每个子 Agent 派发独立工作区编译同一个 Rust 工程时，系统风扇狂转、CPU 100% 满载，磁盘数分钟内被多个独立 `target` 目录吃掉几十 GB。
+- **现象**：在多 Agent 并发开发模式下，每个子 Agent 派发独立工作区编译同一个 Rust 工程时，系统风扇狂转、CPU 100% 满载，磁盘数分钟内被多个独立 `target` 目录吃掉几十 GB。单次构建耗时平均 128 秒。
 - **根因**：WorkBuddy 官方虽然声称支持智能 Agent 协作，但在底层构建系统治理上极其业余——**完全没有为子 Agent 构建环境接入 `sccache` 等跨工作区全局对象缓存机制**，导致每一个子任务都在独立的沙盒里从零拉取 crates 重复编译，造成巨大的 CPU、网络与磁盘浪费。
-- **解决**：在 `wb-doctor` 中引入 Check 6 (Cargo sccache reuse 审计)，并在工程规范中固化 APFS 稀疏盘物理回收与多智能体共享 `sccache` 标准（配置 `~/.cargo/config.toml` 指向全局预编译缓存），实现跨工作区 0ms 读取共享对象。
+- **解决**：在 `wb-doctor` 中引入 Check 6 (Cargo sccache reuse 审计)，并在工程规范中固化 APFS 稀疏盘物理回收与多智能体共享 `sccache` 标准（配置 `~/.cargo/config.toml` 指向全局预编译缓存），实现跨工作区 0ms 读取共享对象，后续构建提速 30 倍至 4.2 秒，缓存命中率 86.67%。
+- 🔗 **深度物理凭证报告**：👉 [阅读《事故二深度取证报告：多 Agent 并发开发缺乏全局共享编译缓存 (sccache) 诱发编译风暴》](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md)
 
 #### 事故三：Git 工作区代码莫名丢失（Safe-Delete 粗暴拦截导致 npm ci 崩溃与 59 个文件蒸发）
 - **现象**：用户在终端执行合法的 `npm ci` 时被强行中断；更致命的是在日常工程迭代中，Git 工作树内的代码文件出现莫名其妙被永久删除的严重现象（实测单次瞬态蒸发 59 个工作树文件）。
 - **根因**：详见我们公开的取证仓库 [FlapPearLabs/workbuddy-safedelete-rootcause](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause)。WorkBuddy 团队在底层搞了一个所谓的 `genie-safe-delete.cjs` 与 `safe-delete-bulk-guard.cjs` 垫片试图“保护用户误删”，却粗暴地在 Node 层面硬编码了“单次删除超过 20 个文件即抛出异常拦截”的粗糙逻辑；由于拦截是在物理删除部分文件之后触发的，导致目录留下残缺半成品脏状态。而底层沙盒原生过滤层（`tsbx.dll` / safe-delete 过滤器）更存在不可控的文件系统拦截缺陷，在特定竞争态下直接诱发了真实工作树文件的物理丢失。该严重事故已由我们整理完整复现实验并向腾讯工程师正式提交反馈。
+- 🔗 **独立开源复现仓库**：👉 [访问 GitHub: FlapPearLabs/workbuddy-safedelete-rootcause](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause)
 
 #### 事故四：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死
 - **现象**：macOS 客户端频繁出现所有终端命令卡死、超时 120 秒被前端 SIGKILL 强杀（退出码 137）；即使最简单的 `date` 或 `echo 1` 都有长达 5 秒的非预期卡顿；且关闭 WorkBuddy 主窗口后，后台残留的 `sandbox-center` 进程 CPU 占用持续 100% 狂转超过 1 小时，电脑发烫电池迅速耗尽。
@@ -629,7 +651,10 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
   6. 此外，主窗口退出时从未向后台守护进程发送级联退出信号，导致僵尸守护进程在后台永久常驻并占满 CPU。
 - **解决**：
   - 研发 `wb-sandbox heal`：通过 Unix Domain Socket 直连沙盒守护进程 IPC，在用户态动态向 `sandbox-center` 注入 macOS 临时目录全量通配规则（`/var/folders/**`, `/private/var/folders/**`, `/tmp/**` 等），并在规则数膨胀时原子重置 `auto_grant` 规则集，瞬间将规则数从 17,500 条降至 48 条，SBPL 编译耗时从 64 分钟回归 0.2ms；
-  - 研发 `wb-sandbox clean`：在检测到 GUI 退出且无活跃用户任务时，安全级联回收孤儿守护进程，彻底根治发烫与卡死。
+  - 研发 `wb-sandbox clean`：在检测到 GUI 退出且无活跃用户任务时，安全级联回收孤儿守护进程，彻底根治发烫与卡死；
+  - 集成 `wb-doctor` Check 5 进行规则健康审计。
+- 🔗 **深度物理凭证报告**：👉 [阅读《事故四深度取证报告：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5 秒假死》](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
+- 🎬 **视频解说脚本**：👉 [查看《【抖音爆款口播脚本】一个二本文科生，是如何手撕腾讯拳头级AI产品底层屎山的？》](docs/DOUYIN_WORKBUDDY_TEARDOWN.md)
 
 ---
 
