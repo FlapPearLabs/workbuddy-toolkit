@@ -2,7 +2,7 @@
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
 [![Release: v0.6.0](https://img.shields.io/badge/Release-v0.6.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 78/78 Passed](https://img.shields.io/badge/Tests-78%2F78%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests: 80/80 Passed](https://img.shields.io/badge/Tests-80%2F80%20Passed%20(100%25)-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
@@ -87,15 +87,15 @@
   - [13. 账号健康度定时巡检与双端原生桌面通知 (Health Audit & Desktop Notification)](#13-账号健康度定时巡检与双端原生桌面通知-health-audit--desktop-notification)
   - [14. 远端 CI 跨机双端健康监控与零配置邮件告警 (Dual-Runner CI Monitor)](#14-远端-ci-跨机双端健康监控与零配置邮件告警-dual-runner-ci-monitor)
   - [15. 🔥 深度踩坑记录与底层逆向突破全景 ("问题→原因→解决")](#15--深度踩坑记录与底层逆向突破全景-问题原因解决)
-  - [16. 🔥 生产事故深水排查与白盒物理凭证库 (事故一、二、三、四)](#16--生产事故深水排查seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷)
-    - [📁 docs/incidents/ 事故排查与白盒凭证总览入口](docs/incidents/README.md)
-    - [⚡ 事故一：沙盒 PTY 日志无底洞与 32 万快照文件瘫痪系统 I/O 深度取证](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md)
-    - [⚡ 事故二：多 Agent 并发构建缺乏全局编译缓存 sccache 诱发计算风暴深度取证](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md)
-    - [⚡ 事故三：Git 工作区代码莫名丢失 (Safe-Delete 缺陷导致 59 个文件蒸发)](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause)
-    - [⚡ 事故四：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死深度取证](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
+  - [16. 🔥 生产事故深水排查与白盒物理凭证库 (事故一、二、三、四)](#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷)
+    - [📁 docs/incidents/ 事故排查与白盒凭证总库](docs/incidents/README.md)
+    - [⚡ 事故一：沙盒 PTY 日志无底洞与 32 万快照文件瘫痪系统 I/O (P0)](#事故一沙盒-pty-日志堆积吞噬磁盘与数十万-session-快照泄漏) ➔ [📄 深度取证报告](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md)
+    - [⚡ 事故二：多 Agent 并发构建缺乏全局编译缓存 sccache (P1)](#事故二cargo-编译多个子-agent-缺乏全局共享缓存-sccache-导致编译风暴) ➔ [📄 深度取证报告](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md)
+    - [⚡ 事故三：Git 工作区代码莫名丢失 (Safe-Delete 缺陷) (P0)](#事故三git-工作区代码莫名丢失safedelete-粗暴拦截导致-npm-ci-崩溃与-59-个文件蒸发) ➔ [🔗 独立复现仓库](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause)
+    - [⚡ 事故四：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟 (P0)](#事故四seatbelt-17-万行规则雪崩致-sbpl-编译-on²-死锁-64-分钟与-pty-5s-假死) ➔ [📄 深度取证报告](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
     - [🎬 抖音爆款口播解说脚本：二本文科生手撕腾讯大厂底层屎山](docs/DOUYIN_WORKBUDDY_TEARDOWN.md)
 - [三、快速上手与安装升级](#三快速上手与安装升级)
-  - [老用户平滑升级指南（30 秒升级到 v0.6.0）](#-老用户平滑升级指南30-秒升级到-v050)
+  - [老用户平滑升级指南（30 秒升级到 v0.6.0）](#-老用户平滑升级指南30-秒升级到-v060)
   - [推荐方式：跨平台通用 Python 一键安装](#推荐方式跨平台通用-python-一键安装-macos--linux--windows-通用)
   - [备选方式：系统原生脚本安装](#备选方式系统原生脚本安装)
 - [四、命令行工具使用手册](#四命令行工具使用手册)
@@ -621,8 +621,8 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 作为重度依赖 AI 协同构建系统的独立开发者（二本文科生身份，GitHub: [FlapPearLabs](https://github.com/FlapPearLabs)），在长期使用腾讯所谓“拳头级”AI 编程工具 WorkBuddy 的过程中，遭遇了一系列极其荒谬、令资深系统工程师窒息的底层生产事故。通过 `sample` 堆栈采样、动态系统跟踪、底层逆向分析与白盒物理凭证，我们对其底层工程的积弊进行了深水溯源，并在此公开这四大暴露出大厂内部“实习生 vibe-coding 无架构审查”本质的生产事故：
 
 #### 事故一：沙盒 PTY 日志堆积吞噬磁盘与数十万 Session 快照泄漏
-- **现象**：客户端常驻 3~4 天后，系统盘急剧减少 15GB 以上；更严重的是在 `~/.workbuddy/workspace/sessions` 目录下堆积了超过 32 万个 `modify_backup` 与 `.modify_backup_meta` 快照文件，导致文件系统 `stat` 与目录遍历极度卡顿。后台 `sandbox-cli-gc` 内存飙升至 471.2MB，高频深度遍历 APFS 使得系统 I/O 持续瘫痪。
-- **根因**：WorkBuddy 的 `sandbox-core` 在执行命令时无脑记录全量 PTY 终端输出，虽然有 13MB 单文件滚动，但**完全没有设计生命周期淘汰（TTL）与目录配额上限**；同时每次修改文件生成的快照在会话结束后从未执行级联清理。
+- **现象**：客户端常驻 3~4 天后，系统盘急剧减少 15GB 以上；更严重的是在 `~/.workbuddy/workspace/sessions` 目录下堆积了超过 32 万个 `modify_backup` 与 `.modify_backup_meta` 快照文件，导致文件系统 `stat` 与目录遍历极度卡顿（遍历耗时飙升至 48.7s）。后台 `sandbox-cli-gc` 内存飙升至 471.2MB，高频深度遍历 APFS 打满 1,800+ IOPS 使得系统 I/O 持续瘫痪。
+- **根因**：WorkBuddy 的 `sandbox-core` 在执行命令时无脑记录全量 PTY 终端输出，以 13MB 独立切片高频滚动写入（高强度任务下速率达 150~200MB/h，单日累积 3.6~4.8GB），但**完全没有设计生命周期淘汰（TTL）与目录配额上限**，致使日志暴走至 14.8GB；同时每次修改文件生成的快照在会话结束后从未执行级联清理。
 - **解决**：在 `workbuddy-log-guard` 与 `wb-sandbox clean` 中落地四重物理看门狗：`lsof` 句柄感知防误杀、36h TTL 淘汰历史日志、2GB 目录总量硬顶截断、72h 会话快照外科手术式定向修剪。
 - 🔗 **深度物理凭证报告**：👉 [阅读《事故一深度取证报告：沙盒 PTY 日志无底洞与 32 万会话快照吞噬磁盘致系统 I/O 瘫痪》](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md)
 
@@ -639,15 +639,15 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 
 #### 事故四：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死
 - **现象**：macOS 客户端频繁出现所有终端命令卡死、超时 120 秒被前端 SIGKILL 强杀（退出码 137）；即使最简单的 `date` 或 `echo 1` 都有长达 5 秒的非预期卡顿；且关闭 WorkBuddy 主窗口后，后台残留的 `sandbox-center` 进程 CPU 占用持续 100% 狂转超过 1 小时，电脑发烫电池迅速耗尽。
-- **根因（物理堆栈取证）**：
+- **根因（物理堆栈与反汇编取证）**：
   1. 使用 macOS `sample` 对打满单个 CPU 核心持续 64 分钟的 PID 1442 (`sandbox-center`) 进行现场采样，抓获深水死锁堆栈：
      ```text
      _RNvNtNtCsjRzdfub9oCi_14sandbox_center5rules7profile4sbpl20compile_sbpl_clauses -> shadowed_verdicts::dim_covered
      ```
   2. 逆向检查其沙盒规则配置 `tsbx_rules.json`，发现官方配置中竟然**只声明了 Windows 的 Temp 通配符 (`%LOCALAPPDATA%\Temp\**`)，完全遗漏了 macOS 的 `$TMPDIR` (`/var/folders/.../T/`)**！
   3. 导致在 macOS 下，任何工具只要触碰一下临时目录（例如生成一个临时文件），沙盒中心因为没有预置通配规则，全部动态回退到 IPC 向 `sandbox-center` 注册单条 `auto_grant` 绝对路径规则。随着开发进行，动态规则迅速堆积超过 **17,500 条**！
-  4. 致命的是，`compile_sbpl_clauses` 在将规则编译为 macOS Seatbelt 沙盒底层 SBPL 语法时，去重与覆盖判定算法竟然写成了双重嵌套循环 $O(N^2)$ 的线性扫描（$\frac{17500^2}{2} \approx 153,000,000$ 次比对）！1.5 亿次比对彻底打死 `center-io` 线程，导致所有后续命令的 IPC 握手因 3000ms 超时被全部拒绝，前端等待 120s 最终无情 SIGKILL。
-  5. 逆向还发现其 `sandbox-cli` 在命令退出清理 PTY 时，主线程在 `pthread_join(reader_thread)` 上竟然硬编码等待超时为 5000ms，人为凭空制造 5 秒假死！
+  4. 致命的是，通过 `otool -tvV` ARM64 反汇编实锤（地址 `0x1001129f0`），`compile_sbpl_clauses` 在将规则编译为 macOS Seatbelt 沙盒底层 SBPL 语法时，去重与覆盖判定算法竟然写成了双重嵌套循环 $O(N^2)$ 的线性扫描（$\frac{17500^2}{2} \approx 153,000,000$ 次比对）！1.5 亿次比对彻底打死 `center-io` 线程，导致 `sandbox-cli` 3,000ms IPC 握手超时失败，前端等待 120,000ms 最终无情 SIGKILL (137)。
+  5. 逆向通过 `otool -tvV` 反汇编定位到 `sandbox-cli`（地址 `0x1000a74e4`），主线程在 `InteractiveProcess::drop` 析构时在未关闭 `master_fd` 情况下直接调用 `JoinInner::join` 等待 reader 线程，被迫等满 5,000ms 默认超时才退出，人为制造 5,002ms 假死！
   6. 此外，主窗口退出时从未向后台守护进程发送级联退出信号，导致僵尸守护进程在后台永久常驻并占满 CPU。
 - **解决**：
   - 研发 `wb-sandbox heal`：通过 Unix Domain Socket 直连沙盒守护进程 IPC，在用户态动态向 `sandbox-center` 注入 macOS 临时目录全量通配规则（`/var/folders/**`, `/private/var/folders/**`, `/tmp/**` 等），并在规则数膨胀时原子重置 `auto_grant` 规则集，瞬间将规则数从 17,500 条降至 48 条，SBPL 编译耗时从 64 分钟回归 0.2ms；

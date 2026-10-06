@@ -228,5 +228,65 @@ class TestSandboxGuard(unittest.TestCase):
         self.assertIn("gui_running", data)
         self.assertIn("sessions_count", data)
 
+    def test_doctor_check5_sandbox_audit(self):
+        """Test wb-doctor Check 5 (Sandbox & Seatbelt) reports HEALTHY when temp wildcards active, RISK when bloated."""
+        import io
+        from unittest.mock import patch, MagicMock
+        from contextlib import redirect_stdout
+
+        # 1. Test HEALTHY when temp wildcards present
+        mock_guard_healthy = MagicMock()
+        mock_guard_healthy.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard_healthy.find_active_uid.return_value = "uid-test"
+        mock_guard_healthy.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {
+                "fileRules": [
+                    {"path": "/var/folders/**", "action": "read=allow"},
+                    {"path": "/tmp/**", "action": "read=allow"}
+                ]
+            }
+        }
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard_healthy):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.cli.run_doctor()
+            output = buf.getvalue()
+            self.assertIn("Sandbox & Seatbelt", output)
+            self.assertIn("HEALTHY", output)
+
+        # 2. Test RISK when > 2000 rules and no temp wildcard
+        mock_guard_risk = MagicMock()
+        mock_guard_risk.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard_risk.find_active_uid.return_value = "uid-test"
+        bloated_rules = [{"path": f"/some/single/file_{i}", "action": "read=allow"} for i in range(2500)]
+        mock_guard_risk.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {"fileRules": bloated_rules}
+        }
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard_risk):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.cli.run_doctor()
+            output = buf.getvalue()
+            self.assertIn("RISK", output)
+
+    def test_doctor_check6_sccache_audit(self):
+        """Test wb-doctor Check 6 (Cargo sccache reuse) audit logic."""
+        import io
+        from unittest.mock import patch, mock_open
+        from contextlib import redirect_stdout
+
+        cargo_cfg_content = '[build]\nrustc-wrapper = "/opt/homebrew/bin/sccache"\n'
+        orig_exists = os.path.exists
+        with patch("os.path.exists", side_effect=lambda p: True if "config.toml" in str(p) else orig_exists(p)), \
+             patch("builtins.open", mock_open(read_data=cargo_cfg_content)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.cli.run_doctor()
+            output = buf.getvalue()
+            self.assertIn("Cargo sccache reuse", output)
+            self.assertIn("CONFIGURED", output)
+
 if __name__ == "__main__":
     unittest.main()

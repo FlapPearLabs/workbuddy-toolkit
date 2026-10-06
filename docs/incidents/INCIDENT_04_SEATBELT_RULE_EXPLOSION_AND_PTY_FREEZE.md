@@ -9,6 +9,10 @@
 
 ---
 
+> 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故二 ⬅️](INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷) │ [🎬 抖音口播脚本 ➔](../DOUYIN_WORKBUDDY_TEARDOWN.md)
+
+---
+
 ## 一、问题背景：我们是怎么碰到的
 
 作为重度依赖 AI 协同构建系统的独立开发者（二本文科生身份，GitHub: [FlapPearLabs](https://github.com/FlapPearLabs)），在长期使用腾讯所谓“拳头级”AI 编程工具 WorkBuddy 的过程中，突发了一场令资深系统工程师极度窒息的特大生产级故障：
@@ -187,6 +191,78 @@ Architecture:    arm64
 ```
 全文件检索无任何 `/var/folders`、`/private/var/folders` 或 `/tmp` 声明。
 
+### 4. 真实反汇编指令证据 (`otool -tvV` ARM64 物理逆向)
+
+我们使用 macOS `otool -tvV` 对活体二进制文件进行反汇编，直接提取到底层死锁与卡顿的核心指令切片：
+
+#### 凭证 A：`sandbox-center` 中 $O(N^2)$ 嵌套死循环比对汇编
+
+符号地址：`0x100110b78` (`compile_sbpl_clauses`) 至 `0x1001187fc` (`dim_covered`)
+在 `compile_sbpl_clauses` 内部紧凑内层循环中（`0x1001129e0` ~ `0x100112a54`）：
+
+```assembly
+00000001001129e0    add  x26, x26, #0x20
+00000001001129e4    mov  x0, x26
+00000001001129e8    mov  x1, x25
+00000001001129ec    mov  x2, x21
+00000001001129f0    bl   __RNvNvNtNtNtCsjRzdfub9oCi_14sandbox_center5rules7profile4sbpl17shadowed_verdicts11dim_covered
+00000001001129f4    sub  x8, x28, #0x20
+00000001001129f8    cbz  w0, 0x1001129d8      ; <-- 条件跳转回内层循环头，比对下一条规则！
+...
+0000000100112a10    mov  x0, x26
+0000000100112a14    mov  x1, x25
+0000000100112a20    bl   __RNvNvNtNtNtCsjRzdfub9oCi_14sandbox_center5rules7profile4sbpl17shadowed_verdicts11dim_covered
+0000000100112a24    sub  x8, x21, #0x20
+0000000100112a28    cbz  w0, 0x100112a04      ; <-- 条件跳转回内层循环头！
+...
+0000000100112a40    mov  x0, x26
+0000000100112a44    mov  x1, x25
+0000000100112a48    mov  x2, x23
+0000000100112a4c    bl   __RNvNvNtNtNtCsjRzdfub9oCi_14sandbox_center5rules7profile4sbpl17shadowed_verdicts11dim_covered
+0000000100112a50    sub  x8, x22, #0x20
+0000000100112a54    cbz  w0, 0x100112a34      ; <-- 条件跳转回内层循环头！
+```
+
+**物理实证解读**：三处紧凑调用 `dim_covered` 伴随 `cbz w0, <addr>` 向后循环跳转，实锤了规则数组之间的 $O(N^2)$ 两两全量交叉比对逻辑。当 $N = 17,542$ 时，此循环密集跳转执行 1.53 亿次，造成 CPU 100% 狂转 64 分钟！
+
+#### 凭证 B：`sandbox-cli` 中 `InteractiveProcess::drop` 析构硬卡死汇编
+
+符号地址：`0x1000a74bc` (`InteractiveProcess::drop::{closure}`)
+反汇编指令（`0x1000a74dc` ~ `0x1000a74ec`）：
+
+```assembly
+00000001000a74dc    mov  x19, x0
+00000001000a74e0    add  x0, x0, #0x10
+00000001000a74e4    bl   __RNvMs1_NtNtCs82bWklYMk3w_3std6thread9lifecycleINtB5_9JoinInneruE4joinCs52PUgnASYx_12sandbox_core
+00000001000a74e8    mov  x21, x0
+00000001000a74ec    cbz  x0, 0x1000a7514
+```
+
+**物理实证解读**：在 `InteractiveProcess` 析构时，直接调用 Rust 标准库 `JoinInner::join` 试图等待读取子线程退出；但此时并未先行关闭伪终端主描述符 `master_fd`，子线程永远收不到 EOF，导致主线程在此处强制干等满 5,000ms 默认超时才放弃，造成命令退出必定卡死 5,002 毫秒！
+
+### 5. 跨层级超时死锁因果链（物理时间线）
+
+```text
+[用户发起命令: date]
+   │
+   ▼
+[sandbox-cli 启动] ──(Unix Socket IPC: /tmp/workbuddy-sandbox-center-*.sock)──► [sandbox-center]
+                                                                                       │
+                                                                         [深陷 1.53 亿次比对死循环]
+                                                                         (CPU 100%, 持续 64 分钟)
+                                                                                       │
+   ┌───────────────────────────────────────────────────────────────────────────────────┘
+   │
+   ▼ (IPC 无响应)
+[sandbox-cli 3,000ms IPC 连接超时] ──► 报 IPC 连接拒绝 / 挂起
+   │
+   ▼ (前端 Electron 等待命令回包)
+[WorkBuddy 前端 120,000ms 全局超时] ──► 触发 commandTimeout 熔断
+   │
+   ▼
+[发送 SIGKILL 信号 (exit_code: 137)] ──► 终端命令全面瘫痪！
+```
+
 ---
 
 ## 四、Toolkit 根治方案：我们的工具怎么修的
@@ -295,3 +371,8 @@ wb-sandbox clean
 ```
 
 彻底解决 120 秒超时 SIGKILL、PTY 5 秒退出延迟与 64 分钟 100% CPU 电池风暴，还开发者一个安静、敏捷、可信赖的终端环境！
+
+---
+
+> 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故二 ⬅️](INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷) │ [🎬 抖音口播脚本 ➔](../DOUYIN_WORKBUDDY_TEARDOWN.md)
+

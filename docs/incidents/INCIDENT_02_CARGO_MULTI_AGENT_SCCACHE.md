@@ -9,6 +9,10 @@
 
 ---
 
+> 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故一 ⬅️](INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷) │ [下一篇：事故四 ➔](INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
+
+---
+
 ## 一、问题背景：我们是怎么碰到的
 
 WorkBuddy 官方宣传材料中多次将“多智能体（Multi-Agent）协作开发”作为其核心技术亮点，鼓励开发者派发多个子 Agent 分别在不同工作区中并发承担模块编写、接口重构与单元测试。
@@ -214,3 +218,8 @@ RESULT: COMPATIBLE
 ```
 
 多 Agent 并发开发时，所有子 Agent 构建任务 100% 共享预编译中间件，构建提速 30 倍，风扇静音，磁盘占用被严格收敛至 10GB 硬顶之内。
+
+---
+
+> 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故一 ⬅️](INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷) │ [下一篇：事故四 ➔](INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
+
