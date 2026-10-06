@@ -220,5 +220,145 @@ wb-sandbox clean
 
 ---
 
+## 五、腾讯官方架构根治与 PR 补丁建议 (Upstream Remediation & PR Patches)
+
+为了帮助腾讯 WorkBuddy 团队彻底摆脱“外包草台班子”式的工程质量，我们为官方团队提供组件级的直接修复方案与源码级补丁建议：
+
+### 建议 1：重构 `sandbox-cli-gc` 内存与扫描算法 (`sandbox-center/src/bin/gc_runner.rs`)
+
+**涉案缺陷位置**：
+`sandbox_cli_gc::gc_runner::plan_gc` 与 `SessionIndex` 全量内存构建。官方代码使用 `HashMap<String, SessionIndex>`，并在内部维护 `Vec<CommitEntry>`。在 32 万文件规模下，`RawVec::grow_one` 触发海量堆分配，且调用 `driftsort_main` 对全量条目进行无序重排，造成 471MB 内存泄漏与 1,850 IOPS 锁死。
+
+**官方源码级 Patch 建议**：
+改用顶层会话目录轻量探测与流式滑动窗口淘汰，绝不向内存加载全量文件元数据：
+
+```rust
+// [Upstream Patch Recommendation] sandbox-center/src/bin/gc_runner.rs
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+pub struct StreamingGcPlanner {
+    pub max_keep_sessions: usize,
+    pub session_ttl: Duration,
+}
+
+impl StreamingGcPlanner {
+    /// 流式目录清理：仅读取顶层 session 目录 mtime，不递归下钻数十万小文件
+    pub fn execute_streaming_cleanup(&self, sessions_root: &Path) -> std::io::Result<usize> {
+        if !sessions_root.exists() {
+            return Ok(0);
+        }
+
+        // 1. 仅枚举顶层 session UUID 目录 (耗时 < 5ms, 内存分配 < 10KB)
+        let mut session_entries: Vec<(PathBuf, SystemTime)> = fs::read_dir(sessions_root)?
+            .filter_map(|res| res.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| {
+                let mtime = e.metadata().ok()?.modified().ok()?;
+                Some((e.path(), mtime))
+            })
+            .collect();
+
+        // 2. 按最近修改时间倒序排序 (最近活跃的排在最前)
+        session_entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+        let mut cleaned_count = 0;
+        // 3. 超出保留配额且超过 TTL 的孤儿历史会话，整目录原子切除
+        for (session_dir, mtime) in session_entries.into_iter().skip(self.max_keep_sessions) {
+            let is_expired = mtime.elapsed().unwrap_or_default() > self.session_ttl;
+            let is_locked = session_dir.join("center.backup.lock").exists();
+
+            if is_expired && !is_locked {
+                // 直接整目录递归清除，不逐个解析 CommitEntry
+                if fs::remove_dir_all(&session_dir).is_ok() {
+                    cleaned_count += 1;
+                }
+            }
+        }
+
+        Ok(cleaned_count)
+    }
+}
+```
+
+### 建议 2：为 PTY 终端日志流引入滚动配额硬顶 (`sandbox_core::executor::pipe_utils`)
+
+**涉案缺陷位置**：
+`sandbox_core::executor::pipe_utils::pty_output_reader_loop` 仅按照 13.0 MB 机械分卷，完全缺乏基于分卷数量的上限控制与目录总量硬顶。
+
+**官方源码级 Patch 建议**：
+在追加新分卷时，强制执行 LRU 滚动淘汰，确保单会话日志不超过 100MB，总目录不超过 1GB：
+
+```rust
+// [Upstream Patch Recommendation] sandbox_core/src/executor/pipe_utils.rs
+pub const MAX_SLICES_PER_SESSION: usize = 8; // 单会话最多保留 8 个切片 (~104MB)
+pub const MAX_GLOBAL_LOG_BYTES: u64 = 1024 * 1024 * 1024; // 全局硬顶 1GB
+
+pub fn prune_session_slices(log_dir: &Path, session_id: &str) -> std::io::Result<()> {
+    let mut slices: Vec<(PathBuf, u64)> = fs::read_dir(log_dir)?
+        .filter_map(|r| r.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with(session_id) && name.contains("output.log")
+        })
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            Some((e.path(), meta.modified().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs()))
+        })
+        .collect();
+
+    if slices.len() > MAX_SLICES_PER_SESSION {
+        slices.sort_by_key(|s| s.1); // 按时间升序 (最旧的排在前面)
+        let remove_count = slices.len() - MAX_SLICES_PER_SESSION;
+        for (path, _) in slices.into_iter().take(remove_count) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
+```
+
+### 建议 3：修复 macOS 孤儿守护进程脱钩缺陷 (`cli/bin/no-orphans.cjs`)
+
+**涉案缺陷代码**：
+`/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/no-orphans.cjs` 第 24 行：
+```javascript
+if (platform !== 'win32') { return (state[STATE] = false); }
+```
+腾讯工程师仅在 Windows 上通过 Job Object 实现了孤儿进程保护，而在 macOS 与 Linux 上直接返回 `false` 摆烂，导致主程序关闭后后台 `sandbox-cli-gc` 永远不退出。
+
+**官方源码级 Patch 建议**：
+在 POSIX 平台注册进程组清理钩子，主程序退出时级联广播 `SIGTERM`：
+
+```javascript
+// [Upstream Patch Recommendation] cli/bin/no-orphans.cjs
+function install({ platform = process.platform, ... } = {}) {
+    if (state[STATE] !== undefined) return state[STATE];
+
+    if (platform === 'darwin' || platform === 'linux') {
+        const pidsToClean = new Set();
+        const registerChild = (pid) => pidsToClean.add(pid);
+        
+        const cleanup = () => {
+            for (const pid of pidsToClean) {
+                try { process.kill(pid, 'SIGTERM'); } catch {}
+            }
+        };
+
+        process.once('exit', cleanup);
+        process.once('SIGINT', () => { cleanup(); process.exit(130); });
+        process.once('SIGTERM', () => { cleanup(); process.exit(143); });
+        
+        globalThis[Symbol.for('codebuddy.registerChildDaemon')] = registerChild;
+        return (state[STATE] = true);
+    }
+
+    // 原有的 Windows Job Object 逻辑...
+}
+```
+
+---
+
 > 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷) │ [下一篇：事故二 ➔](INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md)
 

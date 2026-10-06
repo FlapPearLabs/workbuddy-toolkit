@@ -609,12 +609,12 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 
 #### 📌 生产事故导航与证据矩阵
 
-| 事故编号 | 故障等级 | 事故名称与核心现象 | 核心根因与白盒证据摘要 | Toolkit 治愈命令与方案 | 深度物理取证报告 |
-| :---: | :---: | :--- | :--- | :--- | :---: |
-| **01** | `P0` | **沙盒 PTY 日志无底洞与 32 万快照文件瘫痪系统 I/O**<br>运行 3~4 天系统盘缩减 15GB+，整机卡顿 | PTY 日志零 TTL 累积 14.8GB；321,489 个快照小文件；`sandbox-cli-gc` RSS 达 471MB 遍历打满 IOPS | `workbuddy-log-guard` 四重物理看门狗；`clean_session_snapshots` 句柄感知修剪；`wb-sandbox clean` | [📄 事故一完整报告](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md) |
-| **02** | `P1` | **多 Agent 并发构建缺乏全局编译缓存诱发计算风暴**<br>风扇狂转、CPU 100%、磁盘被多份 `target` 吞噬 | 多 Agent 独立沙盒重复拉取 crates 并冷编译，构建耗时 128s，无共享 `sccache`，缓存命中率 0% | `wb-doctor` Check 6 (Cargo sccache reuse 审计)；配置全局 `[build] rustc-wrapper` 与 10GB 缓存硬顶；构建提速 30 倍 (4.2s) | [📄 事故二完整报告](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) |
-| **03** | `P0` | **Git 工作区代码莫名丢失 (Safe-Delete 缺陷导致 59 个文件蒸发)**<br>包管理器被拦截留脏状态，工作树代码丢失 | `genie-safe-delete.cjs` 硬编码删除超 20 个文件抛错；底层沙盒过滤层在竞争态下直接诱发文件系统物理丢失 | 建立独立可复现工程向官方提交严肃 Bug 报告；Toolkit 建立未入库工作区保护准则 | [🔗 独立证据仓库](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause) |
-| **04** | `P0` | **Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死**<br>终端命令 120s 超时报 137，后台 CPU 100% | `tsbx_rules.json` 遗漏 macOS 临时目录；动态生成 17,542 条单路径；$O(N^2)$ 比对 1.53 亿次死锁 64 分钟；PTY drop join 硬卡 5 秒 | `wb-sandbox heal`（Unix Socket IPC 动态注入通配规则降至 48 条，0.2ms 编译）；`wb-sandbox clean`（libproc C-FFI 安全收割孤儿守护）；`wb-doctor` Check 5 | [📄 事故四完整报告](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md) |
+| 事故编号 | 故障等级 | 事故名称与核心现象 | 涉案代码组件与符号定位 | 核心根因与白盒证据摘要 | 官方 PR 补丁与 Toolkit 治理方案 | 深度物理取证报告 |
+| :---: | :---: | :--- | :--- | :--- | :--- | :---: |
+| **01** | `P0` | **沙盒 PTY 日志无底洞与 32 万快照文件瘫痪系统 I/O**<br>运行 3~4 天系统盘缩减 15GB+，整机卡顿 | `sandbox-cli-gc` (`gc_runner.rs`, `SessionIndex`)<br>`sandbox_core::pipe_utils`<br>`no-orphans.cjs` (L24) | PTY 日志零 TTL 累积 14.8GB；321,489 个快照小文件；`sandbox-cli-gc` RSS 达 471MB 遍历打满 IOPS | **官方 Patch**：流式滑动窗口 GC + PTY 滚动容量硬顶 + POSIX 孤儿进程清理<br>**Toolkit**：`workbuddy-log-guard` 四重物理看门狗 + `wb-sandbox clean` | [📄 事故一完整报告](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md) |
+| **02** | `P1` | **多 Agent 并发构建缺乏全局编译缓存诱发计算风暴**<br>风扇狂转、CPU 100%、磁盘被多份 `target` 吞噬 | `TerminalEnvironmentFactory.ts`<br>`WorkspaceIsolationManager.ts`<br>Colima / Docker APFS 存储层 | 多 Agent 独立沙盒重复拉取 crates 并冷编译，构建耗时 128s，无共享 `sccache`，缓存命中率 0% | **官方 Patch**：子 Agent 自动嗅探透传 `RUSTC_WRAPPER` + 共享 `.cargo/config.toml`<br>**Toolkit**：`wb-doctor` Check 6 + 全局 10GB 缓存硬顶 + `fstrim` 穿透 | [📄 事故二完整报告](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) |
+| **03** | `P0` | **Git 工作区代码莫名丢失 (Safe-Delete 缺陷导致 59 个文件蒸发)**<br>包管理器被拦截留脏状态，工作树代码丢失 | `genie-safe-delete.cjs`<br>文件系统过滤驱动竞争态 | `genie-safe-delete.cjs` 硬编码删除超 20 个文件抛错；底层沙盒过滤层在竞争态下直接诱发文件系统物理丢失 | **官方 Patch**：移除无界安全删除抛错，修复驱动竞争态<br>**Toolkit**：未提交代码资产绝对保护准则 | [🔗 独立证据仓库](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause) |
+| **04** | `P0` | **Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死**<br>终端命令 120s 超时报 137，后台 CPU 100% | `sandbox-center` (`compile_sbpl_clauses`, `dim_covered`)<br>`tsbx_rules.json` (L7)<br>`sandbox-cli` (`InteractiveProcess::drop`) | `tsbx_rules.json` 遗漏 macOS 临时目录；动态生成 17,542 条单路径；$O(N^2)$ 比对 1.53 亿次死锁 64 分钟；PTY drop join 硬卡 5 秒 | **官方 Patch**：`tsbx_rules.json` 补全临时目录 + 前缀树 Trie 降至 $O(N \log N)$ + 先关闭 `master_fd` 后 join<br>**Toolkit**：`wb-sandbox heal` + `wb-sandbox clean` + `wb-doctor` Check 5 | [📄 事故四完整报告](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md) |
 
 ---
 

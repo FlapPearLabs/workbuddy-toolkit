@@ -221,5 +221,82 @@ RESULT: COMPATIBLE
 
 ---
 
+## 五、腾讯官方架构根治与 PR 补丁建议 (Upstream Remediation & PR Patches)
+
+真正工业级的“多智能体协作”绝不仅仅是粗暴地克隆多个工作区目录，而必须在操作系统与底层工具链层面设计统一的中间件共享总线。以下为给腾讯 WorkBuddy 官方团队的源码级改进方案：
+
+### 建议 1：子 Agent 进程环境变量透传编译缓存加速器 (`TerminalService.ts`)
+
+**涉案缺陷位置**：
+WorkBuddy 派生子 Agent 终端时，仅透传了极简的基础环境变量，完全忽视了现代系统级语言（Rust、C++、Go）并发构建时的共享缓存需求。
+
+**官方源码级 Patch 建议**：
+在子终端环境变量合成工厂（`createAgentEnvironment`）中，主动探测宿主机的编译器缓存工具，并自动注入标准变量：
+
+```typescript
+// [Upstream Patch Recommendation] src/main/services/terminal/TerminalEnvironmentFactory.ts
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+export function enhanceAgentBuildEnvironment(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const env = { ...baseEnv };
+    const homeDir = os.homedir();
+
+    // 1. 自动探测并接入 Rust 全局编译缓存 sccache
+    const candidateSccachePaths = [
+        '/opt/homebrew/bin/sccache',
+        '/usr/local/bin/sccache',
+        path.join(homeDir, '.cargo/bin/sccache'),
+    ];
+
+    const sccacheBin = candidateSccachePaths.find(p => fs.existsSync(p));
+    if (sccacheBin && !env.RUSTC_WRAPPER) {
+        env.RUSTC_WRAPPER = sccacheBin;
+        env.SCCACHE_DIR = env.SCCACHE_DIR || path.join(homeDir, 'Library/Caches/Mozilla.sccache');
+        env.SCCACHE_CACHE_SIZE = env.SCCACHE_CACHE_SIZE || '10G';
+    }
+
+    // 2. 自动探测并接入 C/C++ 全局编译缓存 ccache
+    const candidateCcachePaths = ['/opt/homebrew/bin/ccache', '/usr/local/bin/ccache'];
+    const ccacheBin = candidateCcachePaths.find(p => fs.existsSync(p));
+    if (ccacheBin && !env.CCACHE_DIR) {
+        env.CCACHE_DIR = path.join(homeDir, 'Library/Caches/ccache');
+    }
+
+    return env;
+}
+```
+
+### 建议 2：多 Agent 工作区目录生成器挂载共享构建缓存 (`WorkspaceIsolationManager.ts`)
+
+**涉案缺陷位置**：
+多 Agent 隔离工作区相互独立，导致每个工作区独立生成 5~8 GB 的 `target/` 目录。
+
+**官方源码级 Patch 建议**：
+在为子 Agent 创建工作区分支时，自动将公共构建缓存目录软链或重定向至共享根目录，或者在工作区根目录写入公共构建配置：
+
+```typescript
+// [Upstream Patch Recommendation] src/main/services/workspace/WorkspaceIsolationManager.ts
+export async function initializeMultiAgentWorkspace(agentWorkspaceDir: string, rootProjectDir: string): Promise<void> {
+    const cargoTomlPath = path.join(rootProjectDir, 'Cargo.toml');
+    if (fs.existsSync(cargoTomlPath)) {
+        // 在派生工作区中固化共享 cargo 配置文件
+        const cargoConfigDir = path.join(agentWorkspaceDir, '.cargo');
+        await fs.promises.mkdir(cargoConfigDir, { recursive: true });
+        
+        const configContent = `[build]\nrustc-wrapper = "sccache"\n`;
+        await fs.promises.writeFile(path.join(cargoConfigDir, 'config.toml'), configContent, 'utf-8');
+    }
+}
+```
+
+### 建议 3：集成容器与虚拟机存储 APFS TRIM 回收钩子
+
+**官方源码级建议**：
+当 WorkBuddy 检测到在 Colima / Lima / Docker 虚拟化环境中运行开发任务时，在触发 `prune` 或任务清理时，通过 SSH 通道自动调用 `fstrim -av`，将 ext4 discard 事件穿透至宿主 APFS 稀疏盘，解决磁盘伪膨胀与虚假空间耗尽问题。
+
+---
+
 > 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故一 ⬅️](INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷) │ [下一篇：事故四 ➔](INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
 
