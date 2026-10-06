@@ -51,8 +51,8 @@ ps aux | grep -E "cargo|rustc"
 我们统计了 3 个子 Agent 工作区下的 `target` 目录占用：
 
 ```bash
-du -sh /Users/songshiyao/Documents/Codex/*/target
-du -sh /Users/songshiyao/Desktop/Projects/*/target
+du -sh $HOME/Documents/Codex/*/target
+du -sh $HOME/Desktop/Projects/*/target
 ```
 
 **物理计量结果**：
@@ -126,7 +126,7 @@ Average compiler                  0.378 s
 Average cache read hit            0.011 s
 Failed distributed compilations       0
 
-Cache location                  Local disk: "/Users/songshiyao/Library/Caches/Mozilla.sccache"
+Cache location                  Local disk: "$HOME/Library/Caches/Mozilla.sccache"
 Base directories                (none)
 Use direct/preprocessor mode?   yes
 Version (client)                0.18.0
