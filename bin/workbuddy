@@ -98,6 +98,40 @@ COLOR_RED = "\033[91m" if HAS_COLOR else ""
 COLOR_BOLD = "\033[1m" if HAS_COLOR else ""
 COLOR_RESET = "\033[0m" if HAS_COLOR else ""
 
+def robust_urlopen(req, timeout=10, max_retries=2):
+    """
+    鲁棒网络请求封装：
+    针对腾讯国内接口 (copilot.tencent.com)，若外部环境设置了代理环境变量 (如 127.0.0.1:7897)，
+    在遭遇代理握手中断 (如 _ssl.c EOF violation)、连接重置或网络抖动时，
+    自动回退至直连模式 (Bypass Proxy) 并按指数退避重试，确保在 Antigravity Sidecar、海外代理或宿主环境波动下 100% 成功交付。
+    """
+    has_proxy = any(os.environ.get(k) for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"))
+    direct_opener = None
+
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0 and has_proxy:
+                if direct_opener is None:
+                    direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                return direct_opener.open(req, timeout=timeout)
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError:
+            # 服务端响应的 HTTP 状态码 (4xx, 5xx) 属于应用层交互，直接向上抛出供业务解析
+            raise
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries:
+                time.sleep(0.3 * (attempt + 1))
+            else:
+                if has_proxy and direct_opener is None:
+                    try:
+                        direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                        return direct_opener.open(req, timeout=timeout)
+                    except Exception as direct_e:
+                        raise direct_e from last_err
+                raise
+
 # ==============================================================================
 # Credential Compatibility Layer (支持旧版明文凭据与 WorkBuddy 5.6+ 加密凭据)
 # 核心原则：DO NOT DECRYPT FOR STORAGE（持久化保留原始格式，仅在请求时临时内存解密）
@@ -1140,7 +1174,7 @@ def check_profile_health(profile_info, force=False):
             }
         )
         try:
-            with urllib.request.urlopen(status_req, timeout=8) as resp:
+            with robust_urlopen(status_req, timeout=8) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
                 if res.get("code") == 0:
                     cache[uid] = {"status": "HEALTHY", "checked_at": time.time(), "expires_at": expires_at}
@@ -1193,7 +1227,7 @@ def check_profile_health(profile_info, force=False):
             }
         )
         try:
-            with urllib.request.urlopen(r_req, timeout=10) as resp:
+            with robust_urlopen(r_req, timeout=10) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
                 if res.get("code") == 0 and res.get("data") and res["data"].get("accessToken"):
                     new_auth = res["data"]
@@ -1398,7 +1432,7 @@ def run_login(alias=None, auto_switch=True, force=False):
             }
         )
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with robust_urlopen(req, timeout=10) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
                 if res.get("code") == 0 and res.get("data"):
                     state_data = res.get("data")
@@ -1466,7 +1500,7 @@ def run_login(alias=None, auto_switch=True, force=False):
                     }
                 )
                 try:
-                    with urllib.request.urlopen(p_req, timeout=8) as resp:
+                    with robust_urlopen(p_req, timeout=8) as resp:
                         res = json.loads(resp.read().decode("utf-8"))
                         code = res.get("code")
                         if code == 11217:
@@ -1517,7 +1551,7 @@ def run_login(alias=None, auto_switch=True, force=False):
             }
         )
         try:
-            with urllib.request.urlopen(a_req, timeout=8) as resp:
+            with robust_urlopen(a_req, timeout=8) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
                 if res.get("code") == 0 and res.get("data"):
                     d = res.get("data")
@@ -1972,7 +2006,7 @@ def send_chat_message(token, uid, prompt="请回复：你好", model=None, timeo
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with robust_urlopen(req, timeout=timeout) as resp:
                 full_text = []
                 for line in resp:
                     line_str = line.decode("utf-8", errors="ignore").strip()
@@ -2301,7 +2335,7 @@ def run_checkin(target_name=None, with_chat=True):
         )
 
         try:
-            with urllib.request.urlopen(status_req, timeout=10) as resp:
+            with robust_urlopen(status_req, timeout=10) as resp:
                 status_res = json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 查询签到状态失败: {e}")
@@ -2330,7 +2364,7 @@ def run_checkin(target_name=None, with_chat=True):
             )
 
             try:
-                with urllib.request.urlopen(claim_req, timeout=10) as resp:
+                with robust_urlopen(claim_req, timeout=10) as resp:
                     claim_res = json.loads(resp.read().decode("utf-8"))
                     if claim_res.get("code") == 0:
                         new_checked += 1

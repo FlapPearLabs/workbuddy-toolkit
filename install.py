@@ -274,7 +274,7 @@ def setup_scheduler(bin_path, bin_dir):
             with open(plist_dest, "w", encoding="utf-8") as f:
                 f.write(content)
             subprocess.run(["launchctl", "unload", plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-            subprocess.run(["launchctl", "load", plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            subprocess.run(["launchctl", "load", "-w", plist_dest], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             print(f"{COLOR_GREEN}   ✔ macOS LaunchAgent 已激活 (每天 09:00 静默签到){COLOR_RESET}")
 
         # 容灾路由 LaunchAgent (端口 8047)

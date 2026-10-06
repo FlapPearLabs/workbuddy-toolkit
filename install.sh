@@ -80,7 +80,7 @@ if [ "$OS" = "Darwin" ] && [ -d "$LAUNCH_AGENTS_DIR" ]; then
     PLIST_CHECKIN="$LAUNCH_AGENTS_DIR/com.workbuddy.dailycheckin.plist"
     sed "s|{{HOME}}|$HOME|g" "$SCRIPT_DIR/launchd/com.workbuddy.dailycheckin.plist" > "$PLIST_CHECKIN"
     launchctl unload "$PLIST_CHECKIN" 2>/dev/null || true
-    launchctl load "$PLIST_CHECKIN"
+    launchctl load -w "$PLIST_CHECKIN"
     echo "   ✔ LaunchAgent 已激活: 每天早晨 09:00 自动执行后台签到"
 
     # 容灾路由网关 (:8047)

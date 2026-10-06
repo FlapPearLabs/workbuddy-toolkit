@@ -1482,6 +1482,45 @@ class TestWorkBuddyCore(unittest.TestCase):
         self.assertIn("WorkBuddy CLI", res.stdout)
         self.assertIn("wb-help", res.stdout)
 
+    def test_t53_robust_urlopen_proxy_fallback(self):
+        """T53: robust_urlopen 在代理握手失败/SSL EOF 时自动回退至直连模式 (Bypass Proxy)"""
+        import urllib.error
+        req = urllib.request.Request("https://copilot.tencent.com/test", data=b"{}")
+
+        # 1. 无代理环境下正常调用
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+                resp = workbuddy.robust_urlopen(req, timeout=5)
+                self.assertEqual(resp.status, 200)
+                mock_open.assert_called_once()
+
+        # 2. 有代理环境下遭遇代理 EOF/网络异常，自动切换到直连 opener
+        direct_resp = MagicMock()
+        direct_resp.status = 200
+        mock_direct_opener = MagicMock()
+        mock_direct_opener.open.return_value = direct_resp
+
+        env_with_proxy = {
+            "HTTPS_PROXY": "http://127.0.0.1:7897",
+            "HTTP_PROXY": "http://127.0.0.1:7897"
+        }
+        with patch.dict(os.environ, env_with_proxy):
+            with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("EOF occurred in violation of protocol (_ssl.c:1129)")):
+                with patch("urllib.request.build_opener", return_value=mock_direct_opener) as mock_builder:
+                    with patch("time.sleep", return_value=None):
+                        resp = workbuddy.robust_urlopen(req, timeout=5)
+                        self.assertEqual(resp.status, 200)
+                        mock_builder.assert_called_once()
+                        mock_direct_opener.open.assert_called_once()
+
+        # 3. HTTP 错误直接抛出不盲目重试
+        http_err = urllib.error.HTTPError("https://copilot.tencent.com/test", 401, "Unauthorized", {}, None)
+        with patch("urllib.request.urlopen", side_effect=http_err):
+            with self.assertRaises(urllib.error.HTTPError):
+                workbuddy.robust_urlopen(req, timeout=5)
+
 if __name__ == "__main__":
     unittest.main()
 
