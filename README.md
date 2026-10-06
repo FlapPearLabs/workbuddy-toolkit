@@ -93,7 +93,6 @@
     - [⚡ 事故二：多 Agent 并发构建缺乏全局编译缓存 sccache (P1)](#事故二cargo-编译多个子-agent-缺乏全局共享缓存-sccache-导致编译风暴) ➔ [📄 深度取证报告](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md)
     - [⚡ 事故三：Git 工作区代码莫名丢失 (Safe-Delete 缺陷) (P0)](#事故三git-工作区代码莫名丢失safedelete-粗暴拦截导致-npm-ci-崩溃与-59-个文件蒸发) ➔ [🔗 独立复现仓库](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause)
     - [⚡ 事故四：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟 (P0)](#事故四seatbelt-17-万行规则雪崩致-sbpl-编译-on²-死锁-64-分钟与-pty-5s-假死) ➔ [📄 深度取证报告](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
-    - [🎬 抖音爆款口播解说脚本：二本文科生手撕腾讯大厂底层屎山](docs/DOUYIN_WORKBUDDY_TEARDOWN.md)
 - [三、快速上手与安装升级](#三快速上手与安装升级)
   - [老用户平滑升级指南（30 秒升级到 v0.6.0）](#-老用户平滑升级指南30-秒升级到-v060)
   - [推荐方式：跨平台通用 Python 一键安装](#推荐方式跨平台通用-python-一键安装-macos--linux--windows-通用)
@@ -618,7 +617,7 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 
 ---
 
-作为重度依赖 AI 协同构建系统的独立开发者（二本文科生身份，GitHub: [FlapPearLabs](https://github.com/FlapPearLabs)），在长期使用腾讯所谓“拳头级”AI 编程工具 WorkBuddy 的过程中，遭遇了一系列极其荒谬、令资深系统工程师窒息的底层生产事故。通过 `sample` 堆栈采样、动态系统跟踪、底层逆向分析与白盒物理凭证，我们对其底层工程的积弊进行了深水溯源，并在此公开这四大暴露出大厂内部“实习生 vibe-coding 无架构审查”本质的生产事故：
+作为重度依赖 AI 协同构建系统的独立开发者（GitHub: [FlapPearLabs](https://github.com/FlapPearLabs)），在长期使用腾讯所谓“拳头级”AI 编程工具 WorkBuddy 的过程中，遭遇了一系列极其荒谬、令资深系统工程师窒息的底层生产事故。通过 `sample` 堆栈采样、动态系统跟踪、底层逆向分析与白盒物理凭证，我们对其底层工程的积弊进行了深水溯源，并在此公开这四大暴露出大厂内部“实习生 vibe-coding 无架构审查”本质的生产事故：
 
 #### 事故一：沙盒 PTY 日志堆积吞噬磁盘与数十万 Session 快照泄漏
 - **现象**：客户端常驻 3~4 天后，系统盘急剧减少 15GB 以上；更严重的是在 `~/.workbuddy/workspace/sessions` 目录下堆积了超过 32 万个 `modify_backup` 与 `.modify_backup_meta` 快照文件，导致文件系统 `stat` 与目录遍历极度卡顿（遍历耗时飙升至 48.7s）。后台 `sandbox-cli-gc` 内存飙升至 471.2MB，高频深度遍历 APFS 打满 1,800+ IOPS 使得系统 I/O 持续瘫痪。
@@ -654,7 +653,6 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
   - 研发 `wb-sandbox clean`：在检测到 GUI 退出且无活跃用户任务时，安全级联回收孤儿守护进程，彻底根治发烫与卡死；
   - 集成 `wb-doctor` Check 5 进行规则健康审计。
 - 🔗 **深度物理凭证报告**：👉 [阅读《事故四深度取证报告：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5 秒假死》](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
-- 🎬 **视频解说脚本**：👉 [查看《【抖音爆款口播脚本】一个二本文科生，是如何手撕腾讯拳头级AI产品底层屎山的？》](docs/DOUYIN_WORKBUDDY_TEARDOWN.md)
 
 ---
 

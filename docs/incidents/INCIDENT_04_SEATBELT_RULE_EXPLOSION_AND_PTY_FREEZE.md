@@ -9,13 +9,13 @@
 
 ---
 
-> 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故二 ⬅️](INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷) │ [🎬 抖音口播脚本 ➔](../DOUYIN_WORKBUDDY_TEARDOWN.md)
+> 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故二 ⬅️](INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷)
 
 ---
 
 ## 一、问题背景：我们是怎么碰到的
 
-作为重度依赖 AI 协同构建系统的独立开发者（二本文科生身份，GitHub: [FlapPearLabs](https://github.com/FlapPearLabs)），在长期使用腾讯所谓“拳头级”AI 编程工具 WorkBuddy 的过程中，突发了一场令资深系统工程师极度窒息的特大生产级故障：
+作为重度依赖 AI 协同构建系统的独立开发者（GitHub: [FlapPearLabs](https://github.com/FlapPearLabs)），在长期使用腾讯所谓“拳头级”AI 编程工具 WorkBuddy 的过程中，突发了一场令资深系统工程师极度窒息的特大生产级故障：
 
 1. **终端命令全面假死，120 秒后惨遭 SIGKILL 强杀**：
    - 在 WorkBuddy 内置终端或由 Agent 调用的终端中，执行**任何**终端命令（即使只是最简单的 `date`、`echo 1` 或 `ls`），终端立即陷入无休止的悬挂卡死；
@@ -506,5 +506,5 @@ impl Drop for InteractiveProcess {
 
 ---
 
-> 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故二 ⬅️](INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷) │ [🎬 抖音口播脚本 ➔](../DOUYIN_WORKBUDDY_TEARDOWN.md)
+> 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故二 ⬅️](INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷)
 

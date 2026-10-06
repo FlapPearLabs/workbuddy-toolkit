@@ -1,6 +1,6 @@
 # WorkBuddy 生产级底层事故深度排查与白盒物理凭证库
 
-> **维护主体**：宋仕尧（GitHub: [FlapPearLabs](https://github.com/FlapPearLabs)）  
+> **维护主体**：FlapPearLabs ([GitHub](https://github.com/FlapPearLabs))  
 > **定位**：拒绝表面应付、拒绝伪装完成，拿不可伪造的真实物理计量、内核堆栈与反汇编证据说话。  
 > **开源治理项目**：`workbuddy-toolkit` ([https://github.com/FlapPearLabs/workbuddy-toolkit](https://github.com/FlapPearLabs/workbuddy-toolkit))  
 > **取证代码库**：`workbuddy-safedelete-rootcause` ([https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause))
@@ -44,13 +44,6 @@
 3. **零破坏与外科手术式修改（Surgical Cleanup）**：
    - 修复工具必须具备活跃句柄感知（`lsof` / 共享锁感知）；
    - 严禁为了治理而粗暴 `rm -rf`，绝对保护用户未提交的代码资产与活跃工作现场。
-
----
-
-## 视频口播与解说脚本
-
-针对这一系列深水生产事故的排查与手撕大厂草台班子经历，我们还整理了面向技术社区与短视频平台的现场解说口播脚本：
-- 详见：[【抖音爆款文案/视频口播解说脚本】《一个二本文科生，是如何手撕腾讯“拳头级”AI产品底层屎山的？》](../DOUYIN_WORKBUDDY_TEARDOWN.md)
 
 ---
 
