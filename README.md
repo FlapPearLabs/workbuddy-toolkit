@@ -63,7 +63,86 @@
 
 ---
 
+## 🛡️ 官方更新兼容性、冲突防范与安全回退保障 (Upstream Compatibility & Zero-Conflict Guarantee)
+
+> **极简结论**：WorkBuddy Toolkit 采用**零侵入外挂（Non-invasive Sidecar）与运行态接缝设计**，**绝对不修改官方任何二进制执行体与 asar 安装包**。官方后续任何版本迭代均**默认零冲突、具备完全自愈能力**；若遇底层破坏性重构，Toolkit 内置 **Fail-Safe 快速熔断与主动体检预警 (`wb-doctor`)**，并支持**秒级零残留一键回退**。
+
+### 1. 为什么默认绝不破坏且 100% 零冲突？（非侵入设计准则）
+
+1. **零文件篡改（Zero In-Place Binary Mutation）**：
+   - Toolkit 从不 patch、不替换、不劫持 `/Applications/WorkBuddy.app`（或 Windows/Linux 安装目录）内的任何官方执行体、只读脚本或 asar 归档。官方应用包哈希与签名 100% 保持官方原版。
+2. **运行态接缝与幂等注入（Idempotent IPC Seam）**：
+   - 沙盒 Seatbelt 规则治理通过官方运行时自身开放的 Unix Domain Socket 注入。规则集合求并集具备天然的**数学幂等性（Idempotent Set）**：即便未来官方版本在 `tsbx_rules.json` 中原生补齐了 temp 规则，规则合并依然保持 $O(1)$，绝不冲突、绝不重复报错。
+3. **旁路看门狗阈值休眠（Passive Threshold Guard）**：
+   - 日志与快照治理（`workbuddy-log-guard`）仅在目录突破 2GB 硬顶或单文件突破 30MB 熔断线时才介入；若官方后续版本自愈了日志轮转，看门狗纯内核休眠，对系统零任何副作用。
+4. **Toolchain 独立解耦**：
+   - `sccache` 编译缓存挂载在全局 `~/.cargo/config.toml`，为 Rust 标准生态规范，WorkBuddy 客户端如何更新均无法影响该层。
+
+---
+
+### 2. WorkBuddy 官方版本更新时的 3 种演进场景与表现
+
+| 官方更新场景 | 现场表现与 Toolkit 行为 | 用户影响与应对方式 |
+| :--- | :--- | :--- |
+| **场景 A：官方合入原生修复**<br>(官方在 `tsbx_rules.json` 补齐了 temp 规则，或增加了会话清理) | 1. Toolkit 注入的规则自动与官方规则幂等求并集，规则数保持两位数。<br>2. `wb-doctor` 自动感知并报告：`Upstream sandbox spec: NATIVELY_PATCHED`。 | **零破坏、零冲突**。<br>用户可继续保留 Toolkit 作为双重防腐保底，亦可随时执行 `uninstall.py` 优雅退场。 |
+| **场景 B：官方常规业务更新**<br>(新增模型、更新 UI 等，但未修复底层缺陷) | Toolkit 后台守护与动态接缝继续透明无感生效，阻断规则膨胀与日志无限吃盘。 | **无感自愈**。<br>完全不受影响，正常使用即可。 |
+| **场景 C：官方破坏性重构**<br>(彻底废弃沙盒架构、修改 IPC Socket 路径或变更协议格式) | 1. **Fail-Safe 快速熔断**：所有 IPC 调用均设置 1.5s 硬超时与静默降级，绝不会卡死终端或中断构建任务。<br>2. **主动体检预警**：`wb-doctor` 会明确标黄/标红捕获：`IPC_MISMATCH` / `DAEMON_NOT_FOUND`，向用户打印清晰的升级排查指引。 | **拒绝不知情**。<br>`wb-doctor` 第一时间精准指出异常；用户可一键回退原生，或等待 Toolkit 发布适配版本。 |
+
+---
+
+### 3. 如何自检冲突与秒级安全回退？
+
+#### 🔍 冲突检测与版本体检（一键诊断）
+升级 WorkBuddy 后，随时在终端执行：
+```bash
+workbuddy doctor   # 或别名 wb-doctor
+```
+`doctor` 会全方位输出上游规格、运行时状态与冲突预警：
+```text
+=== WorkBuddy Toolkit Doctor ===
+
+Auth file             : OK (~/Library/.../workbuddy-desktop.info)
+Credential format     : encrypted
+Encrypted scheme      : detected (sym-v1 / suite 1)
+WorkBuddy runtime     : FOUND (/Applications/WorkBuddy.app/Contents/MacOS/Electron)
+WorkBuddy version     : 5.6.2
+Credential resolver   : AVAILABLE (Electron 37.10.3)
+Profile count         : 3
+API capability        : READY
+Upstream sandbox spec : VULNERABLE (Upstream 5.6.10 omits macOS temp rules; sidecar heal active)
+Sandbox & Seatbelt    : HEALTHY (48 rules, temp wildcards active)
+Log guard daemon      : ACTIVE (LaunchAgent loaded, 1800s periodic watch)
+Cargo sccache reuse   : CONFIGURED (sccache enabled)
+
+RESULT: COMPATIBLE
+
+--- Upstream Compatibility & Safe Rollback ---
+Non-invasive Sidecar  : ACTIVE (Zero app-bundle modifications; 100% fail-safe)
+Conflict Status       : ZERO CONFLICTS DETECTED (Idempotent rules & passive monitoring)
+Rollback Instruction  : Safe 0-residue rollback available anytime via: python3 uninstall.py
+```
+> 若官方协议变更，输出将精准变为 `IPC_MISMATCH` 或 `POTENTIAL DRIFT DETECTED`，并给出即时指引，彻底杜绝用户在不知情状态下盲目运行。
+
+#### ↩️ 安全回退与零残留卸载（0 Residue Rollback）
+若需要临时或永久回退至系统原生状态，直接在 Toolkit 目录运行：
+```bash
+# 跨平台通用 Python 卸载
+python3 uninstall.py
+
+# 或使用系统原生脚本:
+# macOS / Linux : ./uninstall.sh
+# Windows (PS)   : .\uninstall.ps1
+```
+**卸载动作包含**：
+- 秒级注销并删除后台守护服务（macOS `launchd` / Linux `systemd` / Windows 计划任务）；
+- 移除 CLI 软链与 PATH 配置；
+- 还原 `~/.cargo/config.toml`；
+- **系统 100% 还原至纯净原生状态，零进程驻留、零文件污染**。
+
+---
+
 ## 目录
+- [🛡️ 官方更新兼容性、冲突防范与安全回退保障](#️-官方更新兼容性冲突防范与安全回退保障-upstream-compatibility--zero-conflict-guarantee)
 - [一、支持平台与系统要求](#一支持平台与系统要求)
 - [二、架构与底层逆向原理解析](#二架构与底层逆向原理解析)
   - [1. 工作区与会话“假丢失”根因剖析](#1-工作区与会话假丢失根因剖析)

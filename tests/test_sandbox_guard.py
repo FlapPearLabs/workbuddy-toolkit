@@ -288,5 +288,68 @@ class TestSandboxGuard(unittest.TestCase):
             self.assertIn("Cargo sccache reuse", output)
             self.assertIn("CONFIGURED", output)
 
+    def test_doctor_upstream_spec_and_conflict_warnings(self):
+        """Test wb-doctor detects upstream spec natively patched vs vulnerable, and warns on IPC mismatch / unresponsive."""
+        import io
+        from unittest.mock import patch, MagicMock
+        from contextlib import redirect_stdout
+
+        # 1. Test NATIVELY_PATCHED upstream spec
+        mock_spec_patched = {
+            "version": "5.7.0",
+            "has_temp_unix": True,
+            "total_rules": 48
+        }
+        with patch.object(self.cli, "get_upstream_rules_spec", return_value=mock_spec_patched):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.cli.run_doctor()
+            output = buf.getvalue()
+            self.assertIn("Upstream sandbox spec", output)
+            self.assertIn("NATIVELY_PATCHED", output)
+            self.assertIn("ZERO CONFLICTS DETECTED", output)
+
+        # 2. Test IPC_MISMATCH when upstream changed protocol or returned error
+        mock_guard_mismatch = MagicMock()
+        mock_guard_mismatch.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard_mismatch.find_active_uid.return_value = "uid-test"
+        mock_guard_mismatch.send_sandbox_ipc.return_value = {
+            "success": False,
+            "error": "command not found"
+        }
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard_mismatch):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.cli.run_doctor()
+            output = buf.getvalue()
+            self.assertIn("IPC_MISMATCH", output)
+            self.assertIn("POTENTIAL DRIFT DETECTED", output)
+            self.assertIn("uninstall.py", output)
+
+        # 3. Test IPC_UNRESPONSIVE when socket exists but IPC times out (resp is None)
+        mock_guard_unresponsive = MagicMock()
+        mock_guard_unresponsive.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard_unresponsive.find_active_uid.return_value = "uid-test"
+        mock_guard_unresponsive.send_sandbox_ipc.return_value = None
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard_unresponsive):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.cli.run_doctor()
+            output = buf.getvalue()
+            self.assertIn("IPC_UNRESPONSIVE", output)
+            self.assertIn("POTENTIAL DRIFT DETECTED", output)
+
+        # 4. Test DAEMON_NOT_FOUND when GUI is running but no socket in /tmp
+        mock_guard_nogui = MagicMock()
+        mock_guard_nogui.find_sandbox_center_socket.return_value = None
+        mock_guard_nogui.is_workbuddy_gui_running.return_value = True
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard_nogui):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.cli.run_doctor()
+            output = buf.getvalue()
+            self.assertIn("DAEMON_NOT_FOUND", output)
+            self.assertIn("POTENTIAL DRIFT DETECTED", output)
+
 if __name__ == "__main__":
     unittest.main()
