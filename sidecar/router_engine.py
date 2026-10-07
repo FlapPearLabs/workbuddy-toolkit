@@ -377,7 +377,8 @@ class FailoverRouterServer:
                     handler.wfile.write(first_chunk)
                     handler.wfile.flush()
 
-                    # 继续流式透传剩余 Chunks
+                    # 继续流式透传剩余 Chunks (已发送 200 Headers，严禁向已提交的连接发起二次候选轮换)
+                    stream_error = None
                     try:
                         while True:
                             chunk = resp.readline()
@@ -390,15 +391,25 @@ class FailoverRouterServer:
                     except (BrokenPipeError, ConnectionResetError):
                         # 客户端主动断开
                         pass
+                    except Exception as e:
+                        stream_error = e
 
-                    # 成功完成该轮会话，解除该模型冷却
-                    self.clear_cooldown(mid)
-                    append_audit_log({
-                        "timestamp": int(time.time()),
-                        "event": "success",
-                        "model": mid,
-                        "duration_ms": int((time.time() - start_time) * 1000)
-                    })
+                    if stream_error:
+                        append_audit_log({
+                            "timestamp": int(time.time()),
+                            "event": "stream_interrupted",
+                            "model": mid,
+                            "error": str(stream_error)
+                        })
+                    else:
+                        # 成功完成该轮会话，解除该模型冷却
+                        self.clear_cooldown(mid)
+                        append_audit_log({
+                            "timestamp": int(time.time()),
+                            "event": "success",
+                            "model": mid,
+                            "duration_ms": int((time.time() - start_time) * 1000)
+                        })
                     return
 
                 else:

@@ -105,5 +105,9 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-status")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-sandbox")))
 
+        # 验证 ~/.workbuddy/toolkit 伴随组件目录已物理 100% 移除
+        toolkit_path = os.path.join(self.temp_home, ".workbuddy", "toolkit")
+        self.assertFalse(os.path.exists(toolkit_path))
+
 if __name__ == "__main__":
     unittest.main()

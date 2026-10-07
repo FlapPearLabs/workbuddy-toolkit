@@ -140,7 +140,7 @@ lsof +D ~/.workbuddy/logs/sandbox
 
 ```text
 USER       PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
-songshiyao 8921  98.4  2.9  3849120 482508   ??  R    Fri02PM  64:18.92 ~/.workbuddy/.../sandbox-cli-gc
+developer  8921  98.4  2.9  3849120 482508   ??  R    Fri02PM  64:18.92 ~/.workbuddy/.../sandbox-cli-gc
 ```
 *(注：物理常驻内存 RSS 达到 482,508 KB ≈ 471.2 MB，单核 CPU 接近 100%)*
 

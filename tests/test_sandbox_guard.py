@@ -351,5 +351,60 @@ class TestSandboxGuard(unittest.TestCase):
             self.assertIn("DAEMON_NOT_FOUND", output)
             self.assertIn("POTENTIAL DRIFT DETECTED", output)
 
+    def test_send_sandbox_ipc_multiline_json(self):
+        """测试 send_sandbox_ipc 在服务端返回带有内部换行符的格式化 JSON 时不发生提前截断"""
+        if os.name == "nt":
+            self.skipTest("Unix domain sockets not applicable to Windows")
+
+        sock_path = os.path.join(self.temp_dir, "multiline.sock")
+        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server_sock.bind(sock_path)
+        server_sock.listen(1)
+
+        def srv():
+            conn, _ = server_sock.accept()
+            req = conn.recv(1024)
+            # 发送两段带内部换行的 JSON
+            conn.sendall(b"{\n")
+            time.sleep(0.01)
+            conn.sendall(b'  "success": true,\n  "count": 42\n}\n')
+            conn.close()
+
+        th = threading.Thread(target=srv, daemon=True)
+        th.start()
+        try:
+            resp = self.guard.send_sandbox_ipc(sock_path, "test.cmd", {}, timeout=1.0)
+            self.assertIsNotNone(resp)
+            self.assertTrue(resp.get("success"))
+            self.assertEqual(resp.get("count"), 42)
+        finally:
+            server_sock.close()
+
+    def test_clean_session_snapshots_preserves_session_json(self):
+        """测试 clean_session_snapshots 即使在会话超过 TTL 时也严禁删除用户的 session.json 历史元数据"""
+        sessions_dir = os.path.join(self.temp_dir, "hist_sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+
+        old_sess = os.path.join(sessions_dir, "session_with_meta")
+        os.makedirs(old_sess, exist_ok=True)
+        meta_file = os.path.join(old_sess, "session.json")
+        with open(meta_file, "w") as f:
+            f.write(json.dumps({"title": "Critical Chat History"}))
+
+        old_backup = os.path.join(old_sess, "modify_backup")
+        os.makedirs(old_backup, exist_ok=True)
+        with open(os.path.join(old_backup, "old.txt"), "w") as f:
+            f.write("backup")
+
+        old_time = time.time() - (3600 * 200)
+        os.utime(old_sess, (old_time, old_time))
+
+        cleaned, freed = self.guard.clean_session_snapshots(sessions_dir, set(), ttl_hours=72)
+        # modify_backup 应被清除
+        self.assertFalse(os.path.exists(old_backup))
+        # 但会话目录及其 session.json 必须完好无损
+        self.assertTrue(os.path.exists(meta_file))
+        self.assertTrue(os.path.exists(old_sess))
+
 if __name__ == "__main__":
     unittest.main()

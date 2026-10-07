@@ -184,7 +184,7 @@ def clean_session_snapshots(sessions_dir, open_files_set=None, ttl_hours=72, max
         if is_older_than_ttl:
             try:
                 remaining = [f for f in os.listdir(sp) if f != "center.backup.lock"]
-                if not remaining or all(f.endswith(".json") for f in remaining):
+                if not remaining:
                     shutil.rmtree(sp, ignore_errors=True)
                     cleaned_sessions += 1
             except Exception:
@@ -264,9 +264,15 @@ def send_sandbox_ipc(socket_path, command, data, uid="default", timeout=2.0):
             if not chunk:
                 break
             res += chunk
-            if b"\n" in chunk:
-                break
-        return json.loads(res.decode("utf-8"))
+            stripped = res.strip()
+            if stripped.startswith(b"{") and stripped.endswith(b"}"):
+                try:
+                    return json.loads(stripped.decode("utf-8"))
+                except Exception:
+                    pass
+        if res.strip():
+            return json.loads(res.decode("utf-8"))
+        return None
     except Exception:
         return None
     finally:
@@ -277,10 +283,28 @@ def send_sandbox_ipc(socket_path, command, data, uid="default", timeout=2.0):
 
 def find_active_uid():
     """Locates active WorkBuddy user UID from desktop auth info or profiles."""
-    candidates = [
-        os.path.expanduser("~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info"),
-        os.path.expanduser("~/.workbuddy/auth/workbuddy-desktop.info")
-    ]
+    if sys.platform == "darwin":
+        candidates = [
+            os.path.expanduser("~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info"),
+            os.path.expanduser("~/.workbuddy/auth/workbuddy-desktop.info"),
+        ]
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", os.path.expanduser("~\\AppData\\Roaming"))
+        localappdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+        userprofile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+        candidates = [
+            os.path.join(appdata, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info"),
+            os.path.join(localappdata, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info"),
+            os.path.join(userprofile, ".workbuddy", "auth", "workbuddy-desktop.info"),
+        ]
+    else:  # Linux & others
+        config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+        candidates = [
+            os.path.join(config_home, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info"),
+            os.path.join(data_home, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info"),
+            os.path.expanduser("~/.workbuddy/auth/workbuddy-desktop.info"),
+        ]
     for af in candidates:
         if os.path.exists(af):
             try:
@@ -363,7 +387,9 @@ def is_workbuddy_gui_running():
         try:
             import ctypes
             libproc = ctypes.CDLL("libproc.dylib")
-            pids = (ctypes.c_int * 2048)()
+            needed = libproc.proc_listpids(1, 0, None, 0)
+            num_slots = max(2048, (needed // ctypes.sizeof(ctypes.c_int)) + 128) if needed > 0 else 2048
+            pids = (ctypes.c_int * num_slots)()
             bytes_ret = libproc.proc_listpids(1, 0, pids, ctypes.sizeof(pids))
             num_pids = bytes_ret // ctypes.sizeof(ctypes.c_int)
             buf = ctypes.create_string_buffer(1024)
@@ -422,7 +448,7 @@ def reap_orphaned_daemons(protected_keywords=None):
     ONLY IF WorkBuddy GUI is closed AND no protected user workloads or active sandbox sessions are running.
     """
     if protected_keywords is None:
-        protected_keywords = ["zhihu", "zhihugrabber", "cargo"]
+        protected_keywords = ["zhihu", "zhihugrabber", "cargo", "rustc", "gcc", "clang", "ninja", "make", "python", "node", "npm", "vite", "webpack", "go", "pytest"]
 
     if is_workbuddy_gui_running():
         return {"reaped": False, "reason": "gui_running"}
@@ -437,7 +463,9 @@ def reap_orphaned_daemons(protected_keywords=None):
             libproc = ctypes.CDLL("libproc.dylib")
             CTL_KERN = 1
             KERN_PROCARGS2 = 49
-            pids = (ctypes.c_int * 2048)()
+            needed = libproc.proc_listpids(1, 0, None, 0)
+            num_slots = max(2048, (needed // ctypes.sizeof(ctypes.c_int)) + 128) if needed > 0 else 2048
+            pids = (ctypes.c_int * num_slots)()
             bytes_ret = libproc.proc_listpids(1, 0, pids, ctypes.sizeof(pids))
             num_pids = bytes_ret // ctypes.sizeof(ctypes.c_int)
             size = ctypes.c_size_t(0)

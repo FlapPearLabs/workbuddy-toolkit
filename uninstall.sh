@@ -48,10 +48,16 @@ if command -v crontab >/dev/null 2>&1; then
     } || true
 fi
 
-# 2. 移除 Sidecar
+# 2. 移除 Sidecar 与 Toolkit 伴随组件
 if [ -d "$SIDECAR_DIR" ]; then
     rm -rf "$SIDECAR_DIR"
     echo "✔ 已清理 Antigravity Sidecar 任务"
+fi
+
+TOOLKIT_DIR="$HOME/.workbuddy/toolkit"
+if [ -d "$TOOLKIT_DIR" ]; then
+    rm -rf "$TOOLKIT_DIR"
+    echo "✔ 已清理 Toolkit 伴随组件目录 ($TOOLKIT_DIR)"
 fi
 
 # 3. 移除可执行文件
@@ -83,7 +89,9 @@ rm -f "$INSTALL_BIN/wb-sandbox"
 rm -f "$INSTALL_BIN/workbuddy-sandbox"
 echo "✔ 已清理安装的 CLI 脚本"
 
-if [ -t 0 ]; then
+if [[ "$*" == *"-y"* ]] || [[ "$*" == *"--yes"* ]]; then
+    answer="y"
+elif [ -t 0 ]; then
     echo "是否需要同时回滚 SQLite 数据库触发器并恢复官方默认数据隔离？(y/N)"
     read -r answer
 else

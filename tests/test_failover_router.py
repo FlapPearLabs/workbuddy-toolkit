@@ -276,5 +276,36 @@ class TestFailoverRouter(unittest.TestCase):
             if os.path.exists(tmp_mj_path):
                 os.remove(tmp_mj_path)
 
+    def test_07_mid_stream_interruption_no_duplicate_headers(self):
+        """测试流式传输中途中断时不发生二次候选切换与协议污染"""
+        # 设置 upstream1 发送首包后抛出超时
+        self.upstream1.set_mode("hang_timeout")
+        self.router.clear_cooldown("model-primary")
+        self.router.clear_cooldown("model-secondary")
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(('127.0.0.1', self.router_port))
+        req_body = json.dumps({'model': 'model-primary', 'stream': True, 'messages': [{'role': 'user', 'content': 'hi'}]})
+        req_data = f'POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len(req_body)}\r\nContent-Type: application/json\r\n\r\n{req_body}'.encode()
+        sock.sendall(req_data)
+
+        response_bytes = b''
+        sock.settimeout(0.8)
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response_bytes += chunk
+        except Exception:
+            pass
+        finally:
+            sock.close()
+
+        resp_str = response_bytes.decode('utf-8', errors='replace')
+        # 绝不能出现多个 HTTP/1.0 200 或在已提交流中拼接 503
+        self.assertLessEqual(resp_str.count("HTTP/1.0 200 OK"), 1)
+        self.assertNotIn("HTTP/1.0 503", resp_str)
+
 if __name__ == "__main__":
     unittest.main()

@@ -1265,18 +1265,30 @@ def check_profile_health(profile_info, force=False):
         prof_path = profile_info.get("path")
         if prof_path:
             try:
-                with open(prof_path, "w", encoding="utf-8") as f:
-                    json.dump(profile_data, f, indent=2, ensure_ascii=False)
+                prof_tmp = prof_path + ".tmp"
                 if sys.platform != "win32":
-                    os.chmod(prof_path, 0o600)
+                    fd = os.open(prof_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with open(fd, "w", encoding="utf-8") as f:
+                        json.dump(profile_data, f, indent=2, ensure_ascii=False)
+                else:
+                    with open(prof_tmp, "w", encoding="utf-8") as f:
+                        json.dump(profile_data, f, indent=2, ensure_ascii=False)
+                os.replace(prof_tmp, prof_path)
             except Exception:
                 pass
 
         active_data = get_active_account()
         if active_data and active_data.get("account", {}).get("uid") == uid:
             try:
-                with open(AUTH_FILE, "w", encoding="utf-8") as f:
-                    json.dump(profile_data, f, indent=2, ensure_ascii=False)
+                auth_tmp = AUTH_FILE + ".tmp"
+                if sys.platform != "win32":
+                    fd = os.open(auth_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with open(fd, "w", encoding="utf-8") as f:
+                        json.dump(profile_data, f, indent=2, ensure_ascii=False)
+                else:
+                    with open(auth_tmp, "w", encoding="utf-8") as f:
+                        json.dump(profile_data, f, indent=2, ensure_ascii=False)
+                os.replace(auth_tmp, AUTH_FILE)
             except Exception:
                 pass
 
@@ -1602,10 +1614,13 @@ def run_login(alias=None, auto_switch=True, force=False):
     final_alias, is_inplace = resolve_profile_alias_conflict(alias, uid, force=force)
     final_target_path = os.path.join(PROFILES_DIR, f"{final_alias}.info")
 
-    with open(final_target_path, "w", encoding="utf-8") as f:
-        json.dump(profile_data, f, indent=2, ensure_ascii=False)
     if sys.platform != "win32":
-        os.chmod(final_target_path, 0o600)
+        fd = os.open(final_target_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(profile_data, f, indent=2, ensure_ascii=False)
+    else:
+        with open(final_target_path, "w", encoding="utf-8") as f:
+            json.dump(profile_data, f, indent=2, ensure_ascii=False)
 
     cache = get_audit_cache()
     if uid:
@@ -1859,7 +1874,9 @@ def restart_workbuddy():
             subprocess.Popen(["start", "workbuddy"], shell=True)
     else:  # Linux
         try:
-            subprocess.run(["pkill", "-f", "-i", "workbuddy"], stderr=subprocess.DEVNULL)
+            # Linux: target desktop application specifically, avoiding matching CLI scripts or working directories
+            subprocess.run(["pkill", "-x", "workbuddy"], stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", r"/workbuddy(\s|$|/opt)"], stderr=subprocess.DEVNULL)
         except Exception:
             pass
         time.sleep(1.5)
@@ -1933,10 +1950,13 @@ def switch_to_profile(target_name, auto_restart=True, check_health=True):
     print(f"2. 正在激活账号: {COLOR_BOLD}{COLOR_GREEN}{target_name} ({target['nickname']}){COLOR_RESET} ...")
     os.makedirs(os.path.dirname(AUTH_FILE), exist_ok=True)
     tmp_file = AUTH_FILE + ".tmp"
-    with open(tmp_file, "w", encoding="utf-8") as f:
-        json.dump(target["data"], f, indent=2, ensure_ascii=False)
     if sys.platform != "win32":
-        os.chmod(tmp_file, 0o600)
+        fd = os.open(tmp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(target["data"], f, indent=2, ensure_ascii=False)
+    else:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(target["data"], f, indent=2, ensure_ascii=False)
     
     try:
         os.replace(tmp_file, AUTH_FILE)
@@ -2261,10 +2281,13 @@ def run_checkin(target_name=None, with_chat=True):
                 idx += 1
             auto_path = os.path.join(PROFILES_DIR, f"{cand}.info")
             try:
-                with open(auto_path, "w", encoding="utf-8") as f:
-                    json.dump(active_data, f, indent=2, ensure_ascii=False)
                 if sys.platform != "win32":
-                    os.chmod(auto_path, 0o600)
+                    fd = os.open(auto_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with open(fd, "w", encoding="utf-8") as f:
+                        json.dump(active_data, f, indent=2, ensure_ascii=False)
+                else:
+                    with open(auto_path, "w", encoding="utf-8") as f:
+                        json.dump(active_data, f, indent=2, ensure_ascii=False)
                 print(f"{COLOR_GREEN}✔ 检测到新登录账号，已自动保存 Profile: '{cand}' (昵称: {nickname}){COLOR_RESET}")
                 profiles = get_profiles()
             except Exception:
@@ -2483,10 +2506,13 @@ def save_current(name, force=False):
 
     final_name, is_inplace = resolve_profile_alias_conflict(name, uid, force=force)
     target_path = os.path.join(PROFILES_DIR, f"{final_name}.info")
-    with open(target_path, "w", encoding="utf-8") as f:
-        json.dump(active_data, f, indent=2, ensure_ascii=False)
     if sys.platform != "win32":
-        os.chmod(target_path, 0o600)
+        fd = os.open(target_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(active_data, f, indent=2, ensure_ascii=False)
+    else:
+        with open(target_path, "w", encoding="utf-8") as f:
+            json.dump(active_data, f, indent=2, ensure_ascii=False)
     if is_inplace:
         print(f"{COLOR_GREEN}✔ 当前登录态已在位平滑更新至 Profile: '{final_name}' (昵称: {nickname}, UID: {uid}){COLOR_RESET}")
     else:

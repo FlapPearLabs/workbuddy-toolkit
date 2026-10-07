@@ -16,4 +16,4 @@ if (-not $Python) {
 }
 
 $UninstallPy = Join-Path $ScriptDir "uninstall.py"
-& $Python.Source $UninstallPy
+& $Python.Source $UninstallPy @args

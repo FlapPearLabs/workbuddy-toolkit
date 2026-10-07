@@ -94,11 +94,16 @@ def uninstall():
             except Exception:
                 pass
 
-    # 2. 清理 Sidecar
+    # 2. 清理 Sidecar 与 Toolkit 伴随组件
     sidecar_dir = os.path.join(HOME, ".gemini", "config", "sidecars", "workbuddy-checkin")
     if os.path.exists(sidecar_dir):
         shutil.rmtree(sidecar_dir, ignore_errors=True)
         print(f"{COLOR_GREEN}✔ 已清理 Antigravity Sidecar 任务{COLOR_RESET}")
+
+    toolkit_dir = os.path.join(WORKBUDDY_DIR, "toolkit")
+    if os.path.exists(toolkit_dir):
+        shutil.rmtree(toolkit_dir, ignore_errors=True)
+        print(f"{COLOR_GREEN}✔ 已清理 Toolkit 伴随组件目录 ({toolkit_dir}){COLOR_RESET}")
 
     # 3. 移除可执行文件
     if sys.platform == "win32":
@@ -106,6 +111,19 @@ def uninstall():
         if os.path.exists(bin_dir):
             shutil.rmtree(bin_dir, ignore_errors=True)
             print(f"{COLOR_GREEN}✔ 已删除 Windows CLI 安装目录及垫片 ({bin_dir}){COLOR_RESET}")
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+                try:
+                    cur_path, _ = winreg.QueryValueEx(key, "Path")
+                    paths = [p for p in cur_path.split(";") if p and p.lower() != bin_dir.lower()]
+                    new_path = ";".join(paths)
+                    winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+                    print(f"{COLOR_GREEN}✔ 已从用户 PATH 环境变量移除 {bin_dir}{COLOR_RESET}")
+                except FileNotFoundError:
+                    pass
+        except Exception:
+            pass
     else:
         bin_dir = os.path.join(HOME, ".local", "bin")
         for name in [

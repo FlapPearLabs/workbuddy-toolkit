@@ -40,3 +40,4 @@ Icon
 *.swp
 *.swo
 *~
+.agents/
