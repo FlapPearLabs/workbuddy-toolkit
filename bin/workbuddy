@@ -467,15 +467,32 @@ def run_native_resolver(runtime_exe, request_payload):
 
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
+    popen_kwargs = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "env": clean_env,
+        "shell": False,
+        "close_fds": True,
+        "creationflags": creationflags
+    }
+    if os.name == "posix":
+        def _harden_child():
+            try:
+                import resource
+                resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+            except Exception:
+                pass
+            try:
+                os.umask(0o077)
+            except Exception:
+                pass
+        popen_kwargs["preexec_fn"] = _harden_child
+
     try:
         proc = subprocess.Popen(
             [runtime_exe, "-e", AUTH_HELPER_JS],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=clean_env,
-            shell=False,
-            creationflags=creationflags
+            **popen_kwargs
         )
     except OSError:
         raise CredentialError("RUNTIME_UNAVAILABLE")

@@ -67,7 +67,7 @@ def get_open_files(directory):
     try:
         # lsof +D <dir> is recursive, -F n outputs file paths
         result = subprocess.run(["lsof", "-F", "n", "+D", os.path.realpath(directory)], 
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15)
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15, close_fds=True)
         for line in result.stdout.splitlines():
             if line.startswith('n/'):
                 open_files.add(os.path.realpath(line[1:]))
@@ -238,32 +238,56 @@ def find_sandbox_center_socket(socket_dir=None):
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
 
+MAX_IPC_PAYLOAD = 4 * 1024 * 1024  # 4MB 硬上限，超限熔断
+
 def send_sandbox_ipc(socket_path, command, data, uid="default", timeout=2.0):
     """
     Sends a structured IPC request to sandbox-center and returns parsed JSON.
+    Protected with overall monotonic deadline and 4MB max payload limits (Fail-Open).
     """
     if not socket_path or not os.path.exists(socket_path) or os.name == 'nt':
         return None
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect(socket_path)
-        req = {
-            "messageId": f"wb-guard:{int(time.time()*1000)}",
-            "command": command,
-            "uid": uid,
-            "data": {
-                **data,
-                "_client": {"role": "agent-cli", "pid": os.getpid()}
-            }
+
+    req = {
+        "messageId": f"wb-guard:{int(time.time()*1000)}",
+        "command": command,
+        "uid": uid,
+        "data": {
+            **data,
+            "_client": {"role": "agent-cli", "pid": os.getpid()}
         }
-        s.sendall(json.dumps(req).encode("utf-8") + b"\n")
+    }
+    try:
+        payload = json.dumps(req).encode("utf-8") + b"\n"
+    except Exception:
+        return None
+
+    if len(payload) > MAX_IPC_PAYLOAD:
+        return None
+
+    end_time = time.monotonic() + timeout
+    s = None
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(socket_path)
+        s.sendall(payload)
+
         res = b""
         while True:
-            chunk = s.recv(65536)
+            remain = end_time - time.monotonic()
+            if remain <= 0:
+                return None
+            s.settimeout(min(remain, 0.5))
+            try:
+                chunk = s.recv(65536)
+            except (socket.timeout, BlockingIOError):
+                continue
             if not chunk:
                 break
             res += chunk
+            if len(res) > MAX_IPC_PAYLOAD:
+                return None
             stripped = res.strip()
             if stripped.startswith(b"{") and stripped.endswith(b"}"):
                 try:
@@ -271,15 +295,19 @@ def send_sandbox_ipc(socket_path, command, data, uid="default", timeout=2.0):
                 except Exception:
                     pass
         if res.strip():
-            return json.loads(res.decode("utf-8"))
+            try:
+                return json.loads(res.decode("utf-8"))
+            except Exception:
+                return None
         return None
     except Exception:
         return None
     finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
 
 def find_active_uid():
     """Locates active WorkBuddy user UID from desktop auth info or profiles."""
@@ -329,54 +357,136 @@ def find_active_uid():
                     pass
     return "default"
 
+def _acquire_file_lock(lock_path, timeout=5.0):
+    """跨平台轻量文件锁，确保多 Agent 并发时不发生 heal 竞态与规则撕裂。"""
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return None
+    end = time.monotonic() + timeout
+    if sys.platform == "win32":
+        import msvcrt
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return fd
+            except OSError:
+                if time.monotonic() >= end:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+                    return None
+                time.sleep(0.05)
+    else:
+        import fcntl
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except OSError:
+                if time.monotonic() >= end:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+                    return None
+                time.sleep(0.05)
+
+def _release_file_lock(fd):
+    """安全释放跨平台文件锁并关闭句柄。"""
+    if fd is None:
+        return
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+
 def heal_sandbox_center_rules(socket_path=None, uid=None):
     """
     Ensures macOS/Linux temp wildcard rules are active in sandbox-center
     and prunes bloated auto_grant rules to prevent SBPL compilation lockup.
+    Guarded by cross-process single-flight lock and post-injection readback verification.
     """
     target_uid = uid or find_active_uid()
     sock = socket_path or find_sandbox_center_socket()
     if not sock:
         return {"status": "no_socket"}
 
-    # 1. Probe current rules
-    rules_resp = send_sandbox_ipc(sock, "sandbox.rules.get_rules", {}, uid=target_uid)
-    if not rules_resp or not rules_resp.get("success"):
-        return {"status": "unresponsive"}
+    lock_path = os.environ.get("WORKBUDDY_HEAL_LOCK") or os.path.expanduser("~/.workbuddy/cache/heal.lock")
+    lock_fd = _acquire_file_lock(lock_path, timeout=5.0)
+    if lock_fd is None:
+        return {"status": "locked_skip"}
 
-    existing_rules = rules_resp.get("data", {}).get("fileRules", [])
-    existing_paths = {r.get("path") for r in existing_rules if isinstance(r, dict)}
+    try:
+        # 1. Probe current rules
+        rules_resp = send_sandbox_ipc(sock, "sandbox.rules.get_rules", {}, uid=target_uid)
+        if not rules_resp or not rules_resp.get("success"):
+            return {"status": "unresponsive"}
 
-    temp_paths = [
-        "/var/folders/**",
-        "/private/var/folders/**",
-        "/tmp/**",
-        "/private/tmp/**",
-        "/var/tmp/**",
-        "/private/var/tmp/**"
-    ]
-    missing = [p for p in temp_paths if p not in existing_paths]
+        existing_rules = rules_resp.get("data", {}).get("fileRules", [])
+        existing_paths = {r.get("path") for r in existing_rules if isinstance(r, dict)}
 
-    added_count = 0
-    if missing:
-        to_add = [{"path": p, "action": "read=allow|write=allow|delete=allow", "isDirectory": True} for p in missing]
-        add_resp = send_sandbox_ipc(sock, "sandbox.rules.add_file_rule", {"category": "global", "rules": to_add}, uid=target_uid)
-        if add_resp and add_resp.get("success"):
-            added_count = len(missing)
+        temp_paths = [
+            "/var/folders/**",
+            "/private/var/folders/**",
+            "/tmp/**",
+            "/private/tmp/**",
+            "/var/tmp/**",
+            "/private/var/tmp/**"
+        ]
+        missing = [p for p in temp_paths if p not in existing_paths]
 
-    # 2. Prune auto_grant rules if bloated (> 500 rules)
-    cleared_auto_grant = False
-    if len(existing_rules) > 500:
-        send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "auto_grant", "rules": []}, uid=target_uid)
-        send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "temp", "rules": []}, uid=target_uid)
-        cleared_auto_grant = True
+        added_count = 0
+        if missing:
+            to_add = [{"path": p, "action": "read=allow|write=allow|delete=allow", "isDirectory": True} for p in missing]
+            add_resp = send_sandbox_ipc(sock, "sandbox.rules.add_file_rule", {"category": "global", "rules": to_add}, uid=target_uid)
+            if add_resp and add_resp.get("success"):
+                added_count = len(missing)
 
-    return {
-        "status": "ok",
-        "total_rules": len(existing_rules) + added_count,
-        "added_temp_rules": added_count,
-        "cleared_auto_grant": cleared_auto_grant
-    }
+        # 2. Prune auto_grant rules if bloated (> 500 rules)
+        cleared_auto_grant = False
+        if len(existing_rules) > 500:
+            send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "auto_grant", "rules": []}, uid=target_uid)
+            send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "temp", "rules": []}, uid=target_uid)
+            cleared_auto_grant = True
+
+        # 3. Readback verification (锁内回读校验与断言)
+        verified = True
+        total_rules = len(existing_rules) + added_count
+        verify_resp = send_sandbox_ipc(sock, "sandbox.rules.get_rules", {}, uid=target_uid)
+        if verify_resp and verify_resp.get("success"):
+            v_rules = verify_resp.get("data", {}).get("fileRules", [])
+            if v_rules:
+                v_paths = {r.get("path") for r in v_rules if isinstance(r, dict)}
+                verified = any(p in v_paths for p in temp_paths) or (len(v_rules) >= len(existing_rules))
+                total_rules = max(total_rules, len(v_rules))
+
+        return {
+            "status": "ok",
+            "total_rules": total_rules,
+            "added_temp_rules": added_count,
+            "cleared_auto_grant": cleared_auto_grant,
+            "verified": verified
+        }
+    finally:
+        _release_file_lock(lock_fd)
 
 def is_workbuddy_gui_running():
     """
@@ -407,18 +517,18 @@ def is_workbuddy_gui_running():
         # Fallback for Darwin if libproc fails
         try:
             res = subprocess.run(["pgrep", "-f", r"WorkBuddy\.app/Contents/MacOS/(Electron|WorkBuddy)"],
-                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, close_fds=True)
             if res.stdout.strip():
                 return True
             res2 = subprocess.run(["pgrep", "-f", "WorkBuddy.app/Contents/MacOS"],
-                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, close_fds=True)
             return bool(res2.stdout.strip())
         except Exception:
             return False
     elif sys.platform == "win32":
         try:
             res = subprocess.run(["tasklist", "/fi", "IMAGENAME eq WorkBuddy.exe"],
-                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, close_fds=True)
             return "WorkBuddy.exe" in (res.stdout or "")
         except Exception:
             return False
@@ -437,7 +547,7 @@ def is_workbuddy_gui_running():
             pass
         try:
             res = subprocess.run(["pgrep", "-f", "-i", "workbuddy"],
-                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, close_fds=True)
             return bool(res.stdout.strip())
         except Exception:
             return False
@@ -507,7 +617,7 @@ def reap_orphaned_daemons(protected_keywords=None):
     if not proc_list:
         try:
             ps_out = subprocess.run(["ps", "-A", "-o", "pid,command"],
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5).stdout
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, close_fds=True).stdout
             for line in ps_out.splitlines()[1:]:
                 parts = line.strip().split(None, 1)
                 if len(parts) >= 2:

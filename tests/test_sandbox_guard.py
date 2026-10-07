@@ -406,5 +406,81 @@ class TestSandboxGuard(unittest.TestCase):
         self.assertTrue(os.path.exists(meta_file))
         self.assertTrue(os.path.exists(old_sess))
 
+    def test_send_sandbox_ipc_deadline_and_max_payload(self):
+        """测试 send_sandbox_ipc 在面对慢连接/无响应服务时严格受总体 deadline 保护并 Fail-Open"""
+        if os.name == "nt":
+            self.skipTest("Unix domain sockets not applicable to Windows")
+
+        sock_path = os.path.join(self.temp_dir, "slow_srv.sock")
+        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server_sock.bind(sock_path)
+        server_sock.listen(1)
+
+        def slow_srv():
+            conn, _ = server_sock.accept()
+            # 持续极慢发送不换行垃圾字节，模拟慢连接攻击
+            try:
+                for _ in range(20):
+                    conn.sendall(b"x" * 10)
+                    time.sleep(0.1)
+            except Exception:
+                pass
+            finally:
+                conn.close()
+
+        th = threading.Thread(target=slow_srv, daemon=True)
+        th.start()
+        try:
+            start_t = time.monotonic()
+            resp = self.guard.send_sandbox_ipc(sock_path, "slow.cmd", {}, timeout=0.3)
+            elapsed = time.monotonic() - start_t
+            # 必须 Fail-Open 返回 None
+            self.assertIsNone(resp)
+            # 耗时必须严格受 0.3s deadline 约束（允许 0.25s 误差以内，绝对不能挂住数秒）
+            self.assertLess(elapsed, 0.8)
+        finally:
+            server_sock.close()
+
+    def test_heal_sandbox_center_rules_single_flight_lock(self):
+        """测试 heal_sandbox_center_rules 在并发执行时由跨进程文件锁保护，避免规则撕裂"""
+        lock_file = os.path.join(self.temp_dir, "test_heal.lock")
+        old_env = os.environ.get("WORKBUDDY_HEAL_LOCK")
+        os.environ["WORKBUDDY_HEAL_LOCK"] = lock_file
+
+        try:
+            # 1. 模拟先行进程已获取独占锁
+            fd = self.guard._acquire_file_lock(lock_file, timeout=1.0)
+            self.assertIsNotNone(fd)
+
+            # 2. 第二个并发调用应立即返回 locked_skip，绝不引发未捕获异常或撕裂
+            res = self.guard.heal_sandbox_center_rules(socket_path="/nonexistent/sock")
+            self.assertEqual(res.get("status"), "locked_skip")
+
+            # 3. 释放锁
+            self.guard._release_file_lock(fd)
+        finally:
+            if old_env is not None:
+                os.environ["WORKBUDDY_HEAL_LOCK"] = old_env
+            else:
+                os.environ.pop("WORKBUDDY_HEAL_LOCK", None)
+
+    def test_run_native_resolver_hardening_close_fds_and_rlimit(self):
+        """测试 run_native_resolver 启动 Node/Electron 子进程时显式开启 close_fds=True 与 RLIMIT_CORE 约束"""
+        with unittest.mock.patch("subprocess.Popen") as mock_popen:
+            mock_proc = unittest.mock.MagicMock()
+            mock_proc.communicate.return_value = (json.dumps({"version": 1, "ok": True, "value": "decrypted"}).encode("utf-8"), b"")
+            mock_proc.returncode = 0
+            mock_popen.return_value = mock_proc
+
+            with unittest.mock.patch.object(self.cli, "find_workbuddy_runtime", return_value="/bin/echo"):
+                res = self.cli.run_native_resolver("/bin/echo", {"operation": "decrypt", "value": "test"})
+                self.assertEqual(res.get("value"), "decrypted")
+                self.assertTrue(mock_popen.called)
+                _, kwargs = mock_popen.call_args
+                self.assertTrue(kwargs.get("close_fds"))
+                if os.name == "posix":
+                    self.assertIn("preexec_fn", kwargs)
+                    self.assertTrue(callable(kwargs["preexec_fn"]))
+
 if __name__ == "__main__":
     unittest.main()

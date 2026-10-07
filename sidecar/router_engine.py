@@ -33,7 +33,7 @@ def send_macos_notification(title: str, message: str):
             clean_title = title.replace('"', '\\"')
             clean_msg = message.replace('"', '\\"')
             cmd = f'display notification "{clean_msg}" with title "{clean_title}"'
-            subprocess.run(["osascript", "-e", cmd], capture_output=True, timeout=3)
+            subprocess.run(["osascript", "-e", cmd], capture_output=True, timeout=3, close_fds=True)
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
