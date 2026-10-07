@@ -2682,7 +2682,7 @@ def run_doctor():
     print(f"API capability        : {api_status}")
 
     # Check 4.5: Upstream Sandbox Spec (检测官方包是否已原生补齐规则)
-    upstream_spec = get_upstream_rules_spec(runtime_path) if runtime_found else None
+    upstream_spec = get_upstream_rules_spec(runtime_path)
     if upstream_spec:
         spec_ver = upstream_spec.get("version", "unknown")
         if upstream_spec.get("has_temp_unix"):
