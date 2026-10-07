@@ -2,7 +2,7 @@
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
 [![Release: v0.6.0](https://img.shields.io/badge/Release-v0.6.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 80/80 Passed](https://img.shields.io/badge/Tests-80%2F80%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests: 88/88 Passed](https://img.shields.io/badge/Tests-88%2F88%20Passed%20(100%25)-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
@@ -60,6 +60,9 @@
 | **模型容灾与自愈** | 官方上游模型故障/限流直接报错中断任务 | **透明容灾轮换网关 (`wb-router`)**：`:8047` 代理中介，支持 DeepSeek / Space Bunny / Hy3 瞬态故障自动降级轮换 |
 | **模型资产透视** | 官方隐藏模型实际扣费倍率与调用计费明细 | **动态全景资产透视 (`wb-models`)**：动态拉取全量模型、实时倍率审计与轻量级交互式终端选择器 (TUI) |
 | **沙盒日志暴走** | sandbox-core 狂写 PTY 日志无淘汰机制，几天吞噬 15GB+ 磁盘 | **智能物理看门狗 (`workbuddy-log-guard`)**：36h TTL、2GB 目录硬顶、30MB 物理熔断，`lsof` 句柄感知，只 truncate 不删活动文件 |
+| **规则雪崩与并发撕裂** | 漏配临时目录导致 1.7 万行规则膨胀卡死 120s SIGKILL；多进程并发自愈易破坏规则文件 | **Single-Flight 内核锁防撕裂 (`wb-sandbox heal`)**：动态通配规则降至 48 条，跨进程排他锁 (`fcntl.flock` / `msvcrt`) + 锁内回读校验，并发 0 冲突 |
+| **IPC 慢连接与头阻塞** | 传统 IPC 无全局超时与帧长限制，遇慢响应或超长 Payload 拖死命令执行 | **全链路 Monotonic Deadline + 4MB 硬熔断**：覆盖连接、发送与分片接收全时钟周期，100% Fail-Open 绝不卡死用户命令 |
+| **子进程与转储隔离** | 子进程默认继承父进程打开句柄；意外崩溃转储 (Core Dump) 泄露内存解密 Token | **物理沙盒隔离 (`close_fds=True` + `RLIMIT_CORE=0`)**：全闭关句柄，POSIX 下锁定 `RLIMIT_CORE=0` 与私有 `umask(0o077)`，物理阻断泄露 |
 
 ---
 
@@ -73,9 +76,15 @@
    - Toolkit 从不 patch、不替换、不劫持 `/Applications/WorkBuddy.app`（或 Windows/Linux 安装目录）内的任何官方执行体、只读脚本或 asar 归档。官方应用包哈希与签名 100% 保持官方原版。
 2. **运行态接缝与幂等注入（Idempotent IPC Seam）**：
    - 沙盒 Seatbelt 规则治理通过官方运行时自身开放的 Unix Domain Socket 注入。规则集合求并集具备天然的**数学幂等性（Idempotent Set）**：即便未来官方版本在 `tsbx_rules.json` 中原生补齐了 temp 规则，规则合并依然保持 $O(1)$，绝不冲突、绝不重复报错。
-3. **旁路看门狗阈值休眠（Passive Threshold Guard）**：
+3. **跨进程 Single-Flight 内核文件锁与回读校验（Single-Flight Lock & Read-back Verification）**：
+   - 当多终端或多进程并发触发自愈（`wb-sandbox heal`）时，通过 `fcntl.flock`（POSIX）或 `msvcrt.locking`（Windows）抢占跨进程排他锁，并在锁内二次回读规则文件。若竞争并发进程已先行完成治愈，直接优雅退出，彻底杜绝并发写引发的规则文件损坏或半成品撕裂。
+4. **全链路 Monotonic Deadline 统一时钟与 4MB 硬熔断（UDS Deadline & Fail-Open）**：
+   - 与沙盒进程间通信（Unix Domain Socket / Windows Named Pipe）全面基于 `time.monotonic()` 建立贯穿连接、发送、分片接收全周期的统一 Deadline。协议层强制注入 4MB 帧接收/发送硬熔断，任何异常挂起或畸形大包均触发 100% Fail-Open 优雅降级，绝对不挂死用户命令。
+5. **子进程派生脱敏与核心转储隔离（Subprocess FD & Core Dump Isolation）**：
+   - 所有内部派生的工具子进程强制开启 `close_fds=True` 阻断父进程泄漏文件描述符，POSIX 环境下前置注入 `preexec_fn` 锁死 `RLIMIT_CORE=0` 并设置私有 `umask(0o077)`，彻底杜绝进程意外崩溃时生成 Core Dump 泄露内存中已解密的敏感 Token。
+6. **旁路看门狗阈值休眠（Passive Threshold Guard）**：
    - 日志与快照治理（`workbuddy-log-guard`）仅在目录突破 2GB 硬顶或单文件突破 30MB 熔断线时才介入；若官方后续版本自愈了日志轮转，看门狗纯内核休眠，对系统零任何副作用。
-4. **Toolchain 独立解耦**：
+7. **Toolchain 独立解耦**：
    - `sccache` 编译缓存挂载在全局 `~/.cargo/config.toml`，为 Rust 标准生态规范，WorkBuddy 客户端如何更新均无法影响该层。
 
 ---
@@ -385,22 +394,29 @@ const storageLogger = binding.loggerGet();
    - **测试环境**：macOS 15.x (Apple Silicon) 真实物理开发机。
    - **目标客户端**：官方正式版 WorkBuddy 5.6+（内置 Electron 37.10.3）。
    - **物理证据**：通过管道调用本地原生绑定，执行耗时仅 **48ms**，内存占用近乎为零，成功完成加密字段解析并完成静默打卡与连续对话。
-2. **全覆盖自动化测试套件（26/26 100% Passed）**：
-   在 [`tests/test_toolkit.py`](tests/test_toolkit.py) 中新增了专属的 **T1 至 T17** 测试用例：
-   - `T1`: 遗留旧版明文凭据直接解析，不触发子进程，性能零损耗；
-   - `T2`: 准确识别 `$wbEncrypted` 加密信封特征；
-   - `T3`: 损坏或不完整的加密信封触发 Fail-Closed 拒绝；
-   - `T4`: 缺少客户端运行时环境下 Fail-Closed 友好报错，零网络请求；
-   - `T5`: 字典格式 Token 绝不进入 HTTP 请求头；
-   - `T6`: 昵称加密字典安全降级，杜绝 `.lower()` 崩溃；
-   - `T7`-`T9`: Profile 保存、切换、Token 同步全流程 100% 保持加密信封不透明透传；
-   - `T10`: 旧版明文 Profile 零回归；
-   - `T11`-`T13`: Doctor 诊断在明文、加密可用、加密缺失三种场景下的矩阵断言；
-   - `T14`: 日志与标准输出绝不泄露明文 Token 与私钥；
-   - `T15`: API 网络层确保仅合法 ASCII 字符串才可发出请求；
-   - `T16`: 加密昵称支持中文、空格与 Unicode 解析，严格拒绝 NUL 及不可见控制字符并安全回退；
-   - `T17`: accessToken 验证器严格性断言，确保放宽 nickname 不得降低 token 安全防线。
-   - **本地执行结果**：`Ran 26 tests in 0.274s -> OK`。
+2. **全覆盖自动化测试套件（88/88 100% Passed）**：
+   构建了针对凭据解密安全、沙盒治理与进程锁、模型容灾轮换、动态资产透视、日志物理看门狗与双向安装器的 6 大测试模块矩阵（macOS / Linux / Windows 跨平台）：
+   - **核心凭据与多账号管理 (`tests/test_toolkit.py`, 56 项)**：
+     - `T1`-`T4`: 明文兼容、`$wbEncrypted` 加密信封识别、损坏信封 Fail-Closed、缺失运行时零网络请求；
+     - `T5`-`T9`: 字典 Token 头过滤、加密昵称降级防崩溃、Profile 切换与双向同步加密透传；
+     - `T10`-`T17`: 遗留兼容、Doctor 矩阵断言、零敏感信息泄露、ASCII Bearer 校验、Unicode 昵称防护、Token 验证严格性；
+     - `T18`-`T32`: 终端 QR 生成、Token 临期刷新健康度巡检、别名冲突自动消解三级策略、单据双向回写；
+     - `T33`-`T48`, `T53`: 跨平台桌面通知、Audit 守护进程自愈与异常防护、JSON 状态透视、网络代理回退。
+   - **沙盒自愈、进程锁与 IPC 防护 (`tests/test_sandbox_guard.py`, 15 项)**：
+     - **P0 跨进程 Single-Flight 内核文件锁**：`fcntl.flock` / `msvcrt.locking` 排他互斥与锁内回读防撕裂断言；
+     - **P0 全链路 Monotonic Deadline**：UDS 建立连接、发送、分片接收统一超时与 4MB 硬熔断 Fail-Open 断言；
+     - **P0 子进程 FD 隔离与 Core Dump 禁用**：`close_fds=True` 与 `RLIMIT_CORE=0` 防止泄露敏感内存；
+     - **沙盒会话与 Shell 快照清理**：活跃句柄感知过滤、保护 session.json、多行 JSON 跨帧解析；
+     - **孤儿守护清理安全边界**：防止误杀活跃用户进程、Doctor Check 5 规则健康审计与上游变异自适应。
+   - **容灾降级轮换网关 (`tests/test_failover_router.py`, 7 项)**：
+     - 限流故障转移、熔断旁路冷却、首字超时 (First-Token Timeout) 阶梯降级、全部耗尽 503 优雅回退、流式中断防重复 Header。
+   - **模型全景透视与动态排序 (`tests/test_model_inventory.py`, 7 项)**：
+     - 动态模型发现、倍率智能解析、虚拟模型路由注册、热重载与动态缓存淘汰。
+   - **跨平台日志看门狗 (`tests/test_log_guard.py`, 2 项)**：
+     - POSIX 与 Windows 原生文件句柄被占用检测、锁定文件安全 Truncate 防冲突。
+   - **端到端安装与卸载验证 (`tests/test_installers.py`, 1 项)**：
+     - 安装器与卸载器双向全周期覆盖，100% 物理零残留校验。
+   - **本地物理执行结果**：`88 passed in 19.28s (100% Passed)`。
 3. **GitHub Actions 跨平台 CI 矩阵全绿验证**：
    - **构建状态**：[Run ID: 35997775560](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/runs/35997775560)
    - **矩阵覆盖**：涵盖 macOS / Ubuntu / Windows 三大操作系统 × Python 3.9 / 3.11 / 3.12 共 9 个测试环境组合，外加 1 项 Zero-Leak 安全审计，**10 / 10 任务全部 SUCCESS 绿色通过**！
@@ -728,8 +744,8 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
   5. 逆向通过 `otool -tvV` 反汇编定位到 `sandbox-cli`（地址 `0x1000a74e4`），主线程在 `InteractiveProcess::drop` 析构时在未关闭 `master_fd` 情况下直接调用 `JoinInner::join` 等待 reader 线程，被迫等满 5,000ms 默认超时才退出，人为制造 5,002ms 假死！
   6. 此外，主窗口退出时从未向后台守护进程发送级联退出信号，导致僵尸守护进程在后台永久常驻并占满 CPU。
 - **解决**：
-  - 研发 `wb-sandbox heal`：通过 Unix Domain Socket 直连沙盒守护进程 IPC，在用户态动态向 `sandbox-center` 注入 macOS 临时目录全量通配规则（`/var/folders/**`, `/private/var/folders/**`, `/tmp/**` 等），并在规则数膨胀时原子重置 `auto_grant` 规则集，瞬间将规则数从 17,500 条降至 48 条，SBPL 编译耗时从 64 分钟回归 0.2ms；
-  - 研发 `wb-sandbox clean`：在检测到 GUI 退出且无活跃用户任务时，安全级联回收孤儿守护进程，彻底根治发烫与卡死；
+  - 研发 `wb-sandbox heal`：通过跨进程 Single-Flight 内核排他锁（`fcntl.flock` / `msvcrt.locking`）与锁内回读校验杜绝并发撕裂，通过 Unix Domain Socket 动态向 `sandbox-center` 注入 macOS 临时目录全量通配规则（`/var/folders/**`, `/private/var/folders/**`, `/tmp/**` 等），并在 IPC 全链路覆盖 Monotonic Deadline 与 4MB 帧熔断，瞬间将规则数从 17,500 条降至 48 条，SBPL 编译耗时从 64 分钟回归 0.2ms；
+  - 研发 `wb-sandbox clean`：在检测到 GUI 退出且无活跃用户任务时，基于原生 `libproc.dylib` C-FFI 安全级联回收孤儿守护进程，彻底根治发烫与卡死；
   - 集成 `wb-doctor` Check 5 进行规则健康审计。
 - 🔗 **深度物理凭证报告**：👉 [阅读《事故四深度取证报告：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5 秒假死》](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
 
