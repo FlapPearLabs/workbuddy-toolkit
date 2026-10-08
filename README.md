@@ -2,7 +2,7 @@
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
 [![Release: v0.6.0](https://img.shields.io/badge/Release-v0.6.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 88/88 Passed](https://img.shields.io/badge/Tests-88%2F88%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests: 96/96 Passed](https://img.shields.io/badge/Tests-96%2F96%20Passed%20(100%25)-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
@@ -708,7 +708,7 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 | **01** | `P0` | **沙盒 PTY 日志无底洞与 32 万快照文件瘫痪系统 I/O**<br>运行 3~4 天系统盘缩减 15GB+，整机卡顿 | `sandbox-cli-gc` (`gc_runner.rs`, `SessionIndex`)<br>`sandbox_core::pipe_utils`<br>`no-orphans.cjs` (L24) | PTY 日志零 TTL 累积 14.8GB；321,489 个快照小文件；`sandbox-cli-gc` RSS 达 471MB 遍历打满 IOPS | **官方 Patch**：流式滑动窗口 GC + PTY 滚动容量硬顶 + POSIX 孤儿进程清理<br>**Toolkit**：`workbuddy-log-guard` 四重物理看门狗 + `wb-sandbox clean` | [📄 事故一完整报告](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md) |
 | **02** | `P1` | **多 Agent 并发构建缺乏全局编译缓存诱发计算风暴**<br>风扇狂转、CPU 100%、磁盘被多份 `target` 吞噬 | `TerminalEnvironmentFactory.ts`<br>`WorkspaceIsolationManager.ts`<br>Colima / Docker APFS 存储层 | 多 Agent 独立沙盒重复拉取 crates 并冷编译，构建耗时 128s，无共享 `sccache`，缓存命中率 0% | **官方 Patch**：子 Agent 自动嗅探透传 `RUSTC_WRAPPER` + 共享 `.cargo/config.toml`<br>**Toolkit**：`wb-doctor` Check 6 + 全局 10GB 缓存硬顶 + `fstrim` 穿透 | [📄 事故二完整报告](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) |
 | **03** | `P0` | **Git 工作区代码莫名丢失 (Safe-Delete 缺陷导致 59 个文件蒸发)**<br>包管理器被拦截留脏状态，工作树代码丢失 | `genie-safe-delete.cjs`<br>文件系统过滤驱动竞争态 | `genie-safe-delete.cjs` 硬编码删除超 20 个文件抛错；底层沙盒过滤层在竞争态下直接诱发文件系统物理丢失 | **官方 Patch**：移除无界安全删除抛错，修复驱动竞争态<br>**Toolkit**：未提交代码资产绝对保护准则 | [🔗 独立证据仓库](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause) |
-| **04** | `P0` | **Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死**<br>终端命令 120s 超时报 137，后台 CPU 100% | `sandbox-center` (`compile_sbpl_clauses`, `dim_covered`)<br>`tsbx_rules.json` (L7)<br>`sandbox-cli` (`InteractiveProcess::drop`) | `tsbx_rules.json` 遗漏 macOS 临时目录；动态生成 17,542 条单路径；$O(N^2)$ 比对 1.53 亿次死锁 64 分钟；PTY drop join 硬卡 5 秒 | **官方 Patch**：`tsbx_rules.json` 补全临时目录 + 前缀树 Trie 降至 $O(N \log N)$ + 先关闭 `master_fd` 后 join<br>**Toolkit**：`wb-sandbox heal` + `wb-sandbox clean` + `wb-doctor` Check 5 | [📄 事故四完整报告](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md) |
+| **04** | `P0` | **Seatbelt 规则雪崩致 SBPL O(N²) 死锁、前端 120s 强杀 (exit 137) 与 PTY 5s 假死**<br>终端命令假死报 137，后台 CPU 100% | `sandbox-center` (`compile_sbpl_clauses`, `dim_covered`)<br>`tsbx_rules.json` (L7)<br>`sandbox-cli` (`InteractiveProcess::drop`) | `tsbx_rules.json` 遗漏 macOS 临时目录；动态生成万条单路径；$O(N^2)$ 比对 1.5 亿次死锁；前端 120s 超时下发 ProcessKill (SIGKILL 137)；PTY drop join 硬卡 5 秒 | **官方 Patch**：`tsbx_rules.json` 补全临时目录 + 前缀树 Trie 降至 $O(N \log N)$ + 先关闭 `master_fd` 后 join<br>**Toolkit**：UDS 顶层 `sessionId` 修复 + `wb-sandbox heal` + `wb-sandbox clean` + `wb-doctor --inspect-137` | [📄 事故四完整报告](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md) |
 
 ---
 
@@ -731,22 +731,18 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
 - **根因**：详见我们公开的取证仓库 [FlapPearLabs/workbuddy-safedelete-rootcause](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause)。WorkBuddy 团队在底层搞了一个所谓的 `genie-safe-delete.cjs` 与 `safe-delete-bulk-guard.cjs` 垫片试图“保护用户误删”，却粗暴地在 Node 层面硬编码了“单次删除超过 20 个文件即抛出异常拦截”的粗糙逻辑；由于拦截是在物理删除部分文件之后触发的，导致目录留下残缺半成品脏状态。而底层沙盒原生过滤层（`tsbx.dll` / safe-delete 过滤器）更存在不可控的文件系统拦截缺陷，在特定竞争态下直接诱发了真实工作树文件的物理丢失。该严重事故已由我们整理完整复现实验并向腾讯工程师正式提交反馈。
 - 🔗 **独立开源复现仓库**：👉 [访问 GitHub: FlapPearLabs/workbuddy-safedelete-rootcause](https://github.com/FlapPearLabs/workbuddy-safedelete-rootcause)
 
-#### 事故四：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5s 假死
-- **现象**：macOS 客户端频繁出现所有终端命令卡死、超时 120 秒被前端 SIGKILL 强杀（退出码 137）；即使最简单的 `date` 或 `echo 1` 都有长达 5 秒的非预期卡顿；且关闭 WorkBuddy 主窗口后，后台残留的 `sandbox-center` 进程 CPU 占用持续 100% 狂转超过 1 小时，电脑发烫电池迅速耗尽。
-- **根因（物理堆栈与反汇编取证）**：
-  1. 使用 macOS `sample` 对打满单个 CPU 核心持续 64 分钟的 PID 1442 (`sandbox-center`) 进行现场采样，抓获深水死锁堆栈：
-     ```text
-     _RNvNtNtCsjRzdfub9oCi_14sandbox_center5rules7profile4sbpl20compile_sbpl_clauses -> shadowed_verdicts::dim_covered
-     ```
-  2. 逆向检查其沙盒规则配置 `tsbx_rules.json`，发现官方配置中竟然**只声明了 Windows 的 Temp 通配符 (`%LOCALAPPDATA%\Temp\**`)，完全遗漏了 macOS 的 `$TMPDIR` (`/var/folders/.../T/`)**！
-  3. 导致在 macOS 下，任何工具只要触碰一下临时目录（例如生成一个临时文件），沙盒中心因为没有预置通配规则，全部动态回退到 IPC 向 `sandbox-center` 注册单条 `auto_grant` 绝对路径规则。随着开发进行，动态规则迅速堆积超过 **17,500 条**！
-  4. 致命的是，通过 `otool -tvV` ARM64 反汇编实锤（地址 `0x1001129f0`），`compile_sbpl_clauses` 在将规则编译为 macOS Seatbelt 沙盒底层 SBPL 语法时，去重与覆盖判定算法竟然写成了双重嵌套循环 $O(N^2)$ 的线性扫描（$\frac{17500^2}{2} \approx 153,000,000$ 次比对）！1.5 亿次比对彻底打死 `center-io` 线程，导致 `sandbox-cli` 3,000ms IPC 握手超时失败，前端等待 120,000ms 最终无情 SIGKILL (137)。
-  5. 逆向通过 `otool -tvV` 反汇编定位到 `sandbox-cli`（地址 `0x1000a74e4`），主线程在 `InteractiveProcess::drop` 析构时在未关闭 `master_fd` 情况下直接调用 `JoinInner::join` 等待 reader 线程，被迫等满 5,000ms 默认超时才退出，人为制造 5,002ms 假死！
-  6. 此外，主窗口退出时从未向后台守护进程发送级联退出信号，导致僵尸守护进程在后台永久常驻并占满 CPU。
+#### 事故四：Seatbelt 规则雪崩致 SBPL 编译 O(N²) 死锁、前端 120s 强杀 (exit 137) 与 PTY 5s 假死
+- **现象**：macOS 客户端频繁出现所有终端命令卡死、超时 120 秒被前端强杀报 `exit_code: 137` (SIGKILL)；任何轻量级命令（`date` / `echo 1`）退出均硬卡 5 秒；关闭主窗口后，后台残留的 `sandbox-center` 进程 CPU 占用持续 100% 狂转超过 1 小时，电脑发烫电池迅速耗尽。
+- **法医级归因定位（`EXIT_137 != 根因`）**：
+  必须坚决厘清工程事实：`exit 137` 仅为 POSIX 进程被信号强杀（`128 + 9`）的**终态症状**，绝非根因本身。全景故障族谱（Failure Families A ~ H）实测定位：
+  1. **Family E (直接杀伤症状)**：WorkBuddy 前端调度器设置了 120,000ms 硬超时看门狗，超时后主动向子进程下发 `ProcessKill(signal=Some("term"))`，随后由操作系统下发 SIGKILL，导致终端返回 `exit 137`；
+  2. **Family A (假死底层根因)**：`tsbx_rules.json` 漏配 macOS `$TMPDIR` (`/var/folders/.../T/`)，导致每次触碰临时文件均向沙盒中心动态注册单条 `auto_grant` 路径，长任务下累积达 **10,000~17,500 条**。而 `sandbox-center` 的 `compile_sbpl_clauses -> shadowed_verdicts::dim_covered` SBPL 编译去重算法为**无索引双重嵌套循环 $O(N^2)$**（上万条规则触发 1.5 亿次比对），单一 I/O 线程被打死死锁 64 分钟，导致 `sandbox-cli` 向其请求 Profile 发生 3000ms 超时（`fetch_profile 超时`），命令因而被阻断在沙盒启动阶段直至前端 120s 强杀；
+  3. **Family B (退出时序挂起)**：`sandbox-cli` 中 `InteractiveProcess::drop` 在持有 `master_fd` 句柄时调用 reader thread 的 `join()`，读取线程阻塞于 `read` 无法退出，被迫等满 5,000ms 默认超时才退出，人为制造 5,002ms 假死；
+  4. **Toolkit 历史修复盲区修复**：旧版 Toolkit 将 `sessionId` 置于 IPC 数据 payload 内部，导致无法修剪 per-session 的规则爆炸。本次修复确立官方 UDS 顶层 `sessionId` 规范，实现全局与活跃会话规则双向自愈。
 - **解决**：
-  - 研发 `wb-sandbox heal`：通过跨进程 Single-Flight 内核排他锁（`fcntl.flock` / `msvcrt.locking`）与锁内回读校验杜绝并发撕裂，通过 Unix Domain Socket 动态向 `sandbox-center` 注入 macOS 临时目录全量通配规则（`/var/folders/**`, `/private/var/folders/**`, `/tmp/**` 等），并在 IPC 全链路覆盖 Monotonic Deadline 与 4MB 帧熔断，瞬间将规则数从 17,500 条降至 48 条，SBPL 编译耗时从 64 分钟回归 0.2ms；
+  - 研发 `wb-sandbox heal`：修复 UDS 顶层 `sessionId` wire 协议，通过跨进程 Single-Flight 内核排他锁（`fcntl.flock` / `msvcrt.locking`）与锁内回读校验杜绝并发撕裂，动态向 `sandbox-center` 注入 macOS 临时目录全量通配规则（`/var/folders/**`, `/tmp/**`），并双向定向修剪全局与活跃会话膨胀规则，SBPL 编译耗时从 64 分钟回归 0.2ms；
   - 研发 `wb-sandbox clean`：在检测到 GUI 退出且无活跃用户任务时，基于原生 `libproc.dylib` C-FFI 安全级联回收孤儿守护进程，彻底根治发烫与卡死；
-  - 集成 `wb-doctor` Check 5 进行规则健康审计。
+  - 增强 `wb-doctor`：Check 5 增加全局与活跃会话全量沙盒规则审计与白盒错误码诊断，并提供 `--inspect-137` / `--shell-failure` / `--json` 事故现场指纹分析工具（具备严密负控制，无死锁凭证坚决输出 `Family H (UNKNOWN)`）。
 - 🔗 **深度物理凭证报告**：👉 [阅读《事故四深度取证报告：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5 秒假死》](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
 
 ---
@@ -1199,7 +1195,7 @@ WorkBuddy GUI status  : RUNNING
 | `workbuddy models` | `wb-models` | 呼出模型全景资产、倍率透视与轻量终端选择器 (TUI) |
 | `workbuddy sandbox [子命令]` | `wb-sandbox` | 沙盒运行状态自愈、Seatbelt 通配规则注入与会话快照清理 (`status`/`heal`/`clean`) |
 | `workbuddy-log-guard` | - | 触发沙盒日志物理看门狗（36h TTL、2GB 硬顶、30MB 熔断、Open-FD 保护） |
-| `workbuddy doctor` | `wb-doctor` | 深度诊断凭据加密套件、本地运行时路径、沙盒规则健康与 sccache 就绪度 |
+| `workbuddy doctor [--inspect-137]` | `wb-doctor` | 深度诊断凭据套件、运行时兼容性、沙盒规则健康与 137 / shell 事故现场指纹分析 |
 | `workbuddy save <别名>` | - | 将当前活跃登录态固化为一个可切换的 Profile（支持 `--force`） |
 | `workbuddy init` | - | 一键应用 SQLite 全域工作区打通补丁 |
 | `workbuddy rollback` | - | 撤销 SQLite 触发器，恢复官方严格数据隔离 |

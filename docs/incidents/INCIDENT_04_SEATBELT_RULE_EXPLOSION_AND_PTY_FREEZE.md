@@ -506,5 +506,109 @@ impl Drop for InteractiveProcess {
 
 ---
 
+## 六、法医级归因补充：Exit 137 的全景故障族谱（Failure Families A ~ H）与治理边界
+
+### 1. 核心工程共识：`EXIT_137 != ROOT_CAUSE`
+
+在各类 AI 辅助开发工具与 POSIX 操作系统交互时，系统工程师极易陷入一个致命误区：**“看到 exit 137，就以为是沙盒规则爆炸”**。
+
+必须以唯物物理事实纠正这一语义混淆：
+- **Exit 137 的物理本质**：是 POSIX 规范中进程被信号强杀的宏定义结果（`128 + SIGKILL(9) = 137`）。
+- **它只是终态结果（Terminal Symptom），绝非初始根因（Root Cause）！**
+- 任何原因导致进程被发出了 `SIGKILL`，其退出码物理上均表现为 `137`。若不区分触发路径，便会陷入“头痛医脚”的伪工程泥潭。
+
+经过对 WorkBuddy 底层运行日志、macOS 内核事件与 Rust 执行体反编译的法医级审查，我们将导致 WorkBuddy 终端 / Shell 失效及 exit 137 的诱因形式化归纳为 **8 大故障族（Failure Families A ~ H）**：
+
+| 故障族代号 | 故障族名称 | 底层物理诱因与触发机制 | 现场诊断特征与物理凭证 | 典型责任归属 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Family A** | **Seatbelt Rule Explosion & SBPL Lockup** | 临时目录缺少通配符，导致单路径规则膨胀突破上万条；`sandbox-center` 单线程 $O(N^2)$ `dim_covered` 算法陷入 1.5 亿次比对死锁，阻塞 UDS IPC 握手。 | 1. 物理规则数 > 2,000（全局或 per-session）；<br>2. `rules_json_len` > 1MB；<br>3. `fetch_profile` 报 3000ms 超时；<br>4. `sample` 采样 100% 集中在 `dim_covered`。 | 上游官方缺陷 (Toolkit 可通过 IPC 动态注入并修剪) |
+| **Family B** | **PTY Lifecycle Master FD Hang** | `InteractiveProcess::drop` 析构顺序缺陷：主线程在持有 `master_fd` 句柄时调用 reader thread 的 `join()`，读取线程阻塞于 `read` 无法退出，触发 5000ms 硬超时卡死。 | 1. 日志记录 `join 超时`；<br>2. 任何轻量级命令退出必硬卡 5002ms；<br>3. `waitpid` 成功但命令回收延迟。 | 上游官方 Rust 二进制缺陷 (Toolkit 仅可检测，严禁破坏性 patch) |
+| **Family C** | **Kernel OOM Killer (Jetsam)** | 宿主物理内存耗尽，macOS 内核空间调度器主动下发 `SIGKILL` 强杀子进程以保全系统。 | 1. `vm_stat` 显示 free pages < 2000；<br>2. 内核 log 记录 Jetsam / Memorystatus kill；<br>3. 无沙盒超时或规则膨胀日志。 | 宿主系统资源耗尽 |
+| **Family D** | **Process Resource Limit (rlimit/cgroup)** | 宿主系统或守护进程设置的内存/FD/CPU 配额（`RLIMIT_DATA` / `RLIMIT_RSS` / `cgroup`）硬顶超限。 | 1. 进程在固定内存阈值被杀；<br>2. dmesg 或 launchd 汇报超额日志。 | 系统环境配额 |
+| **Family E** | **Supervisor 120s Execution Timeout** | WorkBuddy 前端硬编码的 120,000ms 命令执行硬超时；超时后前端调度器主动向底层下发 `ProcessKill(signal=Some("term"))`，随后升级为 SIGKILL 强杀。 | 1. 命令精确执行 120.007s；<br>2. 日志明确捕获 `ProcessKill(signal=Some("term"))` 与 `exit_code=137, killed=true`；<br>3. 本质是前端看门狗超时的杀伤行为。 | 前端调度器决策 (若底层由 Family A/B 引起则为连带症状) |
+| **Family F** | **Orphan Daemon Resource Leaking** | 客户端窗口退出后未发送级联退出信号，`sandbox-center` / `sandbox-cli-gc` 孤儿守护进程持续吃满单核 CPU 耗尽电池。 | 1. GUI 进程已死，但 `sandbox-center` 活跃；<br>2. CPU 持续占用 98%~100%；<br>3. 无活跃会话或终端持有 IPC。 | 上游生命周期管理缺陷 (Toolkit 可安全级联回收) |
+| **Family G** | **Explicit Signal Kill (User / Subagent)** | 用户手动敲击 `Ctrl+C` / kill，或外部编排子代理因任务取消主动发送 `SIGKILL`。 | 1. 用户交互事件时钟吻合；<br>2. 子代理生命周期取消时钟对齐。 | 预期内正常中断 |
+| **Family H** | **Unknown / Negative Control Anchor** | 进程返回 exit 137，但沙盒规则完全正常（<=500 条且通配符激活），无 120s 超时、无 PTY 卡死、无内存压力。必须保留现场等待下一次取证。 | **负控制铁律（Negative Control）**：杜绝伪装完成与武断归因，严格标记为 `UNKNOWN`，绝不盲目归因至规则爆炸。 | 未捕获瞬态异常 |
+
+---
+
+### 2. 治理职责边界三权分立矩阵
+
+WorkBuddy Toolkit 恪守**极致工程克制与零破坏（Zero-Binary-Patching）准则**，绝不僭越官方职责，明确划分三大工程边界：
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                        治理职责边界三权分立矩阵                        │
+├──────────────────────────┬───────────────────────┬─────────────────────┤
+│ WORKBUDDY_TOOLKIT_CAN_FIX│ TOOLKIT_CAN_DETECT_ONLY│ UPSTREAM_FIX_REQUIRED│
+├──────────────────────────┼───────────────────────┼─────────────────────┤
+│ 1. 跨进程 Single-Flight  │ 1. 前端 120s 硬超时强 │ 1. 重构 SBPL 编译器 │
+│    锁保护的规则自愈      │    杀事件物理捕获     │    算法从 O(N^2) 降 │
+│ 2. 顶层 sessionId 修复， │ 2. PTY 5002ms 析构时  │    至 O(N log N)    │
+│    双向修剪全局与活跃会  │    序死锁现场取证     │ 2. 修正 Interactive │
+│    话 auto_grant 规则    │ 3. UDS 统一 Monotonic │    Process::drop 先 │
+│ 3. 动态注入 macOS 临时目 │    Deadline 超时暴露  │    关闭 master_fd   │
+│    录通配符规则          │ 4. 系统内存压力与 Jets│ 3. 官方 vendor 规则 │
+│ 4. 基于 libproc 的孤儿守 │    am 风险诊断        │    原生内置 macOS   │
+│    护进程无害化级联回收  │ 5. 输出法医现场指纹   │    $TMPDIR 通配符   │
+│                          │    (--inspect-137)    │ 4. Electron 优雅停机│
+└──────────────────────────┴───────────────────────┴─────────────────────┘
+```
+
+---
+
+### 3. 法医级现场指纹工具 (`wb-doctor --inspect-137`)
+
+为彻底杜绝盲猜，Toolkit 在 `wb-doctor` 中集成了轻量级现场指纹与归因分析器：
+
+```bash
+# 捕获并分析最近一次终端失效或 exit 137 事故现场
+wb-doctor --inspect-137
+
+# 或使用别名与程序化 JSON 规范输出
+wb-doctor --shell-failure --json
+```
+
+**实测输出样本（白盒凭证）**：
+```json
+{
+  "timestamp": "2026-10-08T20:30:15+08:00",
+  "platform": "darwin",
+  "workbuddy_version": "5.6.10",
+  "toolkit_version": "0.6.0",
+  "sandbox_center_found": true,
+  "sandbox_center_responsive": true,
+  "sandbox_center_cpu_percent": 0.0,
+  "sandbox_rule_count": 48,
+  "max_session_rule_count": 0,
+  "temp_wildcards_present": true,
+  "memory_pressure": "normal",
+  "ipc_diagnostic": {
+    "status": "ok",
+    "error_code": null,
+    "bytes": 1056
+  },
+  "log_evidence": {
+    "rule_explosion_found": false,
+    "max_rules_in_logs": 0,
+    "profile_timeout_found": false,
+    "pty_join_timeout_found": false,
+    "supervisor_kill_found": false,
+    "exit_137_found": true,
+    "oom_found": false,
+    "relevant_log_files": [
+      "~/.workbuddy/logs/sandbox/20261008/sandbox_56359_001.log"
+    ]
+  },
+  "classification": "UNKNOWN",
+  "root_cause_family": "H",
+  "confidence": "LOW",
+  "reason": "进程返回 exit 137 (SIGKILL)，但沙盒规则正常且无超时/死锁堆栈凭证，需保留下一次现场"
+}
+```
+> **注意**：上述输出展示了严格的**负控制（Negative Control）**：即便日志中捕获到了 `exit 137`，只要规则处于健康区间且缺乏死锁凭证，指纹分析器坚决不作伪归因，严格输出 `Family H (UNKNOWN)`，拿物理证据说话！
+
+---
+
 > 🧭 **导航入口**：[🔙 返回事故总览矩阵](README.md) │ [上一篇：事故二 ⬅️](INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md) │ [📖 返回 Toolkit 主 README](../../README.md#16--生产事故深水排查与白盒物理凭证库seatbelt-17-万行规则雪崩pty-5s-延迟与四大草台班子工程缺陷)
 

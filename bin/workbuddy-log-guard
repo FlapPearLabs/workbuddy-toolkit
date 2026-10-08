@@ -240,30 +240,54 @@ def find_sandbox_center_socket(socket_dir=None):
 
 MAX_IPC_PAYLOAD = 4 * 1024 * 1024  # 4MB 硬上限，超限熔断
 
-def send_sandbox_ipc(socket_path, command, data, uid="default", timeout=2.0):
+_LAST_IPC_DIAG = {"status": "ok", "error_code": None, "detail": None}
+
+def get_last_ipc_diag():
+    """返回最近一次 send_sandbox_ipc 的白盒诊断信息 (防止 fail-open 吞没现场异常)。"""
+    return dict(_LAST_IPC_DIAG)
+
+def send_sandbox_ipc_with_diag(socket_path, command, data, uid="default", timeout=2.0, session_id=None):
     """
-    Sends a structured IPC request to sandbox-center and returns parsed JSON.
-    Protected with overall monotonic deadline and 4MB max payload limits (Fail-Open).
+    底层 IPC 发送逻辑，返回 (response_dict, diag_dict)。
+    diag_dict 包含详细物理状态，解决 FAIL_OPEN_HIDES_DIAGNOSTIC 问题。
     """
-    if not socket_path or not os.path.exists(socket_path) or os.name == 'nt':
-        return None
+    global _LAST_IPC_DIAG
+    if not socket_path or not os.path.exists(socket_path):
+        diag = {"status": "error", "error_code": "SOCKET_NOT_FOUND", "detail": f"Socket missing: {socket_path}"}
+        _LAST_IPC_DIAG = diag
+        return None, diag
+    if os.name == 'nt':
+        diag = {"status": "error", "error_code": "UNSUPPORTED_PLATFORM", "detail": "Unix socket unsupported on Windows"}
+        _LAST_IPC_DIAG = diag
+        return None, diag
+
+    # Wire protocol: sessionId 在顶层 envelope 必须与 data 分离
+    sid = session_id or (data.get("sessionId") if isinstance(data, dict) else None)
+    req_data = {k: v for k, v in data.items() if k != "sessionId"} if isinstance(data, dict) else {}
 
     req = {
         "messageId": f"wb-guard:{int(time.time()*1000)}",
         "command": command,
         "uid": uid,
         "data": {
-            **data,
+            **req_data,
             "_client": {"role": "agent-cli", "pid": os.getpid()}
         }
     }
+    if sid:
+        req["sessionId"] = str(sid)
+
     try:
         payload = json.dumps(req).encode("utf-8") + b"\n"
-    except Exception:
-        return None
+    except Exception as e:
+        diag = {"status": "error", "error_code": "SERIALIZATION_FAILED", "detail": str(e)}
+        _LAST_IPC_DIAG = diag
+        return None, diag
 
     if len(payload) > MAX_IPC_PAYLOAD:
-        return None
+        diag = {"status": "error", "error_code": "PAYLOAD_OVERFLOW", "detail": f"Payload size {len(payload)} > max {MAX_IPC_PAYLOAD}"}
+        _LAST_IPC_DIAG = diag
+        return None, diag
 
     end_time = time.monotonic() + timeout
     s = None
@@ -277,7 +301,9 @@ def send_sandbox_ipc(socket_path, command, data, uid="default", timeout=2.0):
         while True:
             remain = end_time - time.monotonic()
             if remain <= 0:
-                return None
+                diag = {"status": "error", "error_code": "DEADLINE_EXCEEDED", "detail": f"Monotonic deadline ({timeout}s) exceeded"}
+                _LAST_IPC_DIAG = diag
+                return None, diag
             s.settimeout(min(remain, 0.5))
             try:
                 chunk = s.recv(65536)
@@ -287,27 +313,58 @@ def send_sandbox_ipc(socket_path, command, data, uid="default", timeout=2.0):
                 break
             res += chunk
             if len(res) > MAX_IPC_PAYLOAD:
-                return None
+                diag = {"status": "error", "error_code": "RESPONSE_OVERFLOW", "detail": f"Response size {len(res)} > max {MAX_IPC_PAYLOAD}"}
+                _LAST_IPC_DIAG = diag
+                return None, diag
             stripped = res.strip()
             if stripped.startswith(b"{") and stripped.endswith(b"}"):
                 try:
-                    return json.loads(stripped.decode("utf-8"))
+                    parsed = json.loads(stripped.decode("utf-8"))
+                    diag = {"status": "ok", "error_code": None, "bytes": len(res)}
+                    _LAST_IPC_DIAG = diag
+                    return parsed, diag
                 except Exception:
                     pass
         if res.strip():
             try:
-                return json.loads(res.decode("utf-8"))
-            except Exception:
-                return None
-        return None
-    except Exception:
-        return None
+                parsed = json.loads(res.decode("utf-8"))
+                diag = {"status": "ok", "error_code": None, "bytes": len(res)}
+                _LAST_IPC_DIAG = diag
+                return parsed, diag
+            except Exception as e:
+                diag = {"status": "error", "error_code": "MALFORMED_JSON", "detail": str(e)}
+                _LAST_IPC_DIAG = diag
+                return None, diag
+        diag = {"status": "error", "error_code": "EMPTY_RESPONSE", "detail": "Server closed connection without data"}
+        _LAST_IPC_DIAG = diag
+        return None, diag
+    except socket.timeout:
+        diag = {"status": "error", "error_code": "DEADLINE_EXCEEDED", "detail": f"Socket timeout after {timeout}s"}
+        _LAST_IPC_DIAG = diag
+        return None, diag
+    except ConnectionRefusedError:
+        diag = {"status": "error", "error_code": "CONNECTION_REFUSED", "detail": "Connection refused by daemon socket"}
+        _LAST_IPC_DIAG = diag
+        return None, diag
+    except Exception as e:
+        diag = {"status": "error", "error_code": "SOCKET_EXCEPTION", "detail": f"{type(e).__name__}: {str(e)}"}
+        _LAST_IPC_DIAG = diag
+        return None, diag
     finally:
         if s is not None:
             try:
                 s.close()
             except Exception:
                 pass
+
+def send_sandbox_ipc(socket_path, command, data, uid="default", timeout=2.0, session_id=None):
+    """
+    Sends a structured IPC request to sandbox-center and returns parsed JSON.
+    Protected with overall monotonic deadline and 4MB max payload limits (Fail-Open for execution).
+    Preserves diagnostic root-cause in get_last_ipc_diag().
+    """
+    resp, _ = send_sandbox_ipc_with_diag(socket_path, command, data, uid=uid, timeout=timeout, session_id=session_id)
+    return resp
 
 def find_active_uid():
     """Locates active WorkBuddy user UID from desktop auth info or profiles."""
@@ -418,27 +475,28 @@ def _release_file_lock(fd):
         except Exception:
             pass
 
-def heal_sandbox_center_rules(socket_path=None, uid=None):
+def heal_sandbox_center_rules(socket_path=None, uid=None, session_id=None):
     """
     Ensures macOS/Linux temp wildcard rules are active in sandbox-center
-    and prunes bloated auto_grant rules to prevent SBPL compilation lockup.
+    and prunes bloated auto_grant rules across global and active sessions
+    to prevent SBPL compilation lockup and supervisor 120s timeouts.
     Guarded by cross-process single-flight lock and post-injection readback verification.
     """
     target_uid = uid or find_active_uid()
     sock = socket_path or find_sandbox_center_socket()
     if not sock:
-        return {"status": "no_socket"}
+        return {"status": "no_socket", "diag": get_last_ipc_diag()}
 
     lock_path = os.environ.get("WORKBUDDY_HEAL_LOCK") or os.path.expanduser("~/.workbuddy/cache/heal.lock")
     lock_fd = _acquire_file_lock(lock_path, timeout=5.0)
     if lock_fd is None:
-        return {"status": "locked_skip"}
+        return {"status": "locked_skip", "diag": {"status": "locked", "detail": "Concurrent heal in progress"}}
 
     try:
-        # 1. Probe current rules
+        # 1. Probe current global rules
         rules_resp = send_sandbox_ipc(sock, "sandbox.rules.get_rules", {}, uid=target_uid)
         if not rules_resp or not rules_resp.get("success"):
-            return {"status": "unresponsive"}
+            return {"status": "unresponsive", "diag": get_last_ipc_diag()}
 
         existing_rules = rules_resp.get("data", {}).get("fileRules", [])
         existing_paths = {r.get("path") for r in existing_rules if isinstance(r, dict)}
@@ -460,12 +518,52 @@ def heal_sandbox_center_rules(socket_path=None, uid=None):
             if add_resp and add_resp.get("success"):
                 added_count = len(missing)
 
-        # 2. Prune auto_grant rules if bloated (> 500 rules)
+        # 2. Prune auto_grant rules:
+        # 2a. Global category pruning (if legacy global auto_grant bloated)
         cleared_auto_grant = False
+        pruned_sessions = []
         if len(existing_rules) > 500:
             send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "auto_grant", "rules": []}, uid=target_uid)
             send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "temp", "rules": []}, uid=target_uid)
             cleared_auto_grant = True
+
+        # 2b. Active Sessions auto_grant pruning (Per-Session Rule Explosion Mitigator)
+        session_ids = set()
+        if session_id:
+            session_ids.add(str(session_id))
+        else:
+            mon_resp = send_sandbox_ipc(sock, "sandbox.monitor.query", {}, uid=target_uid, timeout=3.0)
+            if mon_resp and mon_resp.get("success"):
+                buckets = mon_resp.get("data", {}).get("decideBucketsTop", [])
+                for b in buckets:
+                    sid = b.get("sessionId")
+                    if sid:
+                        session_ids.add(str(sid))
+            # Also check session workspace folders
+            sessions_dir = os.path.expanduser("~/.workbuddy/workspace/sessions")
+            if os.path.isdir(sessions_dir):
+                try:
+                    for d in os.listdir(sessions_dir):
+                        if len(d) >= 32 and "-" in d:
+                            session_ids.add(d)
+                except Exception:
+                    pass
+
+        for sid in session_ids:
+            s_resp = send_sandbox_ipc(sock, "sandbox.rules.get_rules", {"sessionId": sid}, uid=target_uid, session_id=sid, timeout=3.0)
+            if s_resp and s_resp.get("success"):
+                s_rules = s_resp.get("data", {}).get("fileRules", [])
+                auto_grant_count = sum(1 for r in s_rules if r.get("category") == "auto_grant")
+                temp_count = sum(1 for r in s_rules if r.get("category") == "temp")
+                if auto_grant_count > 500 or (auto_grant_count + temp_count) > 500 or len(s_rules) > 1000:
+                    del_ag = send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "auto_grant", "rules": []}, uid=target_uid, session_id=sid, timeout=5.0)
+                    del_tmp = send_sandbox_ipc(sock, "sandbox.rules.set_file_rules", {"category": "temp", "rules": []}, uid=target_uid, session_id=sid, timeout=5.0)
+                    cleared_auto_grant = True
+                    pruned_sessions.append({
+                        "sessionId": sid,
+                        "pruned_rules": auto_grant_count + temp_count,
+                        "success": bool(del_ag and del_ag.get("success"))
+                    })
 
         # 3. Readback verification (锁内回读校验与断言)
         verified = True
@@ -483,6 +581,7 @@ def heal_sandbox_center_rules(socket_path=None, uid=None):
             "total_rules": total_rules,
             "added_temp_rules": added_count,
             "cleared_auto_grant": cleared_auto_grant,
+            "pruned_sessions": pruned_sessions,
             "verified": verified
         }
     finally:

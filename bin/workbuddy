@@ -2631,11 +2631,285 @@ def get_launchagent_status():
     except Exception:
         return "CONFIGURED"
 
-def run_doctor():
+def inspect_137_failure(target_log_dir=None):
+    """
+    轻量级 137 / shell 事故现场指纹分析器与归因分类器。
+    严格执行物理铁证与负控制契约：exit 137 仅为终态症状，
+    无充分规则膨胀凭证时绝不归因至 RULE_EXPLOSION。
+    """
+    import datetime
+
+    now_iso = datetime.datetime.now().astimezone().isoformat()
+    rt_path = None
+    try:
+        rt_path = find_workbuddy_runtime()
+    except Exception:
+        pass
+    wb_ver = get_workbuddy_client_version(rt_path) if rt_path else "unknown"
+
+    guard = get_log_guard_module()
+    sock = guard.find_sandbox_center_socket() if guard else None
+    target_uid = guard.find_active_uid() if guard else "default"
+
+    center_found = bool(sock)
+    center_responsive = False
+    global_rules_count = None
+    temp_wildcards_present = False
+    max_session_rules_count = 0
+    bloated_session_id = None
+    last_ipc_diag = None
+
+    if sock and guard:
+        resp = guard.send_sandbox_ipc(sock, "sandbox.rules.get_rules", {}, uid=target_uid, timeout=3.0)
+        last_ipc_diag = None
+        if hasattr(guard, "get_last_ipc_diag") and callable(getattr(guard, "get_last_ipc_diag")):
+            try:
+                d = guard.get_last_ipc_diag()
+                if isinstance(d, dict):
+                    last_ipc_diag = d
+            except Exception:
+                pass
+        if resp and resp.get("success"):
+            center_responsive = True
+            f_rules = resp.get("data", {}).get("fileRules", [])
+            global_rules_count = len(f_rules)
+            paths = {r.get("path") for r in f_rules if isinstance(r, dict)}
+            temp_wildcards_present = any(p in paths for p in ["/var/folders/**", "/tmp/**"])
+
+            # 探测各活跃会话规则数
+            try:
+                m_resp = guard.send_sandbox_ipc(sock, "sandbox.monitor.query", {}, uid=target_uid, timeout=3.0)
+                if m_resp and m_resp.get("success"):
+                    top_sessions = m_resp.get("data", {}).get("decideBucketsTop", [])
+                    for s_item in top_sessions[:10]:
+                        s_id = s_item.get("sessionId")
+                        if s_id:
+                            s_res = guard.send_sandbox_ipc(sock, "sandbox.rules.get_rules", {"sessionId": s_id}, uid=target_uid, session_id=s_id, timeout=2.0)
+                            if s_res and s_res.get("success"):
+                                cnt = len(s_res.get("data", {}).get("fileRules", []))
+                                if cnt > max_session_rules_count:
+                                    max_session_rules_count = cnt
+                                    bloated_session_id = s_id
+            except Exception:
+                pass
+
+    # 探测 sandbox-center 进程 CPU 与常驻内存
+    center_cpu = None
+    center_pid = None
+    gui_running = False
+    if guard:
+        try:
+            gui_running = guard.is_workbuddy_gui_running()
+        except Exception:
+            gui_running = False
+    try:
+        ps_out = subprocess.run(["ps", "-A", "-o", "pid,%cpu,rss,command"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3, close_fds=True).stdout
+        for line in ps_out.splitlines()[1:]:
+            parts = line.strip().split(None, 3)
+            if len(parts) >= 4 and "sandbox-center" in parts[3]:
+                center_pid = int(parts[0])
+                center_cpu = float(parts[1])
+                break
+    except Exception:
+        pass
+
+    # 探测内存压力 (Darwin vm_stat)
+    mem_pressure = "normal"
+    if sys.platform == "darwin":
+        try:
+            vm_out = subprocess.run(["vm_stat"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2).stdout
+            for l in vm_out.splitlines():
+                if "Pages free:" in l:
+                    pages_free = int(l.split(":")[1].strip().replace(".", ""))
+                    if pages_free < 2000:
+                        mem_pressure = "critical"
+                    elif pages_free < 10000:
+                        mem_pressure = "warn"
+                    break
+        except Exception:
+            pass
+
+    # 扫描物理日志痕迹
+    log_evidence = {
+        "rule_explosion_found": False,
+        "max_rules_in_logs": 0,
+        "profile_timeout_found": False,
+        "pty_join_timeout_found": False,
+        "supervisor_kill_found": False,
+        "exit_137_found": False,
+        "oom_found": False,
+        "relevant_log_files": []
+    }
+
+    search_log_dirs = []
+    if target_log_dir and os.path.isdir(target_log_dir):
+        search_log_dirs.append(target_log_dir)
+    else:
+        base_sb_logs = os.path.expanduser("~/.workbuddy/logs/sandbox")
+        if os.path.isdir(base_sb_logs):
+            today = datetime.datetime.now().strftime("%Y%m%d")
+            t_dir = os.path.join(base_sb_logs, today)
+            if os.path.isdir(t_dir):
+                search_log_dirs.append(t_dir)
+            search_log_dirs.append(base_sb_logs)
+
+    seen_logs = set()
+    for sdir in search_log_dirs:
+        for root, _, files in os.walk(sdir):
+            for fname in files:
+                if fname.endswith(".log") and ("sandbox_" in fname or "center_" in fname):
+                    fp = os.path.join(root, fname)
+                    if fp not in seen_logs:
+                        seen_logs.add(fp)
+
+    log_candidates = []
+    for fp in seen_logs:
+        try:
+            st = os.stat(fp)
+            if st.st_size > 0:
+                log_candidates.append((st.st_mtime, fp, st.st_size))
+        except Exception:
+            pass
+    log_candidates.sort(key=lambda x: x[0], reverse=True)
+
+    for _, fp, size in log_candidates[:5]:
+        try:
+            with open(fp, "rb") as f:
+                offset = max(0, size - 500 * 1024)
+                f.seek(offset)
+                chunk = f.read().decode("utf-8", errors="ignore")
+
+                if "exit_code=137" in chunk or "exit_code: 137" in chunk or "killed=true" in chunk:
+                    log_evidence["exit_137_found"] = True
+                    if fp not in log_evidence["relevant_log_files"]:
+                        log_evidence["relevant_log_files"].append(fp)
+                if "ProcessKill" in chunk and ('signal=Some("term")' in chunk or 'signal=Some("kill")' in chunk):
+                    log_evidence["supervisor_kill_found"] = True
+                    if fp not in log_evidence["relevant_log_files"]:
+                        log_evidence["relevant_log_files"].append(fp)
+                if "InteractiveProcess::drop" in chunk and "join 超时" in chunk:
+                    log_evidence["pty_join_timeout_found"] = True
+                    if fp not in log_evidence["relevant_log_files"]:
+                        log_evidence["relevant_log_files"].append(fp)
+                if "sandbox.rules.fetch_profile 超时" in chunk:
+                    log_evidence["profile_timeout_found"] = True
+                    if fp not in log_evidence["relevant_log_files"]:
+                        log_evidence["relevant_log_files"].append(fp)
+
+                import re
+                rule_lens = [int(m) for m in re.findall(r"rules_json_len=(\d+)", chunk)]
+                if rule_lens:
+                    max_len = max(rule_lens)
+                    if max_len > 1_000_000:
+                        log_evidence["rule_explosion_found"] = True
+                        log_evidence["max_rules_in_logs"] = max(log_evidence["max_rules_in_logs"], max_len)
+                        if fp not in log_evidence["relevant_log_files"]:
+                            log_evidence["relevant_log_files"].append(fp)
+        except Exception:
+            pass
+
+    # 归因判定 (Strict Classification with Hard Negative Control)
+    classification = "UNKNOWN"
+    confidence = "LOW"
+    family = "H"
+    reason = "Exit 137 / shell execution failure observed without conclusive diagnostic signatures"
+
+    # 1. 优先校验规则爆炸 (Family A)
+    if (global_rules_count is not None and global_rules_count > 2000) or \
+       (max_session_rules_count > 2000) or \
+       (log_evidence["rule_explosion_found"] and log_evidence["profile_timeout_found"]):
+        classification = "RULE_EXPLOSION_LIKELY"
+        confidence = "HIGH"
+        family = "A"
+        effective_count = max_session_rules_count if max_session_rules_count > 2000 else (global_rules_count or "10000+")
+        reason = f"Seatbelt 规则严重膨胀 (规则数: {effective_count})，诱发 sandbox-center 单线程 O(N^2) 编译锁死与 IPC 超时"
+
+    # 2. PTY 退出时序死锁 (Family B)
+    elif log_evidence["pty_join_timeout_found"]:
+        classification = "PTY_LIFECYCLE_LIKELY"
+        confidence = "HIGH"
+        family = "B"
+        reason = "官方二进制 MacPtyProcess::drop/InteractiveProcess::drop 在持有 master_fd 时等待 reader thread join 导致 5002ms 硬卡死"
+
+    # 3. 内存压力或系统杀伤 (Family D)
+    elif mem_pressure == "critical" or log_evidence["oom_found"]:
+        classification = "OOM_LIKELY"
+        confidence = "MEDIUM"
+        family = "D"
+        reason = "操作系统处于极度内存压力或 Jetsam/OOM 杀伤状态"
+
+    # 4. Supervisor 120s 超时强杀 (Family E)
+    elif log_evidence["supervisor_kill_found"]:
+        classification = "SUPERVISOR_KILL_LIKELY"
+        confidence = "HIGH"
+        family = "E"
+        reason = "WorkBuddy 前端触发 120,000ms 命令超时发送 ProcessKill 终止进程；底层假死根因未捕获到规则膨胀证据"
+
+    # 5. 负控制兜底：仅有 137 症状但无归因证据 (Family H)
+    else:
+        classification = "UNKNOWN"
+        confidence = "LOW"
+        family = "H"
+        reason = "进程返回 exit 137 (SIGKILL)，但沙盒规则正常且无超时/死锁堆栈凭证，需保留下一次现场"
+
+    return {
+        "timestamp": now_iso,
+        "platform": sys.platform,
+        "workbuddy_version": wb_ver,
+        "toolkit_version": VERSION,
+        "sandbox_center_found": center_found,
+        "sandbox_center_responsive": center_responsive,
+        "sandbox_center_cpu_percent": center_cpu,
+        "sandbox_rule_count": global_rules_count,
+        "max_session_rule_count": max_session_rules_count,
+        "temp_wildcards_present": temp_wildcards_present,
+        "memory_pressure": mem_pressure,
+        "ipc_diagnostic": last_ipc_diag,
+        "log_evidence": log_evidence,
+        "classification": classification,
+        "root_cause_family": family,
+        "confidence": confidence,
+        "reason": reason
+    }
+
+def run_doctor(args=None):
     """
     诊断 WorkBuddy Toolkit 与当前环境及凭据格式的兼容性。
+    支持 --inspect-137 / --shell-failure 事故指纹输出。
     不打印任何明文 Token、密钥或完整信封。
     """
+    cli_args = args or []
+    as_json = any(a in ("--json", "-j") for a in cli_args)
+    inspect_137 = any(a in ("--inspect-137", "--shell-failure", "--fingerprint", "--inspect") for a in cli_args)
+
+    if inspect_137:
+        fp = inspect_137_failure()
+        if as_json:
+            print(json.dumps(fp, indent=2, ensure_ascii=False))
+        else:
+            print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy Shell Failure & Exit 137 Forensic Fingerprint ==={COLOR_RESET}\n")
+            print(f"Timestamp             : {fp['timestamp']}")
+            print(f"Platform              : {fp['platform']}")
+            print(f"WorkBuddy Version     : {fp['workbuddy_version']}")
+            print(f"Toolkit Version       : {fp['toolkit_version']}")
+            print(f"Sandbox Center Found  : {'YES' if fp['sandbox_center_found'] else 'NO'}")
+            print(f"Center Responsive     : {'YES' if fp['sandbox_center_responsive'] else 'NO'}")
+            if fp['sandbox_center_cpu_percent'] is not None:
+                print(f"Center CPU Usage      : {fp['sandbox_center_cpu_percent']}%")
+            print(f"Global Rules Count    : {fp['sandbox_rule_count']}")
+            print(f"Max Session Rules     : {fp['max_session_rule_count']}")
+            print(f"Temp Wildcards Active : {'YES' if fp['temp_wildcards_present'] else 'NO'}")
+            print(f"Memory Pressure       : {fp['memory_pressure']}")
+            print(f"Log References        : {len(fp['log_evidence']['relevant_log_files'])} files identified")
+            print(f"\n{COLOR_BOLD}Classification Result :{COLOR_RESET}")
+            color = COLOR_GREEN if fp['classification'] == 'UNKNOWN' and not fp['log_evidence']['exit_137_found'] else (COLOR_RED if fp['classification'] in ('RULE_EXPLOSION_LIKELY', 'OOM_LIKELY') else COLOR_YELLOW)
+            print(f"  Classification      : {color}{fp['classification']}{COLOR_RESET}")
+            print(f"  Failure Family      : Family {fp['root_cause_family']}")
+            print(f"  Confidence          : {fp['confidence']}")
+            print(f"  Attribution Reason  : {fp['reason']}\n")
+        return fp['classification'] != "RULE_EXPLOSION_LIKELY"
+
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy Toolkit Doctor ==={COLOR_RESET}\n")
 
     auth_exists = os.path.exists(AUTH_FILE)
@@ -2753,16 +3027,48 @@ def run_doctor():
 
         if sock:
             resp = guard.send_sandbox_ipc(sock, "sandbox.rules.get_rules", {}, uid=target_uid)
+            diag = None
+            if hasattr(guard, "get_last_ipc_diag") and callable(getattr(guard, "get_last_ipc_diag")):
+                try:
+                    d = guard.get_last_ipc_diag()
+                    if isinstance(d, dict):
+                        diag = d
+                except Exception:
+                    diag = None
             if resp and resp.get("success"):
                 file_rules = resp.get("data", {}).get("fileRules", [])
                 total_rules = len(file_rules)
                 paths = {r.get("path") for r in file_rules if isinstance(r, dict)}
                 has_temp = any(p in paths for p in ["/var/folders/**", "/tmp/**"])
-                if total_rules > 2000 and not has_temp:
+
+                # 探测各活跃会话规则数以捕获 session-level 规则爆炸
+                max_session_rules = 0
+                bloated_session_id = None
+                try:
+                    mon_resp = guard.send_sandbox_ipc(sock, "sandbox.monitor.query", {}, uid=target_uid, timeout=2.0)
+                    if mon_resp and mon_resp.get("success"):
+                        buckets = mon_resp.get("data", {}).get("decideBucketsTop", [])
+                        for b in buckets[:10]:
+                            sid = b.get("sessionId")
+                            if sid:
+                                s_resp = guard.send_sandbox_ipc(sock, "sandbox.rules.get_rules", {"sessionId": sid}, uid=target_uid, session_id=sid, timeout=1.5)
+                                if s_resp and s_resp.get("success"):
+                                    s_count = len(s_resp.get("data", {}).get("fileRules", []))
+                                    if s_count > max_session_rules:
+                                        max_session_rules = s_count
+                                        bloated_session_id = sid
+                except Exception:
+                    pass
+
+                if max_session_rules > 1000:
+                    sandbox_status = f"{COLOR_RED}RISK (Session {bloated_session_id[:8]}... has {max_session_rules} rules, high SBPL lockup risk){COLOR_RESET}"
+                    has_warning_or_risk = True
+                elif total_rules > 2000 and not has_temp:
                     sandbox_status = f"{COLOR_RED}RISK ({total_rules} rules, high SBPL lockup risk){COLOR_RESET}"
                     has_warning_or_risk = True
                 elif has_temp:
-                    sandbox_status = f"{COLOR_GREEN}HEALTHY ({total_rules} rules, temp wildcards active){COLOR_RESET}"
+                    extra_info = f", max session: {max_session_rules}" if max_session_rules > 0 else ""
+                    sandbox_status = f"{COLOR_GREEN}HEALTHY ({total_rules} global rules, temp wildcards active{extra_info}){COLOR_RESET}"
                 else:
                     sandbox_status = f"{COLOR_YELLOW}VULNERABLE ({total_rules} rules, missing temp wildcards, run wb-sandbox heal){COLOR_RESET}"
                     has_warning_or_risk = True
@@ -2771,7 +3077,9 @@ def run_doctor():
                 sandbox_status = f"{COLOR_YELLOW}WARNING: IPC_MISMATCH ({err_msg}; upstream protocol may have changed){COLOR_RESET}"
                 has_warning_or_risk = True
             else:
-                sandbox_status = f"{COLOR_YELLOW}WARNING: IPC_UNRESPONSIVE (Socket exists but IPC timed out; possible upstream protocol change){COLOR_RESET}"
+                err_code = diag.get("error_code") if diag else "UNKNOWN"
+                detail = diag.get("detail", "timeout") if diag else "timeout"
+                sandbox_status = f"{COLOR_YELLOW}WARNING: IPC_UNRESPONSIVE ({err_code}: {detail}; possible SBPL compilation lockup){COLOR_RESET}"
                 has_warning_or_risk = True
         else:
             if gui_running:
@@ -3146,7 +3454,7 @@ def main():
         show_status(as_json=as_json)
         return
     if "doctor" in prog_name:
-        ok = run_doctor()
+        ok = run_doctor(args)
         sys.exit(0 if ok else 1)
     if "chat" in prog_name:
         parse_and_run_chat(args)
@@ -3211,7 +3519,7 @@ def main():
     elif cmd in ["sandbox", "sb", "seatbelt"]:
         run_sandbox_cmd(args[1:])
     elif cmd in ["doctor", "check", "diag", "diagnose"]:
-        ok = run_doctor()
+        ok = run_doctor(args[1:])
         sys.exit(0 if ok else 1)
     elif cmd in ["switch", "use"]:
         if len(args) > 1:
