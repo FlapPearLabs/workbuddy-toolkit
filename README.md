@@ -131,6 +131,8 @@ Conflict Status       : ZERO CONFLICTS DETECTED (Idempotent rules & passive moni
 Rollback Instruction  : Safe 0-residue rollback available anytime via: python3 uninstall.py
 ```
 > 若官方协议变更，输出将精准变为 `IPC_MISMATCH` 或 `POTENTIAL DRIFT DETECTED`，并给出即时指引，彻底杜绝用户在不知情状态下盲目运行。
+> 
+> 💡 **命令假死与 exit 137 专项取证**：若在日常开发中遇到终端执行命令卡死或报 exit 137，可直接运行 `wb-doctor --inspect-137`（或 `--json`）获取法医级事故现场指纹分析，详见 [7. 事故现场指纹分析](#-终端执行失效与-exit-137-事故现场指纹分析-wb-doctor---inspect-137)。
 
 #### ↩️ 安全回退与零残留卸载（0 Residue Rollback）
 若需要临时或永久回退至系统原生状态，直接在 Toolkit 目录运行：
@@ -194,6 +196,7 @@ python3 uninstall.py
   - [5. 每日签到与连续对话保活 (wb-checkin)](#5-每日签到与连续对话保活-wb-checkin)
   - [6. 终端极速对话 (wb-chat)](#6-终端极速对话-wb-chat)
   - [7. 环境与凭证兼容性诊断 (wb-doctor)](#7-环境与凭证兼容性诊断-wb-doctor)
+    - [🔬 终端执行失效与 exit 137 事故现场指纹分析 (wb-doctor --inspect-137)](#-终端执行失效与-exit-137-事故现场指纹分析-wb-doctor---inspect-137)
   - [8. 容灾轮换路由网关 (wb-router)](#8-容灾轮换路由网关-wb-router)
   - [9. 模型全景资产与倍率透视 (wb-models)](#9-模型全景资产与倍率透视-wb-models)
   - [10. 沙盒日志看门狗配置与管理 (workbuddy-log-guard)](#10-沙盒日志看门狗配置与管理-workbuddy-log-guard)
@@ -1053,10 +1056,10 @@ wb-chat backup_acc "请回复：测试通过"
 
 ### 7. 环境与凭证兼容性诊断 (`wb-doctor`)
 
-一键检查本地凭据格式与 WorkBuddy 运行时原生解密能力：
+一键检查本地凭据格式、WorkBuddy 运行时原生解密能力、沙盒规则健康度与 sccache 编译缓存复用：
 
 ```bash
-workbuddy doctor   # 或 wb-doctor
+workbuddy doctor   # 或别名: wb-doctor
 ```
 
 输出示例：
@@ -1067,12 +1070,56 @@ Auth file             : OK (~/.workbuddy/auth/workbuddy-desktop.info)
 Credential format     : encrypted
 Encrypted scheme      : detected (sym-v1 / suite 1)
 WorkBuddy runtime     : FOUND (/Applications/WorkBuddy.app/Contents/MacOS/Electron)
+WorkBuddy version     : 5.7.6
 Credential resolver   : AVAILABLE (Electron 37.10.3)
 Profile count         : 2
 API capability        : READY
+Upstream sandbox spec : VULNERABLE (Upstream 5.7.6 omits macOS temp rules; sidecar heal active)
+Sandbox & Seatbelt    : HEALTHY (48 global rules, temp wildcards active)
+Log guard daemon      : ACTIVE (LaunchAgent loaded, 1800s periodic watch)
+Cargo sccache reuse   : CONFIGURED (sccache enabled)
 
 RESULT: COMPATIBLE
 ```
+
+#### 🔬 终端执行失效与 exit 137 事故现场指纹分析 (`wb-doctor --inspect-137`)
+
+长任务常驻运行（如连续跑数天的知乎数据抓取 `zhihugrabber`）或由 Agent 调用终端时，若遭遇任何终端命令卡死、超时 120 秒报 `Process terminated with exit_code: 137 (SIGKILL)`，随时在终端运行法医级现场指纹审计：
+
+```bash
+# 执行法医级 137 / 终端失效现场指纹审计
+wb-doctor --inspect-137
+
+# 或使用别名与程序化 JSON 规范输出
+wb-doctor --shell-failure --json
+```
+
+**白盒物理实测输出示例**：
+```text
+=== WorkBuddy Shell Failure & Exit 137 Forensic Fingerprint ===
+
+Timestamp             : 2026-10-08T20:48:29+08:00
+Platform              : darwin
+WorkBuddy Version     : 5.7.6
+Toolkit Version       : 0.6.0
+Sandbox Center Found  : YES
+Center Responsive     : YES
+Center CPU Usage      : 0.0%
+Global Rules Count    : 48
+Max Session Rules     : 0
+Temp Wildcards Active : YES
+Memory Pressure       : warn
+Log References        : 1 files identified
+
+Classification Result :
+  Classification      : PTY_LIFECYCLE_LIKELY
+  Failure Family      : Family B
+  Confidence          : HIGH
+  Attribution Reason  : 官方二进制 MacPtyProcess::drop/InteractiveProcess::drop 在持有 master_fd 时等待 reader thread join 导致 5002ms 硬卡死
+```
+
+> **坚决贯彻 `EXIT_137 != 根因` 负控制铁律**：  
+> `exit 137` 为 POSIX `SIGKILL` 强杀信号终态，可能是前端 120s 超时看门狗杀伤（Family E）、内核 Jetsam OOM 杀伤（Family C/D）或规则膨胀导致握手超时（Family A）。指纹器在规则健康且缺乏死锁凭证时，**绝不作伪归因**，严格归类为 `Family H (UNKNOWN)`，拿物理证据说话！
 
 ---
 
@@ -1152,13 +1199,13 @@ workbuddy-log-guard
 
 ### 11. 沙盒状态自愈与会话快照治理 (`wb-sandbox`)
 
-专为根治 macOS 下 Seatbelt 1.7 万条规则雪崩、SBPL 编译 100% CPU 卡死 64 分钟、PTY 延迟与 Session 快照泄漏而设计：
+专为根治 macOS 下 Seatbelt 1.7 万条规则雪崩、SBPL 编译 100% CPU 卡死 64 分钟、PTY 延迟、前端 120s 强杀 (exit 137) 与 Session 快照泄漏而设计：
 
 ```bash
 # 1. 查看当前沙盒中心运行状态、Seatbelt 规则总数、临时通配规则状态与历史会话快照
 wb-sandbox status   # 或: workbuddy sandbox status
 
-# 2. 一键自愈：直连 sandbox-center IPC 动态补齐 macOS 临时目录通配规则，清理膨胀的 auto_grant 规则
+# 2. 一键自愈：直连 sandbox-center IPC 动态补齐 macOS 临时目录通配规则，双向修剪全局与活跃会话膨胀的 auto_grant 规则
 wb-sandbox heal     # 或: workbuddy sandbox heal
 
 # 3. 外科手术式清理：TTL 轮转清理 72 小时前陈旧 modify_backup 会话快照，并在主窗口退出时级联清理孤儿守护进程
@@ -1175,6 +1222,11 @@ Temp wildcard rules   : ACTIVE (macOS Temp Wildcards Installed)
 Session workspace     : 14 active session histories
 WorkBuddy GUI status  : RUNNING
 ```
+
+#### 🛠️ 核心自愈机制
+1. **顶层 `sessionId` Wire 协议对齐**：精确对齐官方 Rust `CenterIpcMessage` 规范，将 `sessionId` 注入协议顶层信封，实现跨进程对特定活跃会话上万条 `auto_grant` 规则的物理定点移除；
+2. **跨进程 Single-Flight 排他锁**：基于 `fcntl.flock` (POSIX) / `msvcrt.locking` (Windows) 与锁内回读校验，并发触发零冲突、零撕裂；
+3. **全链路 Monotonic Deadline 保护**：贯穿连接、发送与分片接收全周期，超时主动 Fail-Open 绝不卡死用户命令。
 
 ---
 
