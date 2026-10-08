@@ -235,7 +235,7 @@ class TestForensic137(unittest.TestCase):
         """
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_100.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{now_str} waitpid returned exit_code=137, killed=true\n")
 
         mock_guard = MagicMock()
@@ -268,7 +268,7 @@ class TestForensic137(unittest.TestCase):
         """
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_200.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{now_str} sandbox.rules.fetch_profile 超时 3000ms\n"
                     f"rules_json_len=6985694\nexit_code=137\n")
 
@@ -297,7 +297,7 @@ class TestForensic137(unittest.TestCase):
         """
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_300.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{now_str} InteractiveProcess::drop join 超时 5000ms\n")
 
         mock_guard = MagicMock()
@@ -322,7 +322,7 @@ class TestForensic137(unittest.TestCase):
         """
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_400.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f'{now_str} ProcessKill(signal=Some("term")) exit_code=137\n')
 
         mock_guard = MagicMock()
@@ -370,7 +370,7 @@ class TestForensic137(unittest.TestCase):
         """
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_oom.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{now_str} Jetsam event: memorystatus kill process exit_code=137\n")
 
         mock_guard = MagicMock()
@@ -396,7 +396,7 @@ class TestForensic137(unittest.TestCase):
         """
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_rlimit.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{now_str} RLIMIT_DATA exceeded memory limit, killed=true exit_code=137\n")
 
         mock_guard = MagicMock()
@@ -427,7 +427,7 @@ class TestForensic137(unittest.TestCase):
         log_file = os.path.join(self.temp_dir, "sandbox_stale_pty.log")
         stale_time = time.time() - 7200
         stale_str = datetime.datetime.fromtimestamp(stale_time).strftime("%Y-%m-%d %H:%M:%S")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{stale_str} InteractiveProcess::drop join 超时 5000ms\n"
                     f"waitpid returned exit_code=137\n")
 
@@ -478,7 +478,7 @@ class TestForensic137(unittest.TestCase):
         t_3h_ago = datetime.datetime.fromtimestamp(time.time() - 10800).strftime("%Y-%m-%d %H:%M:%S")
         t_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             # 3 hours ago: stale PTY timeout and ProcessKill
             f.write(f"{t_3h_ago} InteractiveProcess::drop join 超时 5000ms\n")
             f.write(f'{t_3h_ago} ProcessKill(signal=Some("term")) exit_code=137\n')
@@ -516,7 +516,7 @@ class TestForensic137(unittest.TestCase):
         or high-confidence diagnosis when incident_window_minutes is active.
         """
         log_file = os.path.join(self.temp_dir, "sandbox_no_timestamps.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write("InteractiveProcess::drop join 超时 5000ms\n"
                     "waitpid returned exit_code=137\n")
 
@@ -547,7 +547,7 @@ class TestForensic137(unittest.TestCase):
         """
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_info_mem.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{now_str} memorystatus subsystem initialized\n"
                     f"{now_str} kernel memorystatus thread started\n")
 
@@ -577,7 +577,7 @@ class TestForensic137(unittest.TestCase):
         """
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_info_cgroup.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{now_str} detected cgroup v2 controller hierarchy\n"
                     f"{now_str} /proc/self/cgroup inspection complete\n"
                     f"{now_str} rlimit_nofile configured: 1024\n")
@@ -607,7 +607,7 @@ class TestForensic137(unittest.TestCase):
         """
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_cgroup_kill.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{now_str} cgroup oom-kill event: memory.max exceeded, terminated exit_code=137\n")
 
         mock_guard = MagicMock()
@@ -630,9 +630,9 @@ class TestForensic137(unittest.TestCase):
         Verify that WorkBuddy's native [YYYY/M/D HH:MM:SS.mmm] log format is parsed correctly.
         """
         now_dt = datetime.datetime.now()
-        wb_ts = f"[{now_dt.year}/{now_dt.month}/{now_dt.day} {now_dt.hour}:{now_dt.minute}:{now_dt.second}.123]"
+        wb_ts = f"[{now_dt.year}/{now_dt.month}/{now_dt.day} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}.123]"
         log_file = os.path.join(self.temp_dir, "sandbox_wb_format.log")
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             f.write(f"{wb_ts}[6105640960][sandbox-core][I] InteractiveProcess::drop join 超时 5000ms\n")
 
         mock_guard = MagicMock()
