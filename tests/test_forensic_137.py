@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import time
+import datetime
 import socket
 import shutil
 import tempfile
@@ -232,9 +233,10 @@ class TestForensic137(unittest.TestCase):
         4. No memory pressure
         The fingerprint MUST classify as UNKNOWN (Family H), NEVER as RULE_EXPLOSION_LIKELY.
         """
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_100.log")
         with open(log_file, "w") as f:
-            f.write("2026-10-08 12:00:00 waitpid returned exit_code=137, killed=true\n")
+            f.write(f"{now_str} waitpid returned exit_code=137, killed=true\n")
 
         mock_guard = MagicMock()
         mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
@@ -264,10 +266,11 @@ class TestForensic137(unittest.TestCase):
         When rules exceed 2000 or session rules exceed 1000 without temp wildcards,
         the fingerprint MUST classify as RULE_EXPLOSION_LIKELY (Family A).
         """
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_200.log")
         with open(log_file, "w") as f:
-            f.write("2026-10-08 12:00:00 sandbox.rules.fetch_profile 超时 3000ms\n"
-                    "rules_json_len=6985694\nexit_code=137\n")
+            f.write(f"{now_str} sandbox.rules.fetch_profile 超时 3000ms\n"
+                    f"rules_json_len=6985694\nexit_code=137\n")
 
         mock_guard = MagicMock()
         mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
@@ -289,12 +292,13 @@ class TestForensic137(unittest.TestCase):
     def test_inspect_137_positive_pty_lifecycle_family_b(self):
         """
         POSITIVE CONTROL:
-        When log shows PTY 5002ms teardown hangs without rule explosion,
+        When log shows PTY 5002ms teardown hangs without rule explosion in incident window,
         the fingerprint MUST classify as PTY_LIFECYCLE_LIKELY (Family B).
         """
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_300.log")
         with open(log_file, "w") as f:
-            f.write("2026-10-08 12:00:00 InteractiveProcess::drop join 超时 5000ms\n")
+            f.write(f"{now_str} InteractiveProcess::drop join 超时 5000ms\n")
 
         mock_guard = MagicMock()
         mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
@@ -313,12 +317,13 @@ class TestForensic137(unittest.TestCase):
     def test_inspect_137_positive_supervisor_kill_family_e(self):
         """
         POSITIVE CONTROL:
-        When log shows 120s ProcessKill without rule explosion,
+        When log shows 120s ProcessKill without rule explosion in incident window,
         the fingerprint MUST classify as SUPERVISOR_KILL_LIKELY (Family E).
         """
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_400.log")
         with open(log_file, "w") as f:
-            f.write('2026-10-08 12:00:00 ProcessKill(signal=Some("term")) exit_code=137\n')
+            f.write(f'{now_str} ProcessKill(signal=Some("term")) exit_code=137\n')
 
         mock_guard = MagicMock()
         mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
@@ -353,18 +358,20 @@ class TestForensic137(unittest.TestCase):
         self.assertIn("workbuddy_version", data)
         self.assertIn("incident_evidence", data)
         self.assertIn("historical_evidence", data)
+        self.assertIn("unscoped_evidence", data)
         self.assertIn("current_state", data)
         self.assertIn("taxonomy_scope", data)
 
     def test_inspect_137_positive_oom_family_c(self):
         """
         POSITIVE CONTROL:
-        When log shows Jetsam / memorystatus kill or memory pressure is critical,
+        When log shows Jetsam / memorystatus kill or memory pressure is critical in incident window,
         the fingerprint MUST classify as OOM_LIKELY (Family C).
         """
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_oom.log")
         with open(log_file, "w") as f:
-            f.write("2026-10-08 12:00:00 Jetsam event: memorystatus kill process exit_code=137\n")
+            f.write(f"{now_str} Jetsam event: memorystatus kill process exit_code=137\n")
 
         mock_guard = MagicMock()
         mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
@@ -384,12 +391,13 @@ class TestForensic137(unittest.TestCase):
     def test_inspect_137_positive_resource_limit_family_d(self):
         """
         POSITIVE CONTROL:
-        When log shows rlimit/cgroup limit exhaustion without rule explosion,
+        When log shows rlimit/cgroup limit exhaustion without rule explosion in incident window,
         the fingerprint MUST classify as RESOURCE_LIMIT_LIKELY (Family D).
         """
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = os.path.join(self.temp_dir, "sandbox_rlimit.log")
         with open(log_file, "w") as f:
-            f.write("2026-10-08 12:00:00 RLIMIT_DATA exceeded memory limit, killed=true exit_code=137\n")
+            f.write(f"{now_str} RLIMIT_DATA exceeded memory limit, killed=true exit_code=137\n")
 
         mock_guard = MagicMock()
         mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
@@ -417,13 +425,13 @@ class TestForensic137(unittest.TestCase):
         4. If the incident window is expanded to 180 minutes, it should then be captured in incident_evidence.
         """
         log_file = os.path.join(self.temp_dir, "sandbox_stale_pty.log")
+        stale_time = time.time() - 7200
+        stale_str = datetime.datetime.fromtimestamp(stale_time).strftime("%Y-%m-%d %H:%M:%S")
         with open(log_file, "w") as f:
-            f.write("2026-10-08 10:00:00 InteractiveProcess::drop join 超时 5000ms\n"
-                    "waitpid returned exit_code=137\n")
+            f.write(f"{stale_str} InteractiveProcess::drop join 超时 5000ms\n"
+                    f"waitpid returned exit_code=137\n")
 
-        # Set mtime to 2 hours ago (7200 seconds before now)
-        stale_mtime = time.time() - 7200
-        os.utime(log_file, (stale_mtime, stale_mtime))
+        os.utime(log_file, (stale_time, stale_time))
 
         mock_guard = MagicMock()
         mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
@@ -456,6 +464,193 @@ class TestForensic137(unittest.TestCase):
             self.assertEqual(fp_wide["root_cause_family"], "B")
             self.assertTrue(fp_wide["incident_evidence"]["pty_join_timeout_found"])
 
+    def test_inspect_137_p1_negative_control_stale_log_recent_append(self):
+        """
+        P1 HARD NEGATIVE CONTROL (Record-level windowing vs. file mtime):
+        When a long-running log file has 3-hour-old PTY timeout and Supervisor kill records,
+        but recently received a benign append (bringing file mtime to NOW):
+        1. File mtime is in incident window, BUT record timestamps are 3 hours old.
+        2. Record-level windowing MUST route the stale errors to historical_evidence.
+        3. incident_evidence must be clean.
+        4. Current classification MUST be UNKNOWN (Family H), NEVER Family B or E.
+        """
+        log_file = os.path.join(self.temp_dir, "sandbox_longrunning.log")
+        t_3h_ago = datetime.datetime.fromtimestamp(time.time() - 10800).strftime("%Y-%m-%d %H:%M:%S")
+        t_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        with open(log_file, "w") as f:
+            # 3 hours ago: stale PTY timeout and ProcessKill
+            f.write(f"{t_3h_ago} InteractiveProcess::drop join 超时 5000ms\n")
+            f.write(f'{t_3h_ago} ProcessKill(signal=Some("term")) exit_code=137\n')
+            # NOW: benign normal log entry
+            f.write(f"{t_now} [sandbox-core][I] normal command execution exit_code=0\n")
+
+        # File mtime is implicitly NOW because we just wrote to it
+        mock_guard = MagicMock()
+        mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard.find_active_uid.return_value = "uid-test"
+        mock_guard.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {"fileRules": [{"path": "/var/folders/**"}]}
+        }
+
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard):
+            fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+
+            self.assertFalse(fp["incident_evidence"]["pty_join_timeout_found"],
+                             "Record-level windowing failed: 3h-old PTY error was falsely included in incident_evidence!")
+            self.assertFalse(fp["incident_evidence"]["supervisor_kill_found"],
+                             "Record-level windowing failed: 3h-old supervisor kill was falsely included in incident_evidence!")
+            self.assertTrue(fp["historical_evidence"]["pty_join_timeout_found"])
+            self.assertTrue(fp["historical_evidence"]["supervisor_kill_found"])
+            self.assertEqual(fp["classification"], "UNKNOWN")
+            self.assertEqual(fp["root_cause_family"], "H")
+            self.assertEqual(fp["confidence"], "LOW")
+            self.assertIn("historical_evidence", fp["reason"])
+
+    def test_inspect_137_p1_negative_control_unparseable_timestamp_not_promoted(self):
+        """
+        P1 NEGATIVE CONTROL:
+        When log records lack parseable timestamps, they MUST be relegated to
+        historical_evidence / unscoped_evidence, and NEVER elevated to incident_evidence
+        or high-confidence diagnosis when incident_window_minutes is active.
+        """
+        log_file = os.path.join(self.temp_dir, "sandbox_no_timestamps.log")
+        with open(log_file, "w") as f:
+            f.write("InteractiveProcess::drop join 超时 5000ms\n"
+                    "waitpid returned exit_code=137\n")
+
+        mock_guard = MagicMock()
+        mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard.find_active_uid.return_value = "uid-test"
+        mock_guard.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {"fileRules": [{"path": "/var/folders/**"}]}
+        }
+
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard):
+            fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+
+            self.assertFalse(fp["incident_evidence"]["pty_join_timeout_found"],
+                             "Unparseable timestamp record must NOT be promoted to incident_evidence!")
+            self.assertTrue(fp["historical_evidence"]["pty_join_timeout_found"])
+            self.assertTrue(fp["unscoped_evidence"]["pty_join_timeout_found"])
+            self.assertEqual(fp["classification"], "UNKNOWN")
+            self.assertEqual(fp["root_cause_family"], "H")
+
+    def test_inspect_137_p2_negative_control_memorystatus_informational(self):
+        """
+        P2 NEGATIVE CONTROL:
+        Informational lines containing 'memorystatus subsystem initialized' or
+        'kernel memorystatus thread started' without actual kill/termination events
+        MUST NEVER trigger Family C (OOM_LIKELY).
+        """
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_file = os.path.join(self.temp_dir, "sandbox_info_mem.log")
+        with open(log_file, "w") as f:
+            f.write(f"{now_str} memorystatus subsystem initialized\n"
+                    f"{now_str} kernel memorystatus thread started\n")
+
+        mock_guard = MagicMock()
+        mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard.find_active_uid.return_value = "uid-test"
+        mock_guard.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {"fileRules": [{"path": "/var/folders/**"}]}
+        }
+
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard):
+            fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+
+            self.assertFalse(fp["incident_evidence"]["oom_found"],
+                             "Purely informational memorystatus logs must not set oom_found!")
+            self.assertNotEqual(fp["classification"], "OOM_LIKELY")
+            self.assertNotEqual(fp["root_cause_family"], "C")
+            self.assertEqual(fp["root_cause_family"], "H")
+
+    def test_inspect_137_p2_negative_control_cgroup_informational(self):
+        """
+        P2 NEGATIVE CONTROL:
+        Informational lines mentioning 'detected cgroup v2' or '/proc/self/cgroup' or
+        'rlimit_nofile configured: 1024' without actual limit exceeded or kill events
+        MUST NEVER trigger Family D (RESOURCE_LIMIT_LIKELY).
+        """
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_file = os.path.join(self.temp_dir, "sandbox_info_cgroup.log")
+        with open(log_file, "w") as f:
+            f.write(f"{now_str} detected cgroup v2 controller hierarchy\n"
+                    f"{now_str} /proc/self/cgroup inspection complete\n"
+                    f"{now_str} rlimit_nofile configured: 1024\n")
+
+        mock_guard = MagicMock()
+        mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard.find_active_uid.return_value = "uid-test"
+        mock_guard.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {"fileRules": [{"path": "/var/folders/**"}]}
+        }
+
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard):
+            fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+
+            self.assertFalse(fp["incident_evidence"]["resource_limit_found"],
+                             "Purely informational cgroup/rlimit logs must not set resource_limit_found!")
+            self.assertNotEqual(fp["classification"], "RESOURCE_LIMIT_LIKELY")
+            self.assertNotEqual(fp["root_cause_family"], "D")
+            self.assertEqual(fp["root_cause_family"], "H")
+
+    def test_inspect_137_p2_positive_control_cgroup_oom_kill(self):
+        """
+        P2 POSITIVE CONTROL:
+        Log record containing 'cgroup oom-kill event: memory.max exceeded, terminated exit_code=137'
+        has both context and termination event, MUST trigger Family D (RESOURCE_LIMIT_LIKELY).
+        """
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_file = os.path.join(self.temp_dir, "sandbox_cgroup_kill.log")
+        with open(log_file, "w") as f:
+            f.write(f"{now_str} cgroup oom-kill event: memory.max exceeded, terminated exit_code=137\n")
+
+        mock_guard = MagicMock()
+        mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard.find_active_uid.return_value = "uid-test"
+        mock_guard.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {"fileRules": [{"path": "/var/folders/**"}]}
+        }
+
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard):
+            fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+
+            self.assertTrue(fp["incident_evidence"]["resource_limit_found"])
+            self.assertEqual(fp["classification"], "RESOURCE_LIMIT_LIKELY")
+            self.assertEqual(fp["root_cause_family"], "D")
+
+    def test_inspect_137_workbuddy_slash_timestamp_format(self):
+        """
+        Verify that WorkBuddy's native [YYYY/M/D HH:MM:SS.mmm] log format is parsed correctly.
+        """
+        now_dt = datetime.datetime.now()
+        wb_ts = f"[{now_dt.year}/{now_dt.month}/{now_dt.day} {now_dt.hour}:{now_dt.minute}:{now_dt.second}.123]"
+        log_file = os.path.join(self.temp_dir, "sandbox_wb_format.log")
+        with open(log_file, "w") as f:
+            f.write(f"{wb_ts}[6105640960][sandbox-core][I] InteractiveProcess::drop join 超时 5000ms\n")
+
+        mock_guard = MagicMock()
+        mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard.find_active_uid.return_value = "uid-test"
+        mock_guard.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {"fileRules": [{"path": "/var/folders/**"}]}
+        }
+
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard):
+            fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+
+            self.assertTrue(fp["incident_evidence"]["pty_join_timeout_found"],
+                            "Native WorkBuddy [YYYY/M/D HH:MM:SS.mmm] format was not recognized!")
+            self.assertEqual(fp["classification"], "PTY_LIFECYCLE_LIKELY")
+            self.assertEqual(fp["root_cause_family"], "B")
+
     def test_cli_inspect_137_window_flag(self):
         """
         Verify CLI accepts --since-minutes / --incident-window and exposes bounded evidence structure.
@@ -472,6 +667,7 @@ class TestForensic137(unittest.TestCase):
         self.assertEqual(data.get("incident_window_minutes"), 15)
         self.assertIn("incident_evidence", data)
         self.assertIn("historical_evidence", data)
+        self.assertIn("unscoped_evidence", data)
         self.assertIn("current_state", data)
         self.assertIn("taxonomy_scope", data)
 

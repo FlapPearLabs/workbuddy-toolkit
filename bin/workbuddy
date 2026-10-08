@@ -28,7 +28,8 @@ import base64
 import unicodedata
 import random
 import webbrowser
-from datetime import datetime
+import datetime as _dt
+from datetime import datetime, timezone, timedelta
 
 VERSION = "0.6.0"
 CLIENT_USER_AGENT = "WorkBuddy/5.6.2"
@@ -2631,12 +2632,180 @@ def get_launchagent_status():
     except Exception:
         return "CONFIGURED"
 
+LOG_TS_PATTERNS = [
+    # WorkBuddy format: [2026/10/7 11:50:13.807] or 2026/10/7 11:50:13
+    re.compile(r"^\[?(\d{4})/(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d+))?\]?"),
+    # Standard format: [2026-10-08 12:00:00.500] or 2026-10-08 12:00:00
+    re.compile(r"^\[?(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d+))?\]?"),
+    # ISO-8601: 2026-10-08T12:00:00(.123)?(Z|[+-]\d{2}:?\d{2})?
+    re.compile(r"^\[?(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:(Z)|([+-]\d{2}):?(\d{2}))?\]?"),
+]
+
+def parse_log_timestamp(line):
+    """
+    解析日志行首的时间戳，转换为 Unix epoch 秒（float）。
+    若无时间戳或格式未知，返回 None。
+    """
+    if not line:
+        return None
+    s = line.strip()
+    if not s or s[0] not in ("[", "1", "2"):
+        return None
+
+    # Try ISO first if 'T' is present in date segment
+    if "T" in s[:25]:
+        m = LOG_TS_PATTERNS[2].match(s)
+        if m:
+            g = m.groups()
+            try:
+                y, mo, d, h, mi, sec = int(g[0]), int(g[1]), int(g[2]), int(g[3]), int(g[4]), int(g[5])
+                us = int(g[6][:6].ljust(6, "0")) if g[6] else 0
+                tz = None
+                if g[7] == "Z":
+                    tz = timezone.utc
+                elif g[8] and g[9]:
+                    tz = timezone(timedelta(hours=int(g[8]), minutes=int(g[9])))
+                dt = _dt.datetime(y, mo, d, h, mi, sec, us, tzinfo=tz)
+                return dt.timestamp()
+            except Exception:
+                pass
+
+    # Try slash format [YYYY/M/D HH:MM:SS]
+    if "/" in s[:12]:
+        m = LOG_TS_PATTERNS[0].match(s)
+        if m:
+            g = m.groups()
+            try:
+                y, mo, d, h, mi, sec = int(g[0]), int(g[1]), int(g[2]), int(g[3]), int(g[4]), int(g[5])
+                us = int(g[6][:6].ljust(6, "0")) if g[6] else 0
+                dt = _dt.datetime(y, mo, d, h, mi, sec, us)
+                return dt.timestamp()
+            except Exception:
+                pass
+
+    # Try dash format [YYYY-MM-DD HH:MM:SS]
+    m = LOG_TS_PATTERNS[1].match(s)
+    if m:
+        g = m.groups()
+        try:
+            y, mo, d, h, mi, sec = int(g[0]), int(g[1]), int(g[2]), int(g[3]), int(g[4]), int(g[5])
+            us = int(g[6][:6].ljust(6, "0")) if g[6] else 0
+            dt = _dt.datetime(y, mo, d, h, mi, sec, us)
+            return dt.timestamp()
+        except Exception:
+            pass
+
+    return None
+
+def split_log_into_records(chunk_text):
+    """
+    将日志块切分为逻辑记录 (records)。
+    具有显式时间戳的行开启新 record；无时间戳的后续行（换行调用栈/详情）作为 continuation lines 合并入上一条 record。
+    返回: [ (timestamp_epoch_or_None, record_text), ... ]
+    """
+    records = []
+    current_ts = None
+    current_lines = []
+
+    for line in chunk_text.splitlines():
+        ts = parse_log_timestamp(line)
+        if ts is not None:
+            if current_lines:
+                records.append((current_ts, "\n".join(current_lines)))
+            current_ts = ts
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+
+    if current_lines:
+        records.append((current_ts, "\n".join(current_lines)))
+
+    return records
+
+def check_oom_event(text):
+    """
+    评估日志文本是否包含真实内核 OOM / Jetsam 进程杀伤事件。
+    严格执行 CONTEXT_SIGNAL + TERMINATION_EVENT 组合断言，坚决杜绝仅因出现
+    'memorystatus subsystem initialized' 等信息性日志产生误判。
+    """
+    if not text:
+        return False
+    t_lower = text.lower()
+
+    oom_contexts = [
+        "jetsam",
+        "memorystatus",
+        "kernel-oom",
+        "kernel_oom",
+        "out of memory",
+        "oom-killer",
+        "oom_killer"
+    ]
+    if not any(c in t_lower for c in oom_contexts):
+        return False
+
+    oom_events = [
+        "kill",
+        "killed",
+        "killing",
+        "victim",
+        "terminated",
+        "sigkill",
+        "exit_code=137",
+        "exit_code: 137",
+        "exit 137",
+        "per-process-limit",
+        "exceeded physical footprint",
+        "highwater"
+    ]
+    return any(e in t_lower for e in oom_events)
+
+def check_resource_limit_event(text):
+    """
+    评估日志文本是否包含真实资源超限 (rlimit / cgroup / quota) 终止事件。
+    严格执行 CONTEXT_SIGNAL + TERMINATION_EVENT 组合断言，坚决杜绝仅因出现
+    'detected cgroup v2'、'/proc/self/cgroup' 等信息性探测日志产生误判。
+    """
+    if not text:
+        return False
+    t_lower = text.lower()
+
+    limit_contexts = [
+        "rlimit",
+        "cgroup",
+        "resource limit",
+        "quota",
+        "memory.max",
+        "memory.high"
+    ]
+    has_context = any(c in t_lower for c in limit_contexts)
+    if not has_context:
+        return "exceeded memory limit" in t_lower or "resource exhausted" in t_lower
+
+    limit_events = [
+        "exceeded",
+        "exceed",
+        "exhausted",
+        "oom-kill",
+        "oom_kill",
+        "kill",
+        "killed",
+        "killing",
+        "terminated",
+        "exit_code=137",
+        "exit_code: 137",
+        "exit 137",
+        "sigkill"
+    ]
+    return any(e in t_lower for e in limit_events)
+
 def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
     """
     轻量级 137 / shell 事故现场指纹分析器与归因分类器。
     严格执行物理铁证与负控制契约：exit 137 仅为终态症状，
     无充分规则膨胀凭证时绝不归因至 RULE_EXPLOSION。
-    基于 incident_window_minutes 严格隔离当前事故证据与历史日志证据，杜绝历史日志污染当前分类。
+    基于 incident_window_minutes 严格按单个 log record 自有时间戳进行窗口裁切，
+    杜绝历史日志在近期追加后因文件 mtime 刷新而污染当前事故分类。
     """
     import datetime
 
@@ -2731,7 +2900,7 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
         except Exception:
             pass
 
-    # 扫描物理日志痕迹 (严格区分当前事故窗口证据与历史证据)
+    # 扫描物理日志痕迹 (严格在 record 级别裁切时间戳)
     now_ts = time.time()
     cutoff_ts = (now_ts - (incident_window_minutes * 60)) if (incident_window_minutes is not None and incident_window_minutes > 0) else 0
 
@@ -2748,6 +2917,18 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
     }
 
     historical_evidence = {
+        "rule_explosion_found": False,
+        "max_rules_in_logs": 0,
+        "profile_timeout_found": False,
+        "pty_join_timeout_found": False,
+        "supervisor_kill_found": False,
+        "exit_137_found": False,
+        "oom_found": False,
+        "resource_limit_found": False,
+        "relevant_log_files": []
+    }
+
+    unscoped_evidence = {
         "rule_explosion_found": False,
         "max_rules_in_logs": 0,
         "profile_timeout_found": False,
@@ -2791,46 +2972,74 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
     log_candidates.sort(key=lambda x: x[0], reverse=True)
 
     for mtime, fp, size in log_candidates[:10]:
-        is_incident = (mtime >= cutoff_ts)
-        target_ev = incident_evidence if is_incident else historical_evidence
         try:
             with open(fp, "rb") as f:
                 offset = max(0, size - 500 * 1024)
                 f.seek(offset)
                 chunk = f.read().decode("utf-8", errors="ignore")
 
-                matched = False
-                if "exit_code=137" in chunk or "exit_code: 137" in chunk or "killed=true" in chunk:
-                    target_ev["exit_137_found"] = True
-                    matched = True
-                if "ProcessKill" in chunk and ('signal=Some("term")' in chunk or 'signal=Some("kill")' in chunk):
-                    target_ev["supervisor_kill_found"] = True
-                    matched = True
-                if "InteractiveProcess::drop" in chunk and "join 超时" in chunk:
-                    target_ev["pty_join_timeout_found"] = True
-                    matched = True
-                if "sandbox.rules.fetch_profile 超时" in chunk:
-                    target_ev["profile_timeout_found"] = True
-                    matched = True
-                if any(s in chunk for s in ["Jetsam", "memorystatus", "kernel-oom", "Out of memory: Kill process"]):
-                    target_ev["oom_found"] = True
-                    matched = True
-                chunk_lower = chunk.lower()
-                if any(s in chunk_lower for s in ["rlimit", "cgroup", "rlimit_"]) or "exceeded memory limit" in chunk_lower:
-                    target_ev["resource_limit_found"] = True
-                    matched = True
+            records = split_log_into_records(chunk)
+            for rec_ts, rec_text in records:
+                if not rec_text.strip():
+                    continue
 
-                import re
-                rule_lens = [int(m) for m in re.findall(r"rules_json_len=(\d+)", chunk)]
+                if cutoff_ts > 0:
+                    is_rec_incident = (rec_ts is not None and rec_ts >= cutoff_ts)
+                else:
+                    is_rec_incident = True
+
+                target_ev = incident_evidence if is_rec_incident else historical_evidence
+
+                rec_matched = False
+                if "exit_code=137" in rec_text or "exit_code: 137" in rec_text or "killed=true" in rec_text:
+                    target_ev["exit_137_found"] = True
+                    rec_matched = True
+                if "ProcessKill" in rec_text and ('signal=Some("term")' in rec_text or 'signal=Some("kill")' in rec_text):
+                    target_ev["supervisor_kill_found"] = True
+                    rec_matched = True
+                if "InteractiveProcess::drop" in rec_text and "join 超时" in rec_text:
+                    target_ev["pty_join_timeout_found"] = True
+                    rec_matched = True
+                if "sandbox.rules.fetch_profile 超时" in rec_text:
+                    target_ev["profile_timeout_found"] = True
+                    rec_matched = True
+                if check_oom_event(rec_text):
+                    target_ev["oom_found"] = True
+                    rec_matched = True
+                if check_resource_limit_event(rec_text):
+                    target_ev["resource_limit_found"] = True
+                    rec_matched = True
+
+                rule_lens = [int(m) for m in re.findall(r"rules_json_len=(\d+)", rec_text)]
                 if rule_lens:
                     max_len = max(rule_lens)
                     if max_len > 1_000_000:
                         target_ev["rule_explosion_found"] = True
                         target_ev["max_rules_in_logs"] = max(target_ev["max_rules_in_logs"], max_len)
-                        matched = True
+                        rec_matched = True
 
-                if matched and fp not in target_ev["relevant_log_files"]:
+                if rec_matched and fp not in target_ev["relevant_log_files"]:
                     target_ev["relevant_log_files"].append(fp)
+
+                # 记录无有效时间戳但命中的记录至 unscoped_evidence，确保不冒充 incident 证据
+                if rec_ts is None and cutoff_ts > 0 and rec_matched:
+                    if "exit_code=137" in rec_text or "exit_code: 137" in rec_text or "killed=true" in rec_text:
+                        unscoped_evidence["exit_137_found"] = True
+                    if "ProcessKill" in rec_text and ('signal=Some("term")' in rec_text or 'signal=Some("kill")' in rec_text):
+                        unscoped_evidence["supervisor_kill_found"] = True
+                    if "InteractiveProcess::drop" in rec_text and "join 超时" in rec_text:
+                        unscoped_evidence["pty_join_timeout_found"] = True
+                    if "sandbox.rules.fetch_profile 超时" in rec_text:
+                        unscoped_evidence["profile_timeout_found"] = True
+                    if check_oom_event(rec_text):
+                        unscoped_evidence["oom_found"] = True
+                    if check_resource_limit_event(rec_text):
+                        unscoped_evidence["resource_limit_found"] = True
+                    if rule_lens and max_len > 1_000_000:
+                        unscoped_evidence["rule_explosion_found"] = True
+                        unscoped_evidence["max_rules_in_logs"] = max(unscoped_evidence["max_rules_in_logs"], max_len)
+                    if fp not in unscoped_evidence["relevant_log_files"]:
+                        unscoped_evidence["relevant_log_files"].append(fp)
         except Exception:
             pass
 
@@ -2913,6 +3122,7 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
         },
         "incident_evidence": incident_evidence,
         "historical_evidence": historical_evidence,
+        "unscoped_evidence": unscoped_evidence,
         "log_evidence": incident_evidence,
         "classification": classification,
         "root_cause_family": family,
