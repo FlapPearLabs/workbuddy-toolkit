@@ -2,7 +2,7 @@
 
 [![CI: Cross-Platform Matrix](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit/actions/workflows/ci.yml)
 [![Release: v0.6.0](https://img.shields.io/badge/Release-v0.6.0-blue.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
-[![Tests: 96/96 Passed](https://img.shields.io/badge/Tests-96%2F96%20Passed%20(100%25)-brightgreen.svg)](tests/)
+[![Tests: 101/101 Passed](https://img.shields.io/badge/Tests-101%2F101%20Passed-brightgreen.svg)](tests/)
 [![Security: Zero-Leak](https://img.shields.io/badge/Security-Zero--Leak%20Audit%20Passed-success.svg)](.github/workflows/ci.yml)
 [![Platform: macOS | Linux | Windows](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-brightgreen.svg)](https://github.com/FlapPearLabs/workbuddy-toolkit)
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
@@ -744,8 +744,8 @@ macOS 下由原生 LaunchAgent (`com.workbuddy.log-guard.plist`) 每 30 分钟�
   4. **Toolkit 历史修复盲区修复**：旧版 Toolkit 将 `sessionId` 置于 IPC 数据 payload 内部，导致无法修剪 per-session 的规则爆炸。本次修复确立官方 UDS 顶层 `sessionId` 规范，实现全局与活跃会话规则双向自愈。
 - **解决**：
   - 研发 `wb-sandbox heal`：修复 UDS 顶层 `sessionId` wire 协议，通过跨进程 Single-Flight 内核排他锁（`fcntl.flock` / `msvcrt.locking`）与锁内回读校验杜绝并发撕裂，动态向 `sandbox-center` 注入 macOS 临时目录全量通配规则（`/var/folders/**`, `/tmp/**`），并双向定向修剪全局与活跃会话膨胀规则，SBPL 编译耗时从 64 分钟回归 0.2ms；
-  - 研发 `wb-sandbox clean`：在检测到 GUI 退出且无活跃用户任务时，基于原生 `libproc.dylib` C-FFI 安全级联回收孤儿守护进程，彻底根治发烫与卡死；
-  - 增强 `wb-doctor`：Check 5 增加全局与活跃会话全量沙盒规则审计与白盒错误码诊断，并提供 `--inspect-137` / `--shell-failure` / `--json` 事故现场指纹分析工具（具备严密负控制，无死锁凭证坚决输出 `Family H (UNKNOWN)`）。
+  - 研发 `wb-sandbox clean`：在检测到 GUI 退出且无活跃用户任务时，基于原生 `libproc.dylib` C-FFI 安全级联回收孤儿守护进程，消除残留发烫与卡死；
+  - 增强 `wb-doctor`：Check 5 增加全局与活跃会话全量沙盒规则审计与白盒错误码诊断，并提供 `--inspect-137` / `--shell-failure` / `--json` 事故现场指纹分析工具（具备基于 `--since-minutes` 窗口的物理隔离与严密负控制，无死锁凭证坚决输出 `Family H (UNKNOWN)`；Taxonomy 形式化定义 A~H 八大故障族，自动分类器覆盖核心可识别特征子集 A, B, C, D, E, H）。
 - 🔗 **深度物理凭证报告**：👉 [阅读《事故四深度取证报告：Seatbelt 1.7 万行规则雪崩致 SBPL 编译 O(N²) 死锁 64 分钟与 PTY 5 秒假死》](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md)
 
 ---
@@ -1102,24 +1102,27 @@ Timestamp             : 2026-10-08T20:48:29+08:00
 Platform              : darwin
 WorkBuddy Version     : 5.7.6
 Toolkit Version       : 0.6.0
+Incident Window       : 30 minutes
 Sandbox Center Found  : YES
 Center Responsive     : YES
 Center CPU Usage      : 0.0%
 Global Rules Count    : 48
 Max Session Rules     : 0
 Temp Wildcards Active : YES
-Memory Pressure       : warn
-Log References        : 1 files identified
+Memory Pressure       : normal
+Log References        : 1 incident files (0 historical files)
 
 Classification Result :
   Classification      : PTY_LIFECYCLE_LIKELY
   Failure Family      : Family B
   Confidence          : HIGH
   Attribution Reason  : 官方二进制 MacPtyProcess::drop/InteractiveProcess::drop 在持有 master_fd 时等待 reader thread join 导致 5002ms 硬卡死
+  Taxonomy Scope      : Families A~H defined; automatic classifier covers A, B, C, D, E, H
 ```
 
-> **坚决贯彻 `EXIT_137 != 根因` 负控制铁律**：  
-> `exit 137` 为 POSIX `SIGKILL` 强杀信号终态，可能是前端 120s 超时看门狗杀伤（Family E）、内核 Jetsam OOM 杀伤（Family C/D）或规则膨胀导致握手超时（Family A）。指纹器在规则健康且缺乏死锁凭证时，**绝不作伪归因**，严格归类为 `Family H (UNKNOWN)`，拿物理证据说话！
+> **坚决贯彻 `EXIT_137 != 根因` 负控制铁律与时间窗口隔离**：  
+> `exit 137` 为 POSIX `SIGKILL` 强杀信号终态，可能是前端 120s 超时看门狗杀伤（Family E）、内核 Jetsam OOM 杀伤（Family C）、进程资源配额超限（Family D）或规则膨胀导致握手超时（Family A）。指纹器严格基于 `--since-minutes`（默认 30 分钟）隔离当前事故证据与历史残留日志，在规则健康且缺乏死锁凭证时，**绝不作伪归因**，严格归类为 `Family H (UNKNOWN)`，拿物理证据说话！  
+> Taxonomy 形式化定义了 A~H 八大故障族，自动分类器覆盖核心可识别特征子集（A, B, C, D, E, H）。
 
 ---
 
@@ -1169,7 +1172,7 @@ wb-models
 
 ### 10. 沙盒日志看门狗配置与管理 (`workbuddy-log-guard`)
 
-彻底根治 WorkBuddy 长期运行后 PTY 沙盒日志吞噬 10GB+ 磁盘积弊：
+有效治理 WorkBuddy 长期运行后 PTY 沙盒日志吞噬 10GB+ 磁盘积弊：
 
 ```bash
 # 手动立即触发一次日志安全审计与物理修剪
@@ -1199,7 +1202,7 @@ workbuddy-log-guard
 
 ### 11. 沙盒状态自愈与会话快照治理 (`wb-sandbox`)
 
-专为根治 macOS 下 Seatbelt 1.7 万条规则雪崩、SBPL 编译 100% CPU 卡死 64 分钟、PTY 延迟、前端 120s 强杀 (exit 137) 与 Session 快照泄漏而设计：
+专为治理与防御 macOS 下 Seatbelt 1.7 万条规则雪崩、SBPL 编译 100% CPU 卡死 64 分钟、PTY 延迟、前端 120s 强杀 (exit 137) 与 Session 快照泄漏而设计：
 
 ```bash
 # 1. 查看当前沙盒中心运行状态、Seatbelt 规则总数、临时通配规则状态与历史会话快照

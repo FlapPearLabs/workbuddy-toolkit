@@ -267,7 +267,7 @@ Architecture:    arm64
 
 ## 四、Toolkit 根治方案：我们的工具怎么修的
 
-为了彻底根治这一大厂草台班子级严重事故，我们在 `workbuddy-toolkit` 中打造了**动态 IPC 自愈与系统 C-FFI 进程安全收割**的双核解决方案：
+为了有效治理与自愈这一严重事故，我们在 `workbuddy-toolkit` 中打造了**动态 IPC 自愈与系统 C-FFI 进程安全收割**的双核解决方案：
 
 ### 1. `wb-sandbox heal`：底层 IPC 动态注入通配规则与膨胀清理
 
@@ -370,7 +370,7 @@ wb-sandbox heal
 wb-sandbox clean
 ```
 
-彻底解决 120 秒超时 SIGKILL、PTY 5 秒退出延迟与 64 分钟 100% CPU 电池风暴，还开发者一个安静、敏捷、可信赖的终端环境！
+有效治理 120 秒超时 SIGKILL、PTY 5 秒退出延迟与 64 分钟 100% CPU 电池风暴，还开发者一个安静、敏捷、可信赖的终端环境！
 
 ---
 
@@ -576,6 +576,7 @@ wb-doctor --shell-failure --json
   "platform": "darwin",
   "workbuddy_version": "5.6.10",
   "toolkit_version": "0.6.0",
+  "incident_window_minutes": 30,
   "sandbox_center_found": true,
   "sandbox_center_responsive": true,
   "sandbox_center_cpu_percent": 0.0,
@@ -588,6 +589,38 @@ wb-doctor --shell-failure --json
     "error_code": null,
     "bytes": 1056
   },
+  "current_state": {
+    "center_found": true,
+    "center_responsive": true,
+    "global_rules_count": 48,
+    "max_session_rules_count": 0,
+    "temp_wildcards_present": true,
+    "memory_pressure": "normal"
+  },
+  "incident_evidence": {
+    "rule_explosion_found": false,
+    "max_rules_in_logs": 0,
+    "profile_timeout_found": false,
+    "pty_join_timeout_found": false,
+    "supervisor_kill_found": false,
+    "exit_137_found": true,
+    "oom_found": false,
+    "resource_limit_found": false,
+    "relevant_log_files": [
+      "~/.workbuddy/logs/sandbox/20261008/sandbox_56359_001.log"
+    ]
+  },
+  "historical_evidence": {
+    "rule_explosion_found": false,
+    "max_rules_in_logs": 0,
+    "profile_timeout_found": false,
+    "pty_join_timeout_found": false,
+    "supervisor_kill_found": false,
+    "exit_137_found": false,
+    "oom_found": false,
+    "resource_limit_found": false,
+    "relevant_log_files": []
+  },
   "log_evidence": {
     "rule_explosion_found": false,
     "max_rules_in_logs": 0,
@@ -596,6 +629,7 @@ wb-doctor --shell-failure --json
     "supervisor_kill_found": false,
     "exit_137_found": true,
     "oom_found": false,
+    "resource_limit_found": false,
     "relevant_log_files": [
       "~/.workbuddy/logs/sandbox/20261008/sandbox_56359_001.log"
     ]
@@ -603,10 +637,12 @@ wb-doctor --shell-failure --json
   "classification": "UNKNOWN",
   "root_cause_family": "H",
   "confidence": "LOW",
-  "reason": "进程返回 exit 137 (SIGKILL)，但沙盒规则正常且无超时/死锁堆栈凭证，需保留下一次现场"
+  "reason": "进程返回 exit 137 (SIGKILL)，但沙盒规则正常且无超时/死锁堆栈凭证，需保留下一次现场",
+  "taxonomy_scope": "Defined Families A~H; Classifiers implemented: A, B, C, D, E, H"
 }
 ```
-> **注意**：上述输出展示了严格的**负控制（Negative Control）**：即便日志中捕获到了 `exit 137`，只要规则处于健康区间且缺乏死锁凭证，指纹分析器坚决不作伪归因，严格输出 `Family H (UNKNOWN)`，拿物理证据说话！
+> **注意**：上述输出展示了严格的**负控制（Negative Control）与时间窗口隔离**：即便日志中捕获到了 `exit 137`，只要规则处于健康区间且缺乏死锁凭证，指纹分析器坚决不作伪归因，严格输出 `Family H (UNKNOWN)`，拿物理证据说话！  
+> 故障谱系定义为完整 A~H 家族；自动分类器覆盖核心可判别特征子集（A, B, C, D, E, H）。
 
 ---
 
