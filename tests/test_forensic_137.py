@@ -41,6 +41,8 @@ class TestForensic137(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX") and sys.platform != "win32",
+                         "Unix Domain Sockets (AF_UNIX) transport not supported on Windows runners; tested on macOS/Linux")
     def test_uds_wire_protocol_top_level_session_id(self):
         """
         Verify that send_sandbox_ipc places sessionId at the top-level
@@ -92,12 +94,12 @@ class TestForensic137(unittest.TestCase):
         self.assertEqual(wire_msg.get("sessionId"), "sess-xyz-987", "sessionId must be at top-level envelope")
         self.assertNotIn("sessionId", wire_msg.get("data", {}), "sessionId must not be polluted into data payload")
 
-    def test_send_sandbox_ipc_with_diag_error_capture(self):
+    def test_send_sandbox_ipc_with_diag_socket_not_found_portable(self):
         """
-        Verify that send_sandbox_ipc_with_diag exposes concrete error codes
-        (SOCKET_NOT_FOUND, CONNECTION_REFUSED, DEADLINE_EXCEEDED) instead of hiding them under fail-open.
+        PORTABLE TEST (Windows, macOS, Linux):
+        Verify that send_sandbox_ipc_with_diag exposes concrete SOCKET_NOT_FOUND error code
+        when socket path is missing, instead of hiding under fail-open.
         """
-        # 1. Socket Not Found test
         non_existent_sock = os.path.join(self.temp_dir, "non_existent.sock")
         resp1, diag1 = self.guard.send_sandbox_ipc_with_diag(
             non_existent_sock, "sandbox.rules.get_rules", {}, timeout=0.5
@@ -106,7 +108,24 @@ class TestForensic137(unittest.TestCase):
         self.assertEqual(diag1.get("status"), "error")
         self.assertEqual(diag1.get("error_code"), "SOCKET_NOT_FOUND")
 
-        # 2. Connection Refused test (socket file exists, but nothing is listening)
+        if sys.platform == "win32":
+            dummy_file = os.path.join(self.temp_dir, "dummy_win.sock")
+            with open(dummy_file, "w") as f:
+                f.write("placeholder")
+            resp_w, diag_w = self.guard.send_sandbox_ipc_with_diag(
+                dummy_file, "sandbox.rules.get_rules", {}, timeout=0.5
+            )
+            self.assertIsNone(resp_w)
+            self.assertEqual(diag_w.get("error_code"), "UNSUPPORTED_PLATFORM")
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX") and sys.platform != "win32",
+                         "Unix Domain Sockets (AF_UNIX) transport not supported on Windows runners; tested on macOS/Linux")
+    def test_send_sandbox_ipc_with_diag_unix_transport_errors(self):
+        """
+        UNIX TRANSPORT CAPABILITY TEST (macOS, Linux):
+        Verify CONNECTION_REFUSED and DEADLINE_EXCEEDED with real local AF_UNIX sockets.
+        """
+        # 1. Connection Refused test (socket file exists, but nothing is listening)
         refused_sock = os.path.join(self.temp_dir, "refused.sock")
         dummy_s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         dummy_s.bind(refused_sock)
@@ -119,7 +138,7 @@ class TestForensic137(unittest.TestCase):
         self.assertEqual(diag2.get("status"), "error")
         self.assertEqual(diag2.get("error_code"), "CONNECTION_REFUSED")
 
-        # 3. Timeout (DEADLINE_EXCEEDED) test
+        # 2. Timeout (DEADLINE_EXCEEDED) test
         hang_sock = os.path.join(self.temp_dir, "hang.sock")
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(hang_sock)
@@ -332,6 +351,129 @@ class TestForensic137(unittest.TestCase):
         self.assertIn("root_cause_family", data)
         self.assertIn("log_evidence", data)
         self.assertIn("workbuddy_version", data)
+        self.assertIn("incident_evidence", data)
+        self.assertIn("historical_evidence", data)
+        self.assertIn("current_state", data)
+        self.assertIn("taxonomy_scope", data)
+
+    def test_inspect_137_positive_oom_family_c(self):
+        """
+        POSITIVE CONTROL:
+        When log shows Jetsam / memorystatus kill or memory pressure is critical,
+        the fingerprint MUST classify as OOM_LIKELY (Family C).
+        """
+        log_file = os.path.join(self.temp_dir, "sandbox_oom.log")
+        with open(log_file, "w") as f:
+            f.write("2026-10-08 12:00:00 Jetsam event: memorystatus kill process exit_code=137\n")
+
+        mock_guard = MagicMock()
+        mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard.find_active_uid.return_value = "uid-test"
+        mock_guard.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {"fileRules": [{"path": "/var/folders/**"}]}
+        }
+
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard):
+            fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir)
+
+            self.assertEqual(fp["classification"], "OOM_LIKELY")
+            self.assertEqual(fp["root_cause_family"], "C")
+            self.assertEqual(fp["confidence"], "MEDIUM")
+
+    def test_inspect_137_positive_resource_limit_family_d(self):
+        """
+        POSITIVE CONTROL:
+        When log shows rlimit/cgroup limit exhaustion without rule explosion,
+        the fingerprint MUST classify as RESOURCE_LIMIT_LIKELY (Family D).
+        """
+        log_file = os.path.join(self.temp_dir, "sandbox_rlimit.log")
+        with open(log_file, "w") as f:
+            f.write("2026-10-08 12:00:00 RLIMIT_DATA exceeded memory limit, killed=true exit_code=137\n")
+
+        mock_guard = MagicMock()
+        mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard.find_active_uid.return_value = "uid-test"
+        mock_guard.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {"fileRules": [{"path": "/var/folders/**"}]}
+        }
+
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard):
+            fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir)
+
+            self.assertEqual(fp["classification"], "RESOURCE_LIMIT_LIKELY")
+            self.assertEqual(fp["root_cause_family"], "D")
+            self.assertEqual(fp["confidence"], "MEDIUM")
+
+    def test_inspect_137_historical_pty_outside_window_does_not_pollute_current_state(self):
+        """
+        HARD NEGATIVE CONTROL (Bounded Incident Window Isolation):
+        When an older log file (modified 2 hours ago) contains PTY 5002ms join timeout,
+        but the current system state is healthy and the default incident window is 30 minutes:
+        1. The historical PTY error MUST be relegated to historical_evidence.
+        2. incident_evidence must be clean.
+        3. Current classification MUST be UNKNOWN (Family H), NEVER PTY_LIFECYCLE_LIKELY (Family B).
+        4. If the incident window is expanded to 180 minutes, it should then be captured in incident_evidence.
+        """
+        log_file = os.path.join(self.temp_dir, "sandbox_stale_pty.log")
+        with open(log_file, "w") as f:
+            f.write("2026-10-08 10:00:00 InteractiveProcess::drop join 超时 5000ms\n"
+                    "waitpid returned exit_code=137\n")
+
+        # Set mtime to 2 hours ago (7200 seconds before now)
+        stale_mtime = time.time() - 7200
+        os.utime(log_file, (stale_mtime, stale_mtime))
+
+        mock_guard = MagicMock()
+        mock_guard.find_sandbox_center_socket.return_value = "/mock/center.sock"
+        mock_guard.find_active_uid.return_value = "uid-test"
+        mock_guard.send_sandbox_ipc.return_value = {
+            "success": True,
+            "data": {
+                "fileRules": [
+                    {"path": "/var/folders/**", "action": "read=allow"},
+                    {"path": "/tmp/**", "action": "read=allow"}
+                ]
+            }
+        }
+
+        with patch.object(self.cli, "get_log_guard_module", return_value=mock_guard):
+            # Test default 30-minute window -> Stale log is ignored for current classification
+            fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+
+            self.assertEqual(fp["classification"], "UNKNOWN",
+                             "Negative Control Failed: Historical PTY logs outside incident window polluted current state!")
+            self.assertEqual(fp["root_cause_family"], "H")
+            self.assertEqual(fp["confidence"], "LOW")
+            self.assertTrue(fp["historical_evidence"]["pty_join_timeout_found"])
+            self.assertFalse(fp["incident_evidence"]["pty_join_timeout_found"])
+            self.assertIn("historical_evidence", fp["reason"])
+
+            # Test expanded 180-minute window -> Stale log is now inside window
+            fp_wide = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=180)
+            self.assertEqual(fp_wide["classification"], "PTY_LIFECYCLE_LIKELY")
+            self.assertEqual(fp_wide["root_cause_family"], "B")
+            self.assertTrue(fp_wide["incident_evidence"]["pty_join_timeout_found"])
+
+    def test_cli_inspect_137_window_flag(self):
+        """
+        Verify CLI accepts --since-minutes / --incident-window and exposes bounded evidence structure.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.cli.run_doctor(["--inspect-137", "--since-minutes=15", "--json"])
+
+        output = buf.getvalue().strip()
+        data = json.loads(output)
+        self.assertEqual(data.get("incident_window_minutes"), 15)
+        self.assertIn("incident_evidence", data)
+        self.assertIn("historical_evidence", data)
+        self.assertIn("current_state", data)
+        self.assertIn("taxonomy_scope", data)
 
 
 if __name__ == "__main__":

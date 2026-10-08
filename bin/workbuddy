@@ -2631,11 +2631,12 @@ def get_launchagent_status():
     except Exception:
         return "CONFIGURED"
 
-def inspect_137_failure(target_log_dir=None):
+def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
     """
     轻量级 137 / shell 事故现场指纹分析器与归因分类器。
     严格执行物理铁证与负控制契约：exit 137 仅为终态症状，
     无充分规则膨胀凭证时绝不归因至 RULE_EXPLOSION。
+    基于 incident_window_minutes 严格隔离当前事故证据与历史日志证据，杜绝历史日志污染当前分类。
     """
     import datetime
 
@@ -2730,8 +2731,11 @@ def inspect_137_failure(target_log_dir=None):
         except Exception:
             pass
 
-    # 扫描物理日志痕迹
-    log_evidence = {
+    # 扫描物理日志痕迹 (严格区分当前事故窗口证据与历史证据)
+    now_ts = time.time()
+    cutoff_ts = (now_ts - (incident_window_minutes * 60)) if (incident_window_minutes is not None and incident_window_minutes > 0) else 0
+
+    incident_evidence = {
         "rule_explosion_found": False,
         "max_rules_in_logs": 0,
         "profile_timeout_found": False,
@@ -2739,6 +2743,19 @@ def inspect_137_failure(target_log_dir=None):
         "supervisor_kill_found": False,
         "exit_137_found": False,
         "oom_found": False,
+        "resource_limit_found": False,
+        "relevant_log_files": []
+    }
+
+    historical_evidence = {
+        "rule_explosion_found": False,
+        "max_rules_in_logs": 0,
+        "profile_timeout_found": False,
+        "pty_join_timeout_found": False,
+        "supervisor_kill_found": False,
+        "exit_137_found": False,
+        "oom_found": False,
+        "resource_limit_found": False,
         "relevant_log_files": []
     }
 
@@ -2773,43 +2790,52 @@ def inspect_137_failure(target_log_dir=None):
             pass
     log_candidates.sort(key=lambda x: x[0], reverse=True)
 
-    for _, fp, size in log_candidates[:5]:
+    for mtime, fp, size in log_candidates[:10]:
+        is_incident = (mtime >= cutoff_ts)
+        target_ev = incident_evidence if is_incident else historical_evidence
         try:
             with open(fp, "rb") as f:
                 offset = max(0, size - 500 * 1024)
                 f.seek(offset)
                 chunk = f.read().decode("utf-8", errors="ignore")
 
+                matched = False
                 if "exit_code=137" in chunk or "exit_code: 137" in chunk or "killed=true" in chunk:
-                    log_evidence["exit_137_found"] = True
-                    if fp not in log_evidence["relevant_log_files"]:
-                        log_evidence["relevant_log_files"].append(fp)
+                    target_ev["exit_137_found"] = True
+                    matched = True
                 if "ProcessKill" in chunk and ('signal=Some("term")' in chunk or 'signal=Some("kill")' in chunk):
-                    log_evidence["supervisor_kill_found"] = True
-                    if fp not in log_evidence["relevant_log_files"]:
-                        log_evidence["relevant_log_files"].append(fp)
+                    target_ev["supervisor_kill_found"] = True
+                    matched = True
                 if "InteractiveProcess::drop" in chunk and "join 超时" in chunk:
-                    log_evidence["pty_join_timeout_found"] = True
-                    if fp not in log_evidence["relevant_log_files"]:
-                        log_evidence["relevant_log_files"].append(fp)
+                    target_ev["pty_join_timeout_found"] = True
+                    matched = True
                 if "sandbox.rules.fetch_profile 超时" in chunk:
-                    log_evidence["profile_timeout_found"] = True
-                    if fp not in log_evidence["relevant_log_files"]:
-                        log_evidence["relevant_log_files"].append(fp)
+                    target_ev["profile_timeout_found"] = True
+                    matched = True
+                if any(s in chunk for s in ["Jetsam", "memorystatus", "kernel-oom", "Out of memory: Kill process"]):
+                    target_ev["oom_found"] = True
+                    matched = True
+                chunk_lower = chunk.lower()
+                if any(s in chunk_lower for s in ["rlimit", "cgroup", "rlimit_"]) or "exceeded memory limit" in chunk_lower:
+                    target_ev["resource_limit_found"] = True
+                    matched = True
 
                 import re
                 rule_lens = [int(m) for m in re.findall(r"rules_json_len=(\d+)", chunk)]
                 if rule_lens:
                     max_len = max(rule_lens)
                     if max_len > 1_000_000:
-                        log_evidence["rule_explosion_found"] = True
-                        log_evidence["max_rules_in_logs"] = max(log_evidence["max_rules_in_logs"], max_len)
-                        if fp not in log_evidence["relevant_log_files"]:
-                            log_evidence["relevant_log_files"].append(fp)
+                        target_ev["rule_explosion_found"] = True
+                        target_ev["max_rules_in_logs"] = max(target_ev["max_rules_in_logs"], max_len)
+                        matched = True
+
+                if matched and fp not in target_ev["relevant_log_files"]:
+                    target_ev["relevant_log_files"].append(fp)
         except Exception:
             pass
 
-    # 归因判定 (Strict Classification with Hard Negative Control)
+    # 归因判定 (Strict Classification with Hard Negative Control & Log Isolation)
+    # 铁律：仅凭 CURRENT_STATE 和 INCIDENT_EVIDENCE 进行故障定级，严禁用历史残留证据裁定当前事故
     classification = "UNKNOWN"
     confidence = "LOW"
     family = "H"
@@ -2818,7 +2844,7 @@ def inspect_137_failure(target_log_dir=None):
     # 1. 优先校验规则爆炸 (Family A)
     if (global_rules_count is not None and global_rules_count > 2000) or \
        (max_session_rules_count > 2000) or \
-       (log_evidence["rule_explosion_found"] and log_evidence["profile_timeout_found"]):
+       (incident_evidence["rule_explosion_found"] and incident_evidence["profile_timeout_found"]):
         classification = "RULE_EXPLOSION_LIKELY"
         confidence = "HIGH"
         family = "A"
@@ -2826,38 +2852,49 @@ def inspect_137_failure(target_log_dir=None):
         reason = f"Seatbelt 规则严重膨胀 (规则数: {effective_count})，诱发 sandbox-center 单线程 O(N^2) 编译锁死与 IPC 超时"
 
     # 2. PTY 退出时序死锁 (Family B)
-    elif log_evidence["pty_join_timeout_found"]:
+    elif incident_evidence["pty_join_timeout_found"]:
         classification = "PTY_LIFECYCLE_LIKELY"
         confidence = "HIGH"
         family = "B"
         reason = "官方二进制 MacPtyProcess::drop/InteractiveProcess::drop 在持有 master_fd 时等待 reader thread join 导致 5002ms 硬卡死"
 
-    # 3. 内存压力或系统杀伤 (Family D)
-    elif mem_pressure == "critical" or log_evidence["oom_found"]:
+    # 3. 内核 OOM / Jetsam 杀伤 (Family C)
+    elif mem_pressure == "critical" or incident_evidence["oom_found"]:
         classification = "OOM_LIKELY"
         confidence = "MEDIUM"
-        family = "D"
-        reason = "操作系统处于极度内存压力或 Jetsam/OOM 杀伤状态"
+        family = "C"
+        reason = "操作系统处于极度内存压力或内核 Jetsam / OOM Killer 杀伤状态"
 
-    # 4. Supervisor 120s 超时强杀 (Family E)
-    elif log_evidence["supervisor_kill_found"]:
+    # 4. 进程配额超限 (Family D)
+    elif incident_evidence["resource_limit_found"]:
+        classification = "RESOURCE_LIMIT_LIKELY"
+        confidence = "MEDIUM"
+        family = "D"
+        reason = "宿主环境或 cgroup / rlimit 配额硬顶超限终止进程"
+
+    # 5. Supervisor 120s 超时强杀 (Family E)
+    elif incident_evidence["supervisor_kill_found"]:
         classification = "SUPERVISOR_KILL_LIKELY"
         confidence = "HIGH"
         family = "E"
         reason = "WorkBuddy 前端触发 120,000ms 命令超时发送 ProcessKill 终止进程；底层假死根因未捕获到规则膨胀证据"
 
-    # 5. 负控制兜底：仅有 137 症状但无归因证据 (Family H)
+    # 6. 负控制兜底：仅有 137 症状但无归因证据 (Family H)
     else:
         classification = "UNKNOWN"
         confidence = "LOW"
         family = "H"
-        reason = "进程返回 exit 137 (SIGKILL)，但沙盒规则正常且无超时/死锁堆栈凭证，需保留下一次现场"
+        if historical_evidence["pty_join_timeout_found"] or historical_evidence["exit_137_found"]:
+            reason = "当前状态正常且在事故时间窗口内无死锁凭证（存在历史日志痕迹，已隔离至 historical_evidence），需保留下一次现场"
+        else:
+            reason = "进程返回 exit 137 (SIGKILL)，但沙盒规则正常且无超时/死锁堆栈凭证，需保留下一次现场"
 
     return {
         "timestamp": now_iso,
         "platform": sys.platform,
         "workbuddy_version": wb_ver,
         "toolkit_version": VERSION,
+        "incident_window_minutes": incident_window_minutes,
         "sandbox_center_found": center_found,
         "sandbox_center_responsive": center_responsive,
         "sandbox_center_cpu_percent": center_cpu,
@@ -2866,11 +2903,22 @@ def inspect_137_failure(target_log_dir=None):
         "temp_wildcards_present": temp_wildcards_present,
         "memory_pressure": mem_pressure,
         "ipc_diagnostic": last_ipc_diag,
-        "log_evidence": log_evidence,
+        "current_state": {
+            "center_found": center_found,
+            "center_responsive": center_responsive,
+            "global_rules_count": global_rules_count,
+            "max_session_rules_count": max_session_rules_count,
+            "temp_wildcards_present": temp_wildcards_present,
+            "memory_pressure": mem_pressure,
+        },
+        "incident_evidence": incident_evidence,
+        "historical_evidence": historical_evidence,
+        "log_evidence": incident_evidence,
         "classification": classification,
         "root_cause_family": family,
         "confidence": confidence,
-        "reason": reason
+        "reason": reason,
+        "taxonomy_scope": "Defined Families A~H; Classifiers implemented: A, B, C, D, E, H"
     }
 
 def run_doctor(args=None):
@@ -2884,7 +2932,20 @@ def run_doctor(args=None):
     inspect_137 = any(a in ("--inspect-137", "--shell-failure", "--fingerprint", "--inspect") for a in cli_args)
 
     if inspect_137:
-        fp = inspect_137_failure()
+        window_minutes = 30
+        for idx, arg in enumerate(cli_args):
+            if arg in ("--since-minutes", "--incident-window", "--incident-window-minutes") and idx + 1 < len(cli_args):
+                try:
+                    window_minutes = int(cli_args[idx + 1])
+                except ValueError:
+                    pass
+            elif any(arg.startswith(f"{p}=") for p in ("--since-minutes", "--incident-window", "--incident-window-minutes")):
+                try:
+                    window_minutes = int(arg.split("=", 1)[1])
+                except ValueError:
+                    pass
+
+        fp = inspect_137_failure(incident_window_minutes=window_minutes)
         if as_json:
             print(json.dumps(fp, indent=2, ensure_ascii=False))
         else:
@@ -2893,6 +2954,7 @@ def run_doctor(args=None):
             print(f"Platform              : {fp['platform']}")
             print(f"WorkBuddy Version     : {fp['workbuddy_version']}")
             print(f"Toolkit Version       : {fp['toolkit_version']}")
+            print(f"Incident Window       : {fp.get('incident_window_minutes', 30)} minutes")
             print(f"Sandbox Center Found  : {'YES' if fp['sandbox_center_found'] else 'NO'}")
             print(f"Center Responsive     : {'YES' if fp['sandbox_center_responsive'] else 'NO'}")
             if fp['sandbox_center_cpu_percent'] is not None:
@@ -2901,13 +2963,15 @@ def run_doctor(args=None):
             print(f"Max Session Rules     : {fp['max_session_rule_count']}")
             print(f"Temp Wildcards Active : {'YES' if fp['temp_wildcards_present'] else 'NO'}")
             print(f"Memory Pressure       : {fp['memory_pressure']}")
-            print(f"Log References        : {len(fp['log_evidence']['relevant_log_files'])} files identified")
+            hist_files = len(fp.get('historical_evidence', {}).get('relevant_log_files', []))
+            print(f"Log References        : {len(fp['log_evidence']['relevant_log_files'])} incident files ({hist_files} historical files)")
             print(f"\n{COLOR_BOLD}Classification Result :{COLOR_RESET}")
             color = COLOR_GREEN if fp['classification'] == 'UNKNOWN' and not fp['log_evidence']['exit_137_found'] else (COLOR_RED if fp['classification'] in ('RULE_EXPLOSION_LIKELY', 'OOM_LIKELY') else COLOR_YELLOW)
             print(f"  Classification      : {color}{fp['classification']}{COLOR_RESET}")
             print(f"  Failure Family      : Family {fp['root_cause_family']}")
             print(f"  Confidence          : {fp['confidence']}")
-            print(f"  Attribution Reason  : {fp['reason']}\n")
+            print(f"  Attribution Reason  : {fp['reason']}")
+            print(f"  Taxonomy Scope      : Families A~H defined; automatic classifier covers A, B, C, D, E, H\n")
         return fp['classification'] != "RULE_EXPLOSION_LIKELY"
 
     print(f"\n{COLOR_BOLD}{COLOR_CYAN}=== WorkBuddy Toolkit Doctor ==={COLOR_RESET}\n")
