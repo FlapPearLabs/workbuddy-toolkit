@@ -1117,6 +1117,14 @@ class TestForensic137(unittest.TestCase):
             self.cli.check_resource_limit_event("RLIMIT_CPU: hard limit reached; process killed by SIGKILL"),
             "RLIMIT_CPU with colon field separator must match resource limit event"
         )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_CPU: hard limit reached"),
+            "RLIMIT_CPU: hard limit reached without kill token must match resource limit event"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_CPU hit limit"),
+            "RLIMIT_CPU hit limit without kill token must match resource limit event"
+        )
 
         # NEGATIVE CONTROLS
         self.assertFalse(
@@ -1154,6 +1162,14 @@ class TestForensic137(unittest.TestCase):
         self.assertTrue(
             self.cli.check_oom_event("Out of memory: Killed process 123 (python); RLIMIT_CPU is unlimited"),
             "Host OOM record with informational RLIMIT mention must trigger Family C (not suppressed by RLIMIT)"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("RLIMIT_CPU is unlimited, Out of memory: Killed process 123"),
+            "Informational RLIMIT preceding comma in Host OOM must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("RLIMIT_CPU is unlimited, Out of memory: Killed process 123"),
+            "Host OOM record following comma after informational RLIMIT must trigger Family C"
         )
         self.assertFalse(
             self.cli.check_resource_limit_event("Out of memory: Killed process 123 (python)\nRLIMIT_CPU is unlimited"),
