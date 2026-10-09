@@ -2824,7 +2824,7 @@ def check_oom_event(text):
         r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|controller|quota)\b",
         r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
         r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
-        r"\brlimit_[a-z0-9_]+\b",
+        r"\brlimit_(?:cpu|fsize|data|stack|core|rss|nproc|nofile|ofile|memlock|as|locks|sigpending|msgqueue|nice|rtprio|rttime)\b",
         r"\brlimit\b"
     ]
     if any(bool(re.search(pat, t_lower)) for pat in cgroup_structural_contexts):
@@ -2889,7 +2889,7 @@ def check_resource_limit_event(text):
         r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|exhausted|kill|controller|quota)\b",
         r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
         r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
-        r"\brlimit_[a-z0-9_]+\b",
+        r"\brlimit_(?:cpu|fsize|data|stack|core|rss|nproc|nofile|ofile|memlock|as|locks|sigpending|msgqueue|nice|rtprio|rttime)\b",
         r"\brlimit(?:\s+limit|_limit|\s+quota|\s+exceeded|\b)",
         r"\bresource\s+limit\b",
         r"\bquota\s+(?:exceeded|exhausted|limit)\b",
@@ -2903,7 +2903,8 @@ def check_resource_limit_event(text):
         r"(?:not|was\s+not|were\s+not)\s+killed",
         r"\bno\s+kill\b",
         r"\bno\s+oom\b",
-        r"(?:not|was\s+not|were\s+not|does\s+not|did\s+not|is\s+not|are\s+not)\s+exceed(?:s|ed|ing)?\b",
+        r"\b(?:not|was\s+not|were\s+not|does\s+not|did\s+not|is\s+not|are\s+not|doesn't|didn't|don't|isn't|aren't|wasn't|weren't)\s+exceed(?:s|ed|ing)?\b",
+        r"\bnever\s+exceed(?:s|ed|ing)?\b",
         r"(?:limit|quota)\s+not\s+exceed(?:s|ed|ing)?\b",
         r"without\s+exceed(?:s|ed|ing)?\b",
         r"\bno\s+exceed(?:s|ed|ing)?\b",

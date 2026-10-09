@@ -1124,6 +1124,14 @@ class TestForensic137(unittest.TestCase):
             "Process name rlimit-exporter must NOT trigger Family D"
         )
         self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123 (rlimit_cpu_exporter) total-vm:100000kB, anon-rss:50000kB"),
+            "Process name rlimit_cpu_exporter must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123 (rlimit_cpu_exporter) total-vm:100000kB, anon-rss:50000kB"),
+            "Host OOM killing process rlimit_cpu_exporter must trigger Family C (not rejected as Family D)"
+        )
+        self.assertFalse(
             self.cli.check_resource_limit_event("RLIMIT_CPU not exceeded; no process killed"),
             "Negated statement 'not exceeded; no process killed' must NOT trigger Family D"
         )
@@ -1145,8 +1153,8 @@ class TestForensic137(unittest.TestCase):
         """
         T19 (P2-3): Verb inflections of exceed (exceed, exceeds, exceeded, exceeding)
         must all match affirmative limit events with context.
-        Negated phrases (does not exceed, is not exceeding, limit not exceeded, etc.)
-        must be safely stripped and remain negative.
+        Negated phrases (does not exceed, doesn't exceed, never exceeds, is not exceeding,
+        isn't exceeding, limit not exceeded, etc.) must be safely stripped and remain negative.
         """
         # POSITIVE CONTROLS
         self.assertTrue(
@@ -1172,12 +1180,28 @@ class TestForensic137(unittest.TestCase):
             "does not exceed must be stripped as negative"
         )
         self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max doesn't exceed hard limit"),
+            "doesn't exceed must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max never exceeds hard limit"),
+            "never exceeds must be stripped as negative"
+        )
+        self.assertFalse(
             self.cli.check_resource_limit_event("memory.max is not exceeding hard limit"),
             "is not exceeding must be stripped as negative"
         )
         self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max isn't exceeding hard limit"),
+            "isn't exceeding must be stripped as negative"
+        )
+        self.assertFalse(
             self.cli.check_resource_limit_event("memory.max did not exceed hard limit"),
             "did not exceed must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max didn't exceed hard limit"),
+            "didn't exceed must be stripped as negative"
         )
         self.assertFalse(
             self.cli.check_resource_limit_event("limit not exceeded"),
