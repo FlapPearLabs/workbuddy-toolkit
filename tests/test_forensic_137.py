@@ -1195,6 +1195,22 @@ class TestForensic137(unittest.TestCase):
             self.cli.check_oom_event("Out of memory: Killed process 123; RLIMIT_CPU was not exceeded"),
             "Host OOM record with negated RLIMIT clause must trigger Family C (not suppressed by negated RLIMIT)"
         )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("RLIMIT_NOFILE is not exhausted"),
+            "Negated RLIMIT status 'is not exhausted' must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("RLIMIT_NOFILE was never exhausted"),
+            "Negated RLIMIT status 'was never exhausted' must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123; RLIMIT_NOFILE is not exhausted"),
+            "Negated RLIMIT status 'RLIMIT_NOFILE is not exhausted' must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123; RLIMIT_NOFILE is not exhausted"),
+            "Host OOM record with negated exhausted RLIMIT clause must trigger Family C (not suppressed by RLIMIT)"
+        )
 
         # End-to-end inspect_137_failure classification test
         now_dt = datetime.datetime.now()
