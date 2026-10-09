@@ -746,7 +746,8 @@ class TestForensic137(unittest.TestCase):
         for iso_str in ["2026-10-08T12:00:00-00:30", "2026-10-08T12:00:00+00:30", "2026-10-08T12:00:00Z"]:
             ts = self.cli.parse_log_timestamp(iso_str)
             self.assertIsNotNone(ts)
-            expected_epoch = datetime.datetime.fromisoformat(iso_str).timestamp()
+            # Python 3.9 fromisoformat does not support trailing 'Z', normalize to '+00:00' for comparison
+            expected_epoch = datetime.datetime.fromisoformat(iso_str.replace("Z", "+00:00")).timestamp()
             self.assertEqual(ts, expected_epoch)
 
     def test_t6_cgroup_oom_classifies_as_family_d(self):
