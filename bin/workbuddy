@@ -2741,8 +2741,10 @@ def parse_log_timestamp(line, reference_ts=None, window_cutoff=None):
                     m_val = int(g[9])
                     total_offset_minutes = sign * (h_val * 60 + m_val)
                     tz = timezone(timedelta(minutes=total_offset_minutes))
-                dt = _dt.datetime(y, mo, d, h, mi, sec, us, tzinfo=tz)
-                return dt.timestamp()
+                if tz is not None:
+                    dt = _dt.datetime(y, mo, d, h, mi, sec, us, tzinfo=tz)
+                    return dt.timestamp()
+                return resolve_local_timestamp(y, mo, d, h, mi, sec, us=us, reference_ts=reference_ts, window_cutoff=window_cutoff)
             except Exception:
                 pass
 
@@ -2822,6 +2824,7 @@ def check_oom_event(text):
         r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|controller|quota)\b",
         r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
         r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
+        r"\brlimit_[a-z0-9_]+\b",
         r"\brlimit\b"
     ]
     if any(bool(re.search(pat, t_lower)) for pat in cgroup_structural_contexts):
@@ -2886,6 +2889,7 @@ def check_resource_limit_event(text):
         r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|exhausted|kill|controller|quota)\b",
         r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
         r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
+        r"\brlimit_[a-z0-9_]+\b",
         r"\brlimit(?:\s+limit|_limit|\s+quota|\s+exceeded|\b)",
         r"\bresource\s+limit\b",
         r"\bquota\s+(?:exceeded|exhausted|limit)\b",
@@ -2899,21 +2903,20 @@ def check_resource_limit_event(text):
         r"(?:not|was\s+not|were\s+not)\s+killed",
         r"\bno\s+kill\b",
         r"\bno\s+oom\b",
-        r"(?:not|was\s+not|were\s+not)\s+exceeded",
-        r"limit\s+not\s+exceeded",
-        r"quota\s+not\s+exceeded",
-        r"without\s+exceeding",
+        r"(?:not|was\s+not|were\s+not|does\s+not|did\s+not|is\s+not|are\s+not)\s+exceed(?:s|ed|ing)?\b",
+        r"(?:limit|quota)\s+not\s+exceed(?:s|ed|ing)?\b",
+        r"without\s+exceed(?:s|ed|ing)?\b",
+        r"\bno\s+exceed(?:s|ed|ing)?\b",
         r"without\s+killing",
     ]
     for neg in limit_negations:
         cleaned = re.sub(neg, " ", cleaned)
 
     if not has_context:
-        return bool(re.search(r"exceeded\s+memory\s+limit", cleaned) or re.search(r"resource\s+exhausted", cleaned))
+        return bool(re.search(r"exceed(?:s|ed|ing)?\s+memory\s+limit", cleaned) or re.search(r"resource\s+exhausted", cleaned))
 
     limit_events = [
-        r"\bexceeded\b",
-        r"\bexceed\b",
+        r"\bexceed(?:s|ed|ing)?\b",
         r"\bexhausted\b",
         r"\boom-kill\b",
         r"\boom_kill\b",
