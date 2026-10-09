@@ -1192,6 +1192,18 @@ class TestForensic137(unittest.TestCase):
             "is not exceeding must be stripped as negative"
         )
         self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max is not currently exceeding hard limit"),
+            "is not currently exceeding (adverb-qualified) must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max does not actually exceed hard limit"),
+            "does not actually exceed (adverb-qualified) must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max has not yet exceeded hard limit"),
+            "has not yet exceeded (adverb-qualified) must be stripped as negative"
+        )
+        self.assertFalse(
             self.cli.check_resource_limit_event("memory.max isn't exceeding hard limit"),
             "isn't exceeding must be stripped as negative"
         )
