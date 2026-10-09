@@ -2741,8 +2741,10 @@ def parse_log_timestamp(line, reference_ts=None, window_cutoff=None):
                     m_val = int(g[9])
                     total_offset_minutes = sign * (h_val * 60 + m_val)
                     tz = timezone(timedelta(minutes=total_offset_minutes))
-                dt = _dt.datetime(y, mo, d, h, mi, sec, us, tzinfo=tz)
-                return dt.timestamp()
+                if tz is not None:
+                    dt = _dt.datetime(y, mo, d, h, mi, sec, us, tzinfo=tz)
+                    return dt.timestamp()
+                return resolve_local_timestamp(y, mo, d, h, mi, sec, us=us, reference_ts=reference_ts, window_cutoff=window_cutoff)
             except Exception:
                 pass
 
@@ -2816,15 +2818,52 @@ def check_oom_event(text):
         return False
     t_lower = text.lower()
 
-    # 结构化 cgroup/rlimit 约束杀伤必须归 Family D，排除在全局 Family C 之外
+    # 剥离否定表达（包括 limit_negations 与 oom_negations），避免如 'RLIMIT_CPU was not exceeded' 误激活结构化配额排除
+    cleaned = t_lower
+    limit_negations = [
+        r"no\s+process(?:es)?(?:\s+was|\s+were)?\s+killed",
+        r"(?:not|was\s+not|were\s+not)\s+killed",
+        r"\bno\s+kill\b",
+        r"\bno\s+oom\b",
+        r"\b(?:not|was\s+not|were\s+not|does\s+not|did\s+not|do\s+not|is\s+not|are\s+not|has\s+not|have\s+not|had\s+not|cannot|can't|can\s+not|could\s+not|couldn't|will\s+not|won't|would\s+not|wouldn't|should\s+not|shouldn't|shall\s+not|shan't|must\s+not|mustn't|may\s+not|might\s+not|doesn't|didn't|don't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't)(?:\s+(?:currently|actually|presently|yet|immediately))?(?:\s+(?:be|been))?\s+(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"\b(?:was|were|is|are|has|have|had)?\s*never(?:\s+(?:currently|actually|presently|yet|immediately))?(?:\s+(?:be|been))?\s+(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"\bno\s+longer\s+(?:be\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"(?:limit|quota)\s+(?:cannot|can't|can\s+not|could\s+not|couldn't|will\s+not|won't|must\s+not|should\s+not|is\s+not|was\s+not|are\s+not|were\s+not|not|never)\s+(?:be\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"without\s+(?:being\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"\bno\s+(?:exceed(?:s|ed|ing)?|exhaustion)\b",
+        r"\b(?:memory\.(?:max|high|low|min)|rlimit_[a-z0-9_]+|(?:hard\s+|soft\s+)?limit|quota|capacity|threshold|rlimit)\s+(?:still\s+|currently\s+|presently\s+|comfortably\s+|amply\s+)?exceed(?:s|ed|ing)?\s+(?:(?:current|actual|present)\s+)?(?:usage|consumption|footprint|rss|demand|load|bytes|size|requirement)\b",
+        r"without\s+killing",
+    ]
+    for neg in limit_negations:
+        cleaned = re.sub(neg, " ", cleaned)
+
+    oom_negations = [
+        r"no\s+process(?:es)?(?:\s+was|\s+were)?\s+killed",
+        r"(?:not|was\s+not|were\s+not)\s+killed",
+        r"\bno\s+kill\b",
+        r"\bno\s+oom\b",
+        r"\b0\s+processes?\s+killed\b",
+        r"without\s+killing",
+    ]
+    for neg in oom_negations:
+        cleaned = re.sub(neg, " ", cleaned)
+
+    # 结构化 cgroup/rlimit 约束杀伤必须归 Family D，排除在全局 Family C 之外。
+    # 必须具备确定性因果证据，严禁仅凭信息性标识（如 'RLIMIT_CPU is unlimited'）误排除 Host OOM。
+    # 必须在剥离否定后评估结构化上下文，避免如 'RLIMIT_CPU was not exceeded' 误抑制 Host OOM。
+    rlimit_canon = r"(?:rlimit_(?:cpu|fsize|data|stack|core|rss|nproc|nofile|ofile|memlock|as|locks|sigpending|msgqueue|nice|rtprio|rttime)|rlimit)"
+    meta_keys = r"(?:soft|hard|cur|current|max|min|val|value|usage|used|count|limit)"
     cgroup_structural_contexts = [
         r"\bmemory\s+cgroup\s+out\s+of\s+memory\b",
         r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|controller|quota)\b",
         r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
         r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
-        r"\brlimit\b"
+        rf"\b{rlimit_canon}\b(?![-./_])(?:\s*[:=])?\s*(?:(?!unlimited)(?:[^,;.\n\r]|,\s*(?={meta_keys}\s*[:=]|(?:hard\s+|maximum\s+)?limit\s+reached\b|hit\s+(?:hard\s+|maximum\s+)?limit\b|hard\s+limit\b|exceed(?:s|ed|ing)?\b|exhausted\b|process\s+(?:killed|terminated)\b|killed\b|terminated\b|sigkill\b))){{0,150}}?\b(?:exceed(?:s|ed|ing)?|exhausted|(?:hard\s+)?limit\s+reached|hit\s+(?:hard\s+|maximum\s+)?limit|hard\s+limit|killed|killing|kill|terminated|sigkill)\b",
+        rf"\b(?:exceed(?:s|ed|ing)?|exhausted|hit|reached)\s+(?:maximum\s+)?{rlimit_canon}\b(?![-./_])",
+        rf"\b(?:killed|killing|kill|terminated|sigkill)\s+(?:due\s+to|by|because\s+of|from)\s+{rlimit_canon}\b(?![-./_])",
+        r"\brlimit(?:\s+limit|_limit|\s+quota|\s+exceeded)\b",
     ]
-    if any(bool(re.search(pat, t_lower)) for pat in cgroup_structural_contexts):
+    if any(bool(re.search(pat, cleaned)) for pat in cgroup_structural_contexts):
         return False
 
     oom_contexts = [
@@ -2838,19 +2877,6 @@ def check_oom_event(text):
     ]
     if not any(c in t_lower for c in oom_contexts):
         return False
-
-    # 剥离否定表达，避免如 'no process was killed' 误判为 kill event
-    cleaned = t_lower
-    oom_negations = [
-        r"no\s+process(?:es)?(?:\s+was|\s+were)?\s+killed",
-        r"(?:not|was\s+not|were\s+not)\s+killed",
-        r"\bno\s+kill\b",
-        r"\bno\s+oom\b",
-        r"\b0\s+processes?\s+killed\b",
-        r"without\s+killing",
-    ]
-    for neg in oom_negations:
-        cleaned = re.sub(neg, " ", cleaned)
 
     oom_events = [
         r"\bkilled\b",
@@ -2874,47 +2900,59 @@ def check_resource_limit_event(text):
     评估日志文本是否包含真实资源超限 / cgroup / rlimit 终止事件 (Family D)。
     严格执行：
     1. 具有结构化 limit context (cgroup, rlimit, quota, memory.max 等)，排除任意字段中的 cgroup 字符；
-    2. 过滤常见否定表达（如 'limit not exceeded', 'no process killed'）；
-    3. 只识别确定性肯定超限与强杀事件。
+    2. RLIMIT 标识符必须具备因果超限证据，允许字段标点 (如 ':')，排除单纯配置/信息描述 (如 'RLIMIT_CPU is unlimited')；
+    3. 否定表达（包括情态否定如 'cannot exceed', 'was not exceeded', 'no process killed'）在上下文匹配前彻底剥离；
+    4. 只识别确定性肯定超限与强杀事件。
     """
     if not text:
         return False
     t_lower = text.lower()
 
-    limit_contexts = [
-        r"\bmemory\s+cgroup\s+out\s+of\s+memory\b",
-        r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|exhausted|kill|controller|quota)\b",
-        r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
-        r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
-        r"\brlimit(?:\s+limit|_limit|\s+quota|\s+exceeded|\b)",
-        r"\bresource\s+limit\b",
-        r"\bquota\s+(?:exceeded|exhausted|limit)\b",
-    ]
-    has_context = any(bool(re.search(pat, t_lower)) for pat in limit_contexts)
-
-    # 剥离否定表达
+    # 剥离否定表达（包含情态助动词否定如 cannot, can't, could not, will not, was not exceeded 等）
+    # 严格在建立上下文前剥离，确保否定子句（如 'RLIMIT_CPU was not exceeded'）不会建立假上下文
     cleaned = t_lower
     limit_negations = [
         r"no\s+process(?:es)?(?:\s+was|\s+were)?\s+killed",
         r"(?:not|was\s+not|were\s+not)\s+killed",
         r"\bno\s+kill\b",
         r"\bno\s+oom\b",
-        r"(?:not|was\s+not|were\s+not)\s+exceeded",
-        r"limit\s+not\s+exceeded",
-        r"quota\s+not\s+exceeded",
-        r"without\s+exceeding",
+        r"\b(?:not|was\s+not|were\s+not|does\s+not|did\s+not|do\s+not|is\s+not|are\s+not|has\s+not|have\s+not|had\s+not|cannot|can't|can\s+not|could\s+not|couldn't|will\s+not|won't|would\s+not|wouldn't|should\s+not|shouldn't|shall\s+not|shan't|must\s+not|mustn't|may\s+not|might\s+not|doesn't|didn't|don't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't)(?:\s+(?:currently|actually|presently|yet|immediately))?(?:\s+(?:be|been))?\s+(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"\b(?:was|were|is|are|has|have|had)?\s*never(?:\s+(?:currently|actually|presently|yet|immediately))?(?:\s+(?:be|been))?\s+(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"\bno\s+longer\s+(?:be\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"(?:limit|quota)\s+(?:cannot|can't|can\s+not|could\s+not|couldn't|will\s+not|won't|must\s+not|should\s+not|is\s+not|was\s+not|are\s+not|were\s+not|not|never)\s+(?:be\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"without\s+(?:being\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
+        r"\bno\s+(?:exceed(?:s|ed|ing)?|exhaustion)\b",
+        r"\b(?:memory\.(?:max|high|low|min)|rlimit_[a-z0-9_]+|(?:hard\s+|soft\s+)?limit|quota|capacity|threshold|rlimit)\s+(?:still\s+|currently\s+|presently\s+|comfortably\s+|amply\s+)?exceed(?:s|ed|ing)?\s+(?:(?:current|actual|present)\s+)?(?:usage|consumption|footprint|rss|demand|load|bytes|size|requirement)\b",
         r"without\s+killing",
     ]
     for neg in limit_negations:
         cleaned = re.sub(neg, " ", cleaned)
 
+    rlimit_canon = r"(?:rlimit_(?:cpu|fsize|data|stack|core|rss|nproc|nofile|ofile|memlock|as|locks|sigpending|msgqueue|nice|rtprio|rttime)|rlimit)"
+    meta_keys = r"(?:soft|hard|cur|current|max|min|val|value|usage|used|count|limit)"
+    limit_contexts = [
+        r"\bmemory\s+cgroup\s+out\s+of\s+memory\b",
+        r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|exhausted|kill|controller|quota)\b",
+        r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
+        r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
+        rf"\b{rlimit_canon}\b(?![-./_])(?:\s*[:=])?\s*(?:(?!unlimited)(?:[^,;.\n\r]|,\s*(?={meta_keys}\s*[:=]|(?:hard\s+|maximum\s+)?limit\s+reached\b|hit\s+(?:hard\s+|maximum\s+)?limit\b|hard\s+limit\b|exceed(?:s|ed|ing)?\b|exhausted\b|process\s+(?:killed|terminated)\b|killed\b|terminated\b|sigkill\b))){{0,150}}?\b(?:exceed(?:s|ed|ing)?|exhausted|(?:hard\s+)?limit\s+reached|hit\s+(?:hard\s+|maximum\s+)?limit|hard\s+limit|killed|killing|kill|terminated|sigkill)\b",
+        rf"\b(?:exceed(?:s|ed|ing)?|exhausted|hit|reached)\s+(?:maximum\s+)?{rlimit_canon}\b(?![-./_])",
+        rf"\b(?:killed|killing|kill|terminated|sigkill)\s+(?:due\s+to|by|because\s+of|from)\s+{rlimit_canon}\b(?![-./_])",
+        r"\brlimit(?:\s+limit|_limit|\s+quota|\s+exceeded)\b",
+        r"\bresource\s+limit\b",
+        r"\bquota\s+(?:exceeded|exhausted|limit)\b",
+    ]
+    has_context = any(bool(re.search(pat, cleaned)) for pat in limit_contexts)
+
     if not has_context:
-        return bool(re.search(r"exceeded\s+memory\s+limit", cleaned) or re.search(r"resource\s+exhausted", cleaned))
+        return bool(re.search(r"exceed(?:s|ed|ing)?\s+memory\s+limit", cleaned) or re.search(r"resource\s+exhausted", cleaned))
 
     limit_events = [
-        r"\bexceeded\b",
-        r"\bexceed\b",
+        r"\bexceed(?:s|ed|ing)?\b",
         r"\bexhausted\b",
+        r"\b(?:hard\s+)?limit\s+reached\b",
+        r"\bhit\s+(?:hard\s+|maximum\s+)?limit\b",
+        r"\breached\s+(?:maximum\s+)?limit\b",
         r"\boom-kill\b",
         r"\boom_kill\b",
         r"\bkilled\b",

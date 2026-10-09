@@ -1017,6 +1017,369 @@ class TestForensic137(unittest.TestCase):
         self.assertEqual(fp["classification"], "OOM_LIKELY")
         self.assertEqual(fp["root_cause_family"], "C")
 
+    def test_t17_offset_free_iso_timestamp_dst_fold_resolution(self):
+        """
+        T17 (P2-1): Offset-free ISO timestamps (e.g. 2026-11-01T01:10:00) must route
+        through resolve_local_timestamp to ensure consistent DST ambiguous fold resolution
+        with slash and dash local formats, rather than relying on naive datetime.timestamp().
+        Explicit timezone offsets (-04:00, -05:00, Z) must maintain direct epoch conversion.
+        """
+        if hasattr(time, "tzset"):
+            orig_tz = os.environ.get("TZ")
+            try:
+                os.environ["TZ"] = "America/New_York"
+                time.tzset()
+
+                # At second occurrence 01:20:00 EST (fold=1):
+                # 01:10 could be fold=0 (EDT, 70 min ago) or fold=1 (EST, 10 min ago).
+                ref_ts = time.mktime((2026, 11, 1, 1, 20, 0, 0, 0, 0))
+                window_30m = ref_ts - 30 * 60
+
+                # Dash format resolves to fold=1 (10 min ago)
+                dash_ts = self.cli.parse_log_timestamp(
+                    "[2026-11-01 01:10:00] task failure",
+                    reference_ts=ref_ts,
+                    window_cutoff=window_30m
+                )
+                self.assertIsNotNone(dash_ts)
+                self.assertEqual((ref_ts - dash_ts) / 60, 10.0)
+
+                # Offset-free ISO format must match dash format behavior
+                iso_naive_ts = self.cli.parse_log_timestamp(
+                    "2026-11-01T01:10:00 task failure",
+                    reference_ts=ref_ts,
+                    window_cutoff=window_30m
+                )
+                self.assertIsNotNone(iso_naive_ts)
+                self.assertEqual(
+                    iso_naive_ts,
+                    dash_ts,
+                    "Offset-free ISO timestamp must resolve to the same fold as dash local format (10m ago), not 70m ago"
+                )
+                self.assertEqual((ref_ts - iso_naive_ts) / 60, 10.0)
+
+                # Explicit UTC and offset ISO timestamps must NOT be modified by local fold resolution
+                explicit_z_ts = self.cli.parse_log_timestamp(
+                    "2026-11-01T06:10:00Z task failure",
+                    reference_ts=ref_ts,
+                    window_cutoff=window_30m
+                )
+                self.assertIsNotNone(explicit_z_ts)
+                self.assertEqual((ref_ts - explicit_z_ts) / 60, 10.0)
+
+                explicit_est_ts = self.cli.parse_log_timestamp(
+                    "2026-11-01T01:10:00-05:00 task failure",
+                    reference_ts=ref_ts,
+                    window_cutoff=window_30m
+                )
+                self.assertIsNotNone(explicit_est_ts)
+                self.assertEqual((ref_ts - explicit_est_ts) / 60, 10.0)
+
+                explicit_edt_ts = self.cli.parse_log_timestamp(
+                    "2026-11-01T01:10:00-04:00 task failure",
+                    reference_ts=ref_ts,
+                    window_cutoff=window_30m
+                )
+                self.assertIsNotNone(explicit_edt_ts)
+                self.assertEqual((ref_ts - explicit_edt_ts) / 60, 70.0)
+            finally:
+                if orig_tz is not None:
+                    os.environ["TZ"] = orig_tz
+                else:
+                    os.environ.pop("TZ", None)
+                time.tzset()
+
+    def test_t18_canonical_rlimit_identifiers_and_controls(self):
+        """
+        T18 (P2-2): Canonical RLIMIT identifiers (RLIMIT_CPU, RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_NPROC)
+        must match context in check_resource_limit_event and check_oom_event despite underscore.
+        Positive: Context + affirmative event -> Family D (True).
+        Negative: Mentions in doc, process name with hyphen, or negation -> Must NOT be Family D (False).
+        """
+        # POSITIVE CONTROLS
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_CPU hard limit reached; process killed by SIGKILL"),
+            "RLIMIT_CPU killed must match resource limit event"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_AS exceeded; process terminated"),
+            "RLIMIT_AS exceeded must match resource limit event"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_NOFILE exhausted"),
+            "RLIMIT_NOFILE exhausted must match resource limit event"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_NPROC exceeded maximum limit"),
+            "RLIMIT_NPROC exceeded must match resource limit event"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_CPU: hard limit reached; process killed by SIGKILL"),
+            "RLIMIT_CPU with colon field separator must match resource limit event"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_CPU: hard limit reached"),
+            "RLIMIT_CPU: hard limit reached without kill token must match resource limit event"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_CPU hit limit"),
+            "RLIMIT_CPU hit limit without kill token must match resource limit event"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_CPU: soft=10, hard=20, limit reached"),
+            "RLIMIT_CPU with comma-separated metadata fields must match resource limit event"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("current usage exceeds memory.max; process terminated"),
+            "Usage exceeding limit must match resource limit event"
+        )
+
+        # NEGATIVE CONTROLS
+        self.assertFalse(
+            self.cli.check_resource_limit_event("cgroup controller cache hit"),
+            "Informational cgroup cache hit must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("documentation mentions RLIMIT_CPU support"),
+            "Informational documentation mentioning RLIMIT_CPU must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("rlimit-exporter process started"),
+            "Process name rlimit-exporter must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123 (rlimit_cpu_exporter) total-vm:100000kB, anon-rss:50000kB"),
+            "Process name rlimit_cpu_exporter must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123 (rlimit_cpu_exporter) total-vm:100000kB, anon-rss:50000kB"),
+            "Host OOM killing process rlimit_cpu_exporter must trigger Family C (not rejected as Family D)"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123 (rlimit_cpu-exporter) total-vm:100000kB, anon-rss:50000kB"),
+            "Process name rlimit_cpu-exporter must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123 (rlimit_cpu-exporter) total-vm:100000kB, anon-rss:50000kB"),
+            "Host OOM killing process rlimit_cpu-exporter must trigger Family C (not rejected as Family D)"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("RLIMIT_CPU not exceeded; no process killed"),
+            "Negated statement 'not exceeded; no process killed' must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123 (python); RLIMIT_CPU is unlimited"),
+            "Informational 'RLIMIT_CPU is unlimited' in Host OOM must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123 (python); RLIMIT_CPU is unlimited"),
+            "Host OOM record with informational RLIMIT mention must trigger Family C (not suppressed by RLIMIT)"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("RLIMIT_CPU is unlimited, Out of memory: Killed process 123"),
+            "Informational RLIMIT preceding comma in Host OOM must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("RLIMIT_CPU is unlimited, Out of memory: Killed process 123"),
+            "Host OOM record following comma after informational RLIMIT must trigger Family C"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123 (python)\nRLIMIT_CPU is unlimited"),
+            "Multiline Host OOM record with RLIMIT continuation must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123 (python)\nRLIMIT_CPU is unlimited"),
+            "Multiline Host OOM record must trigger Family C"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123; RLIMIT_CPU was not exceeded"),
+            "Negated RLIMIT clause 'RLIMIT_CPU was not exceeded' must NOT establish context for unrelated kill"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123; RLIMIT_CPU was not exceeded"),
+            "Host OOM record with negated RLIMIT clause must trigger Family C (not suppressed by negated RLIMIT)"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("RLIMIT_NOFILE is not exhausted"),
+            "Negated RLIMIT status 'is not exhausted' must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("RLIMIT_NOFILE was never exhausted"),
+            "Negated RLIMIT status 'was never exhausted' must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123; RLIMIT_NOFILE is not exhausted"),
+            "Negated RLIMIT status 'RLIMIT_NOFILE is not exhausted' must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123; RLIMIT_NOFILE is not exhausted"),
+            "Host OOM record with negated exhausted RLIMIT clause must trigger Family C (not suppressed by RLIMIT)"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max exceeds current usage"),
+            "Headroom statement 'memory.max exceeds current usage' must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("RLIMIT_CPU exceeds current usage"),
+            "Headroom statement 'RLIMIT_CPU exceeds current usage' must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123; memory.max exceeds current usage"),
+            "Host OOM record with headroom comparison must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123; memory.max exceeds current usage"),
+            "Host OOM record with headroom comparison must trigger Family C (not suppressed by limit context)"
+        )
+
+        # Performance control: repeated informational RLIMIT identifiers in huge dump must complete in linear time (< 0.5s)
+        huge_dump = ("RLIMIT_CPU info " * 5000)
+        t_start = time.perf_counter()
+        self.assertFalse(
+            self.cli.check_resource_limit_event(huge_dump),
+            "Repeated informational RLIMIT identifiers without event must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_oom_event(huge_dump),
+            "Repeated informational RLIMIT identifiers without OOM context must NOT trigger Family C"
+        )
+        t_elapsed = time.perf_counter() - t_start
+        self.assertLess(t_elapsed, 0.5, f"RLIMIT scanning must be linear-time; took {t_elapsed:.3f}s")
+
+        # End-to-end inspect_137_failure classification test
+        now_dt = datetime.datetime.now()
+        ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        log_line = f"{ts_str} RLIMIT_CPU hard limit reached; process killed by SIGKILL\n"
+        log_file = os.path.join(self.temp_dir, "sandbox_t18.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(log_line)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp["incident_evidence"]["resource_limit_found"])
+        self.assertEqual(fp["root_cause_family"], "D")
+        self.assertEqual(fp["classification"], "RESOURCE_LIMIT_LIKELY")
+
+        # End-to-end classification test: Host OOM with informational RLIMIT must classify as Family C (OOM_LIKELY)
+        os.remove(log_file)
+        oom_log_line = f"{ts_str} Out of memory: Killed process 123 (python); RLIMIT_CPU is unlimited\n"
+        oom_log_file = os.path.join(self.temp_dir, "sandbox_oom.log")
+        with open(oom_log_file, "w", encoding="utf-8") as f:
+            f.write(oom_log_line)
+        fp_oom = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp_oom["incident_evidence"]["oom_found"])
+        self.assertFalse(fp_oom["incident_evidence"]["resource_limit_found"])
+        self.assertEqual(fp_oom["root_cause_family"], "C")
+        self.assertEqual(fp_oom["classification"], "OOM_LIKELY")
+        os.remove(oom_log_file)
+
+    def test_t19_exceed_inflections_and_negations(self):
+        """
+        T19 (P2-3): Verb inflections of exceed (exceed, exceeds, exceeded, exceeding)
+        must all match affirmative limit events with context.
+        Negated phrases (does not exceed, doesn't exceed, never exceeds, is not exceeding,
+        isn't exceeding, limit not exceeded, etc.) must be safely stripped and remain negative.
+        """
+        # POSITIVE CONTROLS
+        self.assertTrue(
+            self.cli.check_resource_limit_event("memory.max exceed hard limit"),
+            "exceed must match"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("memory.max exceeds hard limit"),
+            "exceeds must match"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("memory.max exceeded hard limit"),
+            "exceeded must match"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("memory.max exceeding hard limit"),
+            "exceeding must match"
+        )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("memory.max not only exceeds hard limit; usage is twice the cap"),
+            "Affirmative 'not only exceeds' must match limit event"
+        )
+
+        # NEGATIVE CONTROLS
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max usage no longer exceeds hard limit"),
+            "'no longer exceeds' must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max does not exceed hard limit"),
+            "does not exceed must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max doesn't exceed hard limit"),
+            "doesn't exceed must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max never exceeds hard limit"),
+            "never exceeds must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max is not exceeding hard limit"),
+            "is not exceeding must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max is not currently exceeding hard limit"),
+            "is not currently exceeding (adverb-qualified) must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max does not actually exceed hard limit"),
+            "does not actually exceed (adverb-qualified) must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max has not yet exceeded hard limit"),
+            "has not yet exceeded (adverb-qualified) must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max isn't exceeding hard limit"),
+            "isn't exceeding must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max did not exceed hard limit"),
+            "did not exceed must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max didn't exceed hard limit"),
+            "didn't exceed must be stripped as negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("limit not exceeded"),
+            "limit not exceeded must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("without exceeding memory.max"),
+            "without exceeding must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("usage cannot exceed memory limit"),
+            "'cannot exceed' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("usage can't exceed memory limit"),
+            "'can\\'t exceed' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("usage can not exceed memory limit"),
+            "'can not exceed' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("usage could not exceed memory limit"),
+            "'could not exceed' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory limit cannot be exceeded"),
+            "'limit cannot be exceeded' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory limit can't be exceeded"),
+            "'limit can\\'t be exceeded' modal negation must remain negative"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
+
