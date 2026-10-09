@@ -960,6 +960,63 @@ class TestForensic137(unittest.TestCase):
                     os.environ.pop("TZ", None)
                 time.tzset()
 
+    def test_t15_dst_repeated_hour_clock_skew_tolerance(self):
+        """
+        T15: Candidate epoch selection during DST repeated hour fold must
+        respect CLOCK_SKEW_TOLERANCE_SECONDS so timestamps slightly ahead
+        of reference_ts (e.g. 2s ahead due to clock jitter) are not rejected.
+        """
+        if hasattr(time, "tzset"):
+            orig_tz = os.environ.get("TZ")
+            try:
+                os.environ["TZ"] = "America/New_York"
+                time.tzset()
+
+                # At second occurrence 01:20:00:
+                # A log written at 01:20:02 (2 seconds ahead of reference_ts 01:20:00)
+                # within CLOCK_SKEW_TOLERANCE_SECONDS (5s) must be accepted.
+                ref_ts = time.mktime((2026, 11, 1, 1, 20, 0, 0, 0, 0))
+                window_30m = ref_ts - 30 * 60
+
+                resolved_ts = self.cli.resolve_local_timestamp(
+                    2026, 11, 1, 1, 20, 2,
+                    reference_ts=ref_ts,
+                    window_cutoff=window_30m
+                )
+                self.assertIsNotNone(resolved_ts)
+                self.assertEqual(resolved_ts - ref_ts, 2.0,
+                                 "Must resolve fold within CLOCK_SKEW_TOLERANCE_SECONDS")
+            finally:
+                if orig_tz is not None:
+                    os.environ["TZ"] = orig_tz
+                else:
+                    os.environ.pop("TZ", None)
+                time.tzset()
+
+    def test_t16_oom_victim_process_with_cgroup_in_name_classifies_as_family_c(self):
+        """
+        T16: Host OOM killing a victim process whose name contains 'cgroup'
+        (e.g. cgroup-exporter) must NOT be misclassified as Family D (resource limit),
+        and must strictly classify as Family C (kernel/host OOM).
+        """
+        line_victim = "Out of memory: Killed process 123 (cgroup-exporter) total-vm:100000kB, anon-rss:50000kB"
+        self.assertTrue(self.cli.check_oom_event(line_victim))
+        self.assertFalse(self.cli.check_resource_limit_event(line_victim))
+
+        now_dt = datetime.datetime.now()
+        ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        log_line = f"{ts_str} {line_victim}\n"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t16.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(log_line)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp["incident_evidence"]["oom_found"])
+        self.assertFalse(fp["incident_evidence"]["resource_limit_found"])
+        self.assertEqual(fp["classification"], "OOM_LIKELY")
+        self.assertEqual(fp["root_cause_family"], "C")
+
 
 if __name__ == "__main__":
     unittest.main()

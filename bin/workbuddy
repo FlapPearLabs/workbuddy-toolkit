@@ -2697,14 +2697,15 @@ def resolve_local_timestamp(y, mo, d, h, mi, sec, us=0, reference_ts=None, windo
 
     # 存在 DST 重复小时歧义
     if reference_ts is not None and window_cutoff is not None:
-        c_in_window = [c for c in candidates if window_cutoff <= (c + us / 1e6) <= reference_ts]
+        max_ts = reference_ts + CLOCK_SKEW_TOLERANCE_SECONDS
+        c_in_window = [c for c in candidates if window_cutoff <= (c + us / 1e6) <= max_ts]
         if len(c_in_window) == 1:
             return c_in_window[0] + us / 1e6
         if len(c_in_window) > 1:
             # 宽窗口覆盖了两个时刻，无法确定真实发生次序，安全降级为 None
             return None
 
-    ref = reference_ts if reference_ts is not None else time.time()
+    ref = (reference_ts + CLOCK_SKEW_TOLERANCE_SECONDS) if reference_ts is not None else time.time()
     past_candidates = [c for c in candidates if (c + us / 1e6) <= ref]
     if past_candidates:
         past_candidates.sort(key=lambda c: ref - (c + us / 1e6))
@@ -2808,16 +2809,22 @@ def check_oom_event(text):
     评估日志文本是否包含真实宿主/内核全局 OOM / Jetsam 杀伤事件 (Family C)。
     严格执行：
     1. 必须具有全局 OOM/Jetsam 上下文 (jetsam, memorystatus, kernel-oom 等)；
-    2. 严格排除 cgroup / rlimit / quota 配额约束事件（归属于 Family D）；
+    2. 严格排除结构化 cgroup / rlimit / quota 配额约束事件（归属于 Family D）；
     3. 过滤常见否定表达（如 'no process was killed'），只识别确定性肯定杀伤事件。
     """
     if not text:
         return False
     t_lower = text.lower()
 
-    # cgroup/rlimit 约束杀伤必须归 Family D，排除在全局 Family C 之外
-    cgroup_contexts = ["cgroup", "rlimit", "memory.max", "memory.high"]
-    if any(cc in t_lower for cc in cgroup_contexts):
+    # 结构化 cgroup/rlimit 约束杀伤必须归 Family D，排除在全局 Family C 之外
+    cgroup_structural_contexts = [
+        r"\bmemory\s+cgroup\s+out\s+of\s+memory\b",
+        r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|controller|quota)\b",
+        r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
+        r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
+        r"\brlimit\b"
+    ]
+    if any(bool(re.search(pat, t_lower)) for pat in cgroup_structural_contexts):
         return False
 
     oom_contexts = [
@@ -2866,7 +2873,7 @@ def check_resource_limit_event(text):
     """
     评估日志文本是否包含真实资源超限 / cgroup / rlimit 终止事件 (Family D)。
     严格执行：
-    1. 具有 limit context (cgroup, rlimit, quota, memory.max 等)；
+    1. 具有结构化 limit context (cgroup, rlimit, quota, memory.max 等)，排除任意字段中的 cgroup 字符；
     2. 过滤常见否定表达（如 'limit not exceeded', 'no process killed'）；
     3. 只识别确定性肯定超限与强杀事件。
     """
@@ -2875,14 +2882,15 @@ def check_resource_limit_event(text):
     t_lower = text.lower()
 
     limit_contexts = [
-        "rlimit",
-        "cgroup",
-        "resource limit",
-        "quota",
-        "memory.max",
-        "memory.high"
+        r"\bmemory\s+cgroup\s+out\s+of\s+memory\b",
+        r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|exhausted|kill|controller|quota)\b",
+        r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
+        r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
+        r"\brlimit(?:\s+limit|_limit|\s+quota|\s+exceeded|\b)",
+        r"\bresource\s+limit\b",
+        r"\bquota\s+(?:exceeded|exhausted|limit)\b",
     ]
-    has_context = any(c in t_lower for c in limit_contexts)
+    has_context = any(bool(re.search(pat, t_lower)) for pat in limit_contexts)
 
     # 剥离否定表达
     cleaned = t_lower
@@ -3126,7 +3134,7 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
                 if check_resource_limit_event(rec_text):
                     target_ev["resource_limit_found"] = True
                     rec_matched = True
-                elif check_oom_event(rec_text):
+                if check_oom_event(rec_text):
                     target_ev["oom_found"] = True
                     rec_matched = True
 
@@ -3153,7 +3161,7 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
                         unscoped_evidence["profile_timeout_found"] = True
                     if check_resource_limit_event(rec_text):
                         unscoped_evidence["resource_limit_found"] = True
-                    elif check_oom_event(rec_text):
+                    if check_oom_event(rec_text):
                         unscoped_evidence["oom_found"] = True
                     if rule_lens and max_len > 1_000_000:
                         unscoped_evidence["rule_explosion_found"] = True
