@@ -2831,6 +2831,7 @@ def check_oom_event(text):
         r"(?:limit|quota)\s+(?:cannot|can't|can\s+not|could\s+not|couldn't|will\s+not|won't|must\s+not|should\s+not|is\s+not|was\s+not|are\s+not|were\s+not|not|never)\s+(?:be\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
         r"without\s+(?:being\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
         r"\bno\s+(?:exceed(?:s|ed|ing)?|exhaustion)\b",
+        r"\b(?:memory\.(?:max|high|low|min)|rlimit_[a-z0-9_]+|(?:hard\s+|soft\s+)?limit|quota|capacity|threshold|rlimit)\s+(?:still\s+|currently\s+|presently\s+|comfortably\s+|amply\s+)?exceed(?:s|ed|ing)?\s+(?:(?:current|actual|present)\s+)?(?:usage|consumption|footprint|rss|demand|load|bytes|size|requirement)\b",
         r"without\s+killing",
     ]
     for neg in limit_negations:
@@ -2921,6 +2922,7 @@ def check_resource_limit_event(text):
         r"(?:limit|quota)\s+(?:cannot|can't|can\s+not|could\s+not|couldn't|will\s+not|won't|must\s+not|should\s+not|is\s+not|was\s+not|are\s+not|were\s+not|not|never)\s+(?:be\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
         r"without\s+(?:being\s+)?(?:exceed(?:s|ed|ing)?|exhaust(?:ed|ing)?)\b",
         r"\bno\s+(?:exceed(?:s|ed|ing)?|exhaustion)\b",
+        r"\b(?:memory\.(?:max|high|low|min)|rlimit_[a-z0-9_]+|(?:hard\s+|soft\s+)?limit|quota|capacity|threshold|rlimit)\s+(?:still\s+|currently\s+|presently\s+|comfortably\s+|amply\s+)?exceed(?:s|ed|ing)?\s+(?:(?:current|actual|present)\s+)?(?:usage|consumption|footprint|rss|demand|load|bytes|size|requirement)\b",
         r"without\s+killing",
     ]
     for neg in limit_negations:

@@ -1129,6 +1129,10 @@ class TestForensic137(unittest.TestCase):
             self.cli.check_resource_limit_event("RLIMIT_CPU: soft=10, hard=20, limit reached"),
             "RLIMIT_CPU with comma-separated metadata fields must match resource limit event"
         )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("current usage exceeds memory.max; process terminated"),
+            "Usage exceeding limit must match resource limit event"
+        )
 
         # NEGATIVE CONTROLS
         self.assertFalse(
@@ -1210,6 +1214,22 @@ class TestForensic137(unittest.TestCase):
         self.assertTrue(
             self.cli.check_oom_event("Out of memory: Killed process 123; RLIMIT_NOFILE is not exhausted"),
             "Host OOM record with negated exhausted RLIMIT clause must trigger Family C (not suppressed by RLIMIT)"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max exceeds current usage"),
+            "Headroom statement 'memory.max exceeds current usage' must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("RLIMIT_CPU exceeds current usage"),
+            "Headroom statement 'RLIMIT_CPU exceeds current usage' must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123; memory.max exceeds current usage"),
+            "Host OOM record with headroom comparison must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123; memory.max exceeds current usage"),
+            "Host OOM record with headroom comparison must trigger Family C (not suppressed by limit context)"
         )
 
         # End-to-end inspect_137_failure classification test
