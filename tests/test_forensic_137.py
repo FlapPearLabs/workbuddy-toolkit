@@ -1125,8 +1125,16 @@ class TestForensic137(unittest.TestCase):
             self.cli.check_resource_limit_event("RLIMIT_CPU hit limit"),
             "RLIMIT_CPU hit limit without kill token must match resource limit event"
         )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_CPU: soft=10, hard=20, limit reached"),
+            "RLIMIT_CPU with comma-separated metadata fields must match resource limit event"
+        )
 
         # NEGATIVE CONTROLS
+        self.assertFalse(
+            self.cli.check_resource_limit_event("cgroup controller cache hit"),
+            "Informational cgroup cache hit must NOT trigger Family D"
+        )
         self.assertFalse(
             self.cli.check_resource_limit_event("documentation mentions RLIMIT_CPU support"),
             "Informational documentation mentioning RLIMIT_CPU must NOT trigger Family D"

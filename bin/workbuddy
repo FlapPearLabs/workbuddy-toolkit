@@ -2851,12 +2851,13 @@ def check_oom_event(text):
     # 必须具备确定性因果证据，严禁仅凭信息性标识（如 'RLIMIT_CPU is unlimited'）误排除 Host OOM。
     # 必须在剥离否定后评估结构化上下文，避免如 'RLIMIT_CPU was not exceeded' 误抑制 Host OOM。
     rlimit_canon = r"(?:rlimit_(?:cpu|fsize|data|stack|core|rss|nproc|nofile|ofile|memlock|as|locks|sigpending|msgqueue|nice|rtprio|rttime)|rlimit)"
+    meta_keys = r"(?:soft|hard|cur|current|max|min|val|value|usage|used|count|limit)"
     cgroup_structural_contexts = [
         r"\bmemory\s+cgroup\s+out\s+of\s+memory\b",
         r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|controller|quota)\b",
         r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
         r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
-        rf"\b{rlimit_canon}\b(?![-./_])(?:\s*[:=])?\s*(?:(?!unlimited)[^,;.\n\r])*?\b(?:exceed(?:s|ed|ing)?|exhausted|limit\s+reached|hit\s+limit|hard\s+limit|hit|reached|killed|killing|kill|terminated|sigkill)\b",
+        rf"\b{rlimit_canon}\b(?![-./_])(?:\s*[:=])?\s*(?:(?!unlimited)(?:[^,;.\n\r]|,\s*(?={meta_keys}\s*[:=]|(?:hard\s+|maximum\s+)?limit\s+reached\b|hit\s+(?:hard\s+|maximum\s+)?limit\b|hard\s+limit\b|exceed(?:s|ed|ing)?\b|exhausted\b|process\s+(?:killed|terminated)\b|killed\b|terminated\b|sigkill\b)))*?\b(?:exceed(?:s|ed|ing)?|exhausted|(?:hard\s+)?limit\s+reached|hit\s+(?:hard\s+|maximum\s+)?limit|hard\s+limit|killed|killing|kill|terminated|sigkill)\b",
         rf"\b(?:exceed(?:s|ed|ing)?|exhausted|hit|reached)\s+(?:maximum\s+)?{rlimit_canon}\b(?![-./_])",
         rf"\b(?:killed|killing|kill|terminated|sigkill)\s+(?:due\s+to|by|because\s+of|from)\s+{rlimit_canon}\b(?![-./_])",
         r"\brlimit(?:\s+limit|_limit|\s+quota|\s+exceeded)\b",
@@ -2926,12 +2927,13 @@ def check_resource_limit_event(text):
         cleaned = re.sub(neg, " ", cleaned)
 
     rlimit_canon = r"(?:rlimit_(?:cpu|fsize|data|stack|core|rss|nproc|nofile|ofile|memlock|as|locks|sigpending|msgqueue|nice|rtprio|rttime)|rlimit)"
+    meta_keys = r"(?:soft|hard|cur|current|max|min|val|value|usage|used|count|limit)"
     limit_contexts = [
         r"\bmemory\s+cgroup\s+out\s+of\s+memory\b",
         r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|exhausted|kill|controller|quota)\b",
         r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
         r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
-        rf"\b{rlimit_canon}\b(?![-./_])(?:\s*[:=])?\s*(?:(?!unlimited)[^,;.\n\r])*?\b(?:exceed(?:s|ed|ing)?|exhausted|limit\s+reached|hit\s+limit|hard\s+limit|hit|reached|killed|killing|kill|terminated|sigkill)\b",
+        rf"\b{rlimit_canon}\b(?![-./_])(?:\s*[:=])?\s*(?:(?!unlimited)(?:[^,;.\n\r]|,\s*(?={meta_keys}\s*[:=]|(?:hard\s+|maximum\s+)?limit\s+reached\b|hit\s+(?:hard\s+|maximum\s+)?limit\b|hard\s+limit\b|exceed(?:s|ed|ing)?\b|exhausted\b|process\s+(?:killed|terminated)\b|killed\b|terminated\b|sigkill\b)))*?\b(?:exceed(?:s|ed|ing)?|exhausted|(?:hard\s+)?limit\s+reached|hit\s+(?:hard\s+|maximum\s+)?limit|hard\s+limit|killed|killing|kill|terminated|sigkill)\b",
         rf"\b(?:exceed(?:s|ed|ing)?|exhausted|hit|reached)\s+(?:maximum\s+)?{rlimit_canon}\b(?![-./_])",
         rf"\b(?:killed|killing|kill|terminated|sigkill)\s+(?:due\s+to|by|because\s+of|from)\s+{rlimit_canon}\b(?![-./_])",
         r"\brlimit(?:\s+limit|_limit|\s+quota|\s+exceeded)\b",
@@ -2949,8 +2951,6 @@ def check_resource_limit_event(text):
         r"\b(?:hard\s+)?limit\s+reached\b",
         r"\bhit\s+(?:hard\s+|maximum\s+)?limit\b",
         r"\breached\s+(?:maximum\s+)?limit\b",
-        r"\breached\b",
-        r"\bhit\b",
         r"\boom-kill\b",
         r"\boom_kill\b",
         r"\bkilled\b",
