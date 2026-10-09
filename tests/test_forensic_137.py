@@ -671,6 +671,352 @@ class TestForensic137(unittest.TestCase):
         self.assertIn("current_state", data)
         self.assertIn("taxonomy_scope", data)
 
+    def test_t1_malformed_timestamp_after_recent_record(self):
+        """
+        T1: A line with timestamp-like prefix but unparseable format must not
+        inherit the timestamp of a preceding recent record.
+        """
+        now_dt = datetime.datetime.now()
+        recent_ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        malformed_line = "[2026-99-99 99:99:99] InteractiveProcess::drop join 超时 5000ms"
+
+        # Check helper behavior directly
+        self.assertTrue(self.cli.looks_like_timestamp_prefix(malformed_line))
+        self.assertIsNone(self.cli.parse_log_timestamp(malformed_line))
+
+        content = f"{recent_ts_str} benign worker start\n{malformed_line}\n"
+        records = self.cli.split_log_into_records(content)
+        self.assertEqual(len(records), 2)
+        self.assertIsNotNone(records[0][0])
+        self.assertIsNone(records[1][0], "Malformed timestamp line must have timestamp=None, not inherit previous ts")
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t1.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertFalse(fp["incident_evidence"]["pty_join_timeout_found"])
+        self.assertTrue(fp["unscoped_evidence"]["pty_join_timeout_found"])
+        self.assertEqual(fp["classification"], "UNKNOWN")
+        self.assertEqual(fp["root_cause_family"], "H")
+
+    def test_t2_future_timestamp_exclusion(self):
+        """
+        T2: A log record with a future timestamp must be excluded from the incident
+        window and must not trigger an active incident classification.
+        """
+        future_dt = datetime.datetime.now() + datetime.timedelta(hours=2)
+        future_ts_str = f"[{future_dt.year:04d}-{future_dt.month:02d}-{future_dt.day:02d} {future_dt.hour:02d}:{future_dt.minute:02d}:{future_dt.second:02d}]"
+        content = f"{future_ts_str} ProcessKill signal=Some(\"term\")\n"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t2.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertFalse(fp["incident_evidence"]["supervisor_kill_found"])
+        self.assertEqual(fp["classification"], "UNKNOWN")
+        self.assertEqual(fp["root_cause_family"], "H")
+
+    def test_t3_iso_positive_offset_parsing(self):
+        """
+        T3: ISO-8601 timestamps with positive offset (+05:30) must parse to exact Unix epoch.
+        """
+        iso_str = "2026-10-08T12:00:00+05:30"
+        ts = self.cli.parse_log_timestamp(iso_str)
+        self.assertIsNotNone(ts)
+        expected_epoch = datetime.datetime.fromisoformat(iso_str).timestamp()
+        self.assertEqual(ts, expected_epoch)
+
+    def test_t4_iso_negative_offset_parsing(self):
+        """
+        T4: ISO-8601 timestamps with negative offset (-05:30) must inherit negative sign
+        on minutes component, matching standard datetime.fromisoformat.
+        """
+        iso_str = "2026-10-08T12:00:00-05:30"
+        ts = self.cli.parse_log_timestamp(iso_str)
+        self.assertIsNotNone(ts)
+        expected_epoch = datetime.datetime.fromisoformat(iso_str).timestamp()
+        self.assertEqual(ts, expected_epoch)
+
+    def test_t5_iso_negative_zero_hours_offset_parsing(self):
+        """
+        T5: ISO-8601 timestamps with zero hours and negative minutes (-00:30) and +00:30 and Z.
+        """
+        for iso_str in ["2026-10-08T12:00:00-00:30", "2026-10-08T12:00:00+00:30", "2026-10-08T12:00:00Z"]:
+            ts = self.cli.parse_log_timestamp(iso_str)
+            self.assertIsNotNone(ts)
+            # Python 3.9 fromisoformat does not support trailing 'Z', normalize to '+00:00' for comparison
+            expected_epoch = datetime.datetime.fromisoformat(iso_str.replace("Z", "+00:00")).timestamp()
+            self.assertEqual(ts, expected_epoch)
+
+    def test_t6_cgroup_oom_classifies_as_family_d(self):
+        """
+        T6: Cgroup OOM kills must classify as Family D (Resource Limit), NOT Family C (Host OOM).
+        """
+        now_dt = datetime.datetime.now()
+        ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        line = f"{ts_str} Memory cgroup out of memory: Killed process 12345 (bash) total-vm:1024kB, anon-rss:512kB\n"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t6.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(line)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp["incident_evidence"]["resource_limit_found"], "Cgroup OOM must trigger resource_limit_found")
+        self.assertFalse(fp["incident_evidence"]["oom_found"], "Cgroup OOM must not trigger host oom_found")
+        self.assertEqual(fp["classification"], "RESOURCE_LIMIT_LIKELY")
+        self.assertEqual(fp["root_cause_family"], "D")
+
+    def test_t7_global_kernel_oom_classifies_as_family_c(self):
+        """
+        T7: Global host/kernel OOM kills (without cgroup/rlimit context) must classify as Family C.
+        """
+        now_dt = datetime.datetime.now()
+        ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        line = f"{ts_str} Out of memory: Kill process 12345 (bash) score 900 or sacrifice child\n"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t7.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(line)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp["incident_evidence"]["oom_found"])
+        self.assertFalse(fp["incident_evidence"]["resource_limit_found"])
+        self.assertEqual(fp["classification"], "OOM_LIKELY")
+        self.assertEqual(fp["root_cause_family"], "C")
+
+    def test_t8_negated_oom_kill_fails_negative_to_family_h(self):
+        """
+        T8: Negated OOM kill phrases ('no process was killed', '0 processes killed')
+        must fail negative and classify as Family H (UNKNOWN).
+        """
+        self.assertFalse(self.cli.check_oom_event("memorystatus: no process was killed"))
+        self.assertFalse(self.cli.check_oom_event("kernel-oom: 0 processes killed"))
+        self.assertFalse(self.cli.check_oom_event("out of memory subsystem initialized without killing"))
+
+        now_dt = datetime.datetime.now()
+        ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        line = f"{ts_str} memorystatus: no process was killed during low memory event\n"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t8.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(line)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertFalse(fp["incident_evidence"]["oom_found"])
+        self.assertEqual(fp["classification"], "UNKNOWN")
+        self.assertEqual(fp["root_cause_family"], "H")
+
+    def test_t9_negated_resource_limit_fails_negative_to_family_h(self):
+        """
+        T9: Negated resource limit phrases ('limit not exceeded', 'no process killed')
+        must fail negative and classify as Family H (UNKNOWN).
+        """
+        self.assertFalse(self.cli.check_resource_limit_event("cgroup memory limit not exceeded; no process killed"))
+        self.assertFalse(self.cli.check_resource_limit_event("rlimit quota not exceeded"))
+
+        now_dt = datetime.datetime.now()
+        ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        line = f"{ts_str} cgroup memory limit not exceeded; no process killed\n"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t9.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(line)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertFalse(fp["incident_evidence"]["resource_limit_found"])
+        self.assertEqual(fp["classification"], "UNKNOWN")
+        self.assertEqual(fp["root_cause_family"], "H")
+
+    def test_t10_affirmative_oom_event_classifies_as_family_c(self):
+        """
+        T10: Affirmative OOM kill event must trigger Family C.
+        """
+        self.assertTrue(self.cli.check_oom_event("memorystatus: process was killed by jetsam"))
+
+        now_dt = datetime.datetime.now()
+        ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        line = f"{ts_str} memorystatus: process was killed by jetsam; exit_code=137\n"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t10.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(line)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp["incident_evidence"]["oom_found"])
+        self.assertEqual(fp["classification"], "OOM_LIKELY")
+        self.assertEqual(fp["root_cause_family"], "C")
+
+    def test_t11_affirmative_resource_limit_event_classifies_as_family_d(self):
+        """
+        T11: Affirmative resource limit event must trigger Family D.
+        """
+        self.assertTrue(self.cli.check_resource_limit_event("cgroup memory limit exceeded; process killed"))
+
+        now_dt = datetime.datetime.now()
+        ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        line = f"{ts_str} cgroup memory limit exceeded; process killed\n"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t11.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(line)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp["incident_evidence"]["resource_limit_found"])
+        self.assertEqual(fp["classification"], "RESOURCE_LIMIT_LIKELY")
+        self.assertEqual(fp["root_cause_family"], "D")
+
+    def test_t12_tail_boundary_record_recovery(self):
+        """
+        T12: In a log file larger than 500 KiB, a record whose timestamp lies just before
+        the 500 KiB cutoff but whose body crosses into the tail must be recovered
+        via bounded backtracking without losing its timestamp.
+        """
+        now_dt = datetime.datetime.now()
+        now_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t12.log")
+        # Generate 520 KiB total:
+        # 1. 490 KiB padding
+        # 2. Record timestamp starting at ~490 KiB (within the 64 KiB backtrack region before 500 KiB)
+        # 3. Crossing the 500 KiB boundary with PTY deadlock body
+        with open(log_file, "wb") as f:
+            pad_line = b"[2026-01-01 00:00:00] benign prefix filler line padding\n"
+            target_padding = 490 * 1024
+            while f.tell() < target_padding:
+                f.write(pad_line)
+
+            # Record timestamp in the backtrack zone
+            f.write(f"{now_str} worker task dispatch\n".encode("utf-8"))
+            # Body lines crossing the 500 KiB mark
+            while f.tell() < 515 * 1024:
+                f.write(b"  intermediate continuation stack trace info\n")
+            f.write(b"  InteractiveProcess::drop join \xe8\xb6\x85\xe6\x97\xb6 5000ms\n")
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp["incident_evidence"]["pty_join_timeout_found"],
+                        "Record crossing the 500 KiB boundary must have its timestamp recovered by backtrack!")
+        self.assertEqual(fp["classification"], "PTY_LIFECYCLE_LIKELY")
+        self.assertEqual(fp["root_cause_family"], "B")
+
+    def test_t13_tail_boundary_no_timestamp_degrades_to_unscoped(self):
+        """
+        T13: In a log file larger than 500 KiB where no timestamp exists anywhere in
+        the backtrack window, the record must degrade to unscoped evidence without
+        fabricating a false timestamp or triggering an active incident.
+        """
+        log_file = os.path.join(self.temp_dir, "sandbox_t13.log")
+        with open(log_file, "wb") as f:
+            # 580 KiB file with no timestamps at all in the last 100 KiB
+            pad_line = b"[2026-01-01 00:00:00] very old header line\n"
+            f.write(pad_line)
+            unanchored_line = b"unanchored raw continuation line without timestamp prefix\n"
+            while f.tell() < 570 * 1024:
+                f.write(unanchored_line)
+            f.write(b"InteractiveProcess::drop join \xe8\xb6\x85\xe6\x97\xb6 5000ms\n")
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertFalse(fp["incident_evidence"]["pty_join_timeout_found"],
+                         "Unanchored tail record must not enter incident_evidence")
+        self.assertTrue(fp["unscoped_evidence"]["pty_join_timeout_found"],
+                        "Unanchored tail record must be captured in unscoped_evidence")
+        self.assertEqual(fp["classification"], "UNKNOWN")
+        self.assertEqual(fp["root_cause_family"], "H")
+
+    def test_t14_dst_ambiguous_local_timestamp_safe_handling(self):
+        """
+        T14: Local timestamps falling in an ambiguous DST repeated hour (e.g. 01:10 America/New_York)
+        must resolve to the candidate consistent with the inspection window (not falsely pushed 70m away),
+        and wide/undifferentiable windows must degrade safely to None (unscoped).
+        """
+        if hasattr(time, "tzset"):
+            orig_tz = os.environ.get("TZ")
+            try:
+                os.environ["TZ"] = "America/New_York"
+                time.tzset()
+
+                # At second occurrence 01:20:
+                # 01:10 could be fold=0 (EDT, 70 min ago) or fold=1 (EST, 10 min ago).
+                ref_ts = time.mktime((2026, 11, 1, 1, 20, 0, 0, 0, 0))
+                window_30m = ref_ts - 30 * 60
+
+                resolved_ts = self.cli.resolve_local_timestamp(2026, 11, 1, 1, 10, 0,
+                                                                reference_ts=ref_ts, window_cutoff=window_30m)
+                self.assertIsNotNone(resolved_ts)
+                self.assertEqual((ref_ts - resolved_ts) / 60, 10.0,
+                                 "Must resolve to candidate inside the 30m window (10m ago), not 70m ago")
+
+                # Wide window covering both occurrences (e.g. 120 minutes)
+                window_wide = ref_ts - 120 * 60
+                ambiguous_res = self.cli.resolve_local_timestamp(2026, 11, 1, 1, 10, 0,
+                                                                 reference_ts=ref_ts, window_cutoff=window_wide)
+                self.assertIsNone(ambiguous_res,
+                                  "When both candidate epochs fall inside window, must degrade to None (unscoped)")
+            finally:
+                if orig_tz is not None:
+                    os.environ["TZ"] = orig_tz
+                else:
+                    os.environ.pop("TZ", None)
+                time.tzset()
+
+    def test_t15_dst_repeated_hour_clock_skew_tolerance(self):
+        """
+        T15: Candidate epoch selection during DST repeated hour fold must
+        respect CLOCK_SKEW_TOLERANCE_SECONDS so timestamps slightly ahead
+        of reference_ts (e.g. 2s ahead due to clock jitter) are not rejected.
+        """
+        if hasattr(time, "tzset"):
+            orig_tz = os.environ.get("TZ")
+            try:
+                os.environ["TZ"] = "America/New_York"
+                time.tzset()
+
+                # At second occurrence 01:20:00:
+                # A log written at 01:20:02 (2 seconds ahead of reference_ts 01:20:00)
+                # within CLOCK_SKEW_TOLERANCE_SECONDS (5s) must be accepted.
+                ref_ts = time.mktime((2026, 11, 1, 1, 20, 0, 0, 0, 0))
+                window_30m = ref_ts - 30 * 60
+
+                resolved_ts = self.cli.resolve_local_timestamp(
+                    2026, 11, 1, 1, 20, 2,
+                    reference_ts=ref_ts,
+                    window_cutoff=window_30m
+                )
+                self.assertIsNotNone(resolved_ts)
+                self.assertEqual(resolved_ts - ref_ts, 2.0,
+                                 "Must resolve fold within CLOCK_SKEW_TOLERANCE_SECONDS")
+            finally:
+                if orig_tz is not None:
+                    os.environ["TZ"] = orig_tz
+                else:
+                    os.environ.pop("TZ", None)
+                time.tzset()
+
+    def test_t16_oom_victim_process_with_cgroup_in_name_classifies_as_family_c(self):
+        """
+        T16: Host OOM killing a victim process whose name contains 'cgroup'
+        (e.g. cgroup-exporter) must NOT be misclassified as Family D (resource limit),
+        and must strictly classify as Family C (kernel/host OOM).
+        """
+        line_victim = "Out of memory: Killed process 123 (cgroup-exporter) total-vm:100000kB, anon-rss:50000kB"
+        self.assertTrue(self.cli.check_oom_event(line_victim))
+        self.assertFalse(self.cli.check_resource_limit_event(line_victim))
+
+        now_dt = datetime.datetime.now()
+        ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
+        log_line = f"{ts_str} {line_victim}\n"
+
+        log_file = os.path.join(self.temp_dir, "sandbox_t16.log")
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(log_line)
+
+        fp = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp["incident_evidence"]["oom_found"])
+        self.assertFalse(fp["incident_evidence"]["resource_limit_found"])
+        self.assertEqual(fp["classification"], "OOM_LIKELY")
+        self.assertEqual(fp["root_cause_family"], "C")
+
 
 if __name__ == "__main__":
     unittest.main()

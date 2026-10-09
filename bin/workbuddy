@@ -2632,6 +2632,10 @@ def get_launchagent_status():
     except Exception:
         return "CONFIGURED"
 
+CLOCK_SKEW_TOLERANCE_SECONDS = 5
+TAIL_LIMIT_BYTES = 500 * 1024
+TAIL_BACKTRACK_BYTES = 64 * 1024
+
 LOG_TS_PATTERNS = [
     # WorkBuddy format: [2026/10/7 11:50:13.807] or 2026/10/7 11:50:13
     re.compile(r"^\[?(\d{4})/(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})(?:\.(\d+))?\]?"),
@@ -2641,7 +2645,74 @@ LOG_TS_PATTERNS = [
     re.compile(r"^\[?(\d{4})-(\d{1,2})-(\d{1,2})T(\d{1,2}):(\d{1,2}):(\d{1,2})(?:\.(\d+))?(?:(Z)|([+-]\d{1,2}):?(\d{2}))?\]?"),
 ]
 
-def parse_log_timestamp(line):
+def looks_like_timestamp_prefix(line):
+    """
+    检测某行行首是否呈现时间戳前缀特征（如以 [YYYY/M/D 或 YYYY-MM-DD 或 ISO 等开头）。
+    若具有时间戳外观但 parse_log_timestamp 返回 None，说明为损坏/不合规的时间戳行，
+    必须截断前一条 record 并开启 timestamp=None 的独立 record，严禁作为 continuation line 继承前一条 record 的时间戳。
+    """
+    if not line:
+        return False
+    s = line.strip()
+    if not s or s[0] not in ("[", "1", "2"):
+        return False
+    return bool(re.match(r"^\[?\d{4}[-/.]\d{1,2}", s))
+
+def resolve_local_timestamp(y, mo, d, h, mi, sec, us=0, reference_ts=None, window_cutoff=None):
+    """
+    将无显式时区偏移的本地年月日时分秒转换为 epoch 秒。
+    针对 DST 降级重复小时（Repeated Hour / Fall-Back）的歧义性，探测 isdst in (1, 0) 的候选 epoch：
+    1. 若无歧义（仅 1 个有效候选），直接返回对应 epoch；
+    2. 若存在 2 个候选 epoch，若提供 window_cutoff 与 reference_ts，挑选唯一落在窗口 [window_cutoff, reference_ts] 内的候选；
+    3. 若两候选均在窗口内（宽窗口）或无法确定，返回 None 降级为 unscoped evidence，严禁凭空捏造确定性；
+    4. 若均在窗口外，返回距 reference_ts 最近的过去候选作为历史记录。
+    """
+    # 严格先进行日历合法性校验，非法数值（如 99-99 99:99:99）直接判定为无法解析
+    try:
+        _dt.datetime(y, mo, d, h, mi, sec)
+    except Exception:
+        return None
+
+    candidates = []
+    for isdst in (1, 0):
+        try:
+            ep = time.mktime((y, mo, d, h, mi, sec, 0, 0, isdst))
+            lt = time.localtime(ep)
+            if (lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec, lt.tm_isdst) == (y, mo, d, h, mi, sec, isdst):
+                if ep not in candidates:
+                    candidates.append(ep)
+        except Exception:
+            pass
+    if not candidates:
+        try:
+            ep = time.mktime((y, mo, d, h, mi, sec, 0, 0, -1))
+            lt = time.localtime(ep)
+            if (lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec) == (y, mo, d, h, mi, sec):
+                return ep + us / 1e6
+            return None
+        except Exception:
+            return None
+    if len(candidates) == 1:
+        return candidates[0] + us / 1e6
+
+    # 存在 DST 重复小时歧义
+    if reference_ts is not None and window_cutoff is not None:
+        max_ts = reference_ts + CLOCK_SKEW_TOLERANCE_SECONDS
+        c_in_window = [c for c in candidates if window_cutoff <= (c + us / 1e6) <= max_ts]
+        if len(c_in_window) == 1:
+            return c_in_window[0] + us / 1e6
+        if len(c_in_window) > 1:
+            # 宽窗口覆盖了两个时刻，无法确定真实发生次序，安全降级为 None
+            return None
+
+    ref = (reference_ts + CLOCK_SKEW_TOLERANCE_SECONDS) if reference_ts is not None else time.time()
+    past_candidates = [c for c in candidates if (c + us / 1e6) <= ref]
+    if past_candidates:
+        past_candidates.sort(key=lambda c: ref - (c + us / 1e6))
+        return past_candidates[0] + us / 1e6
+    return candidates[0] + us / 1e6
+
+def parse_log_timestamp(line, reference_ts=None, window_cutoff=None):
     """
     解析日志行首的时间戳，转换为 Unix epoch 秒（float）。
     若无时间戳或格式未知，返回 None。
@@ -2664,7 +2735,12 @@ def parse_log_timestamp(line):
                 if g[7] == "Z":
                     tz = timezone.utc
                 elif g[8] and g[9]:
-                    tz = timezone(timedelta(hours=int(g[8]), minutes=int(g[9])))
+                    raw_h = g[8]
+                    sign = -1 if raw_h.startswith("-") else 1
+                    h_val = abs(int(raw_h))
+                    m_val = int(g[9])
+                    total_offset_minutes = sign * (h_val * 60 + m_val)
+                    tz = timezone(timedelta(minutes=total_offset_minutes))
                 dt = _dt.datetime(y, mo, d, h, mi, sec, us, tzinfo=tz)
                 return dt.timestamp()
             except Exception:
@@ -2678,8 +2754,7 @@ def parse_log_timestamp(line):
             try:
                 y, mo, d, h, mi, sec = int(g[0]), int(g[1]), int(g[2]), int(g[3]), int(g[4]), int(g[5])
                 us = int(g[6][:6].ljust(6, "0")) if g[6] else 0
-                dt = _dt.datetime(y, mo, d, h, mi, sec, us)
-                return dt.timestamp()
+                return resolve_local_timestamp(y, mo, d, h, mi, sec, us=us, reference_ts=reference_ts, window_cutoff=window_cutoff)
             except Exception:
                 pass
 
@@ -2690,17 +2765,18 @@ def parse_log_timestamp(line):
         try:
             y, mo, d, h, mi, sec = int(g[0]), int(g[1]), int(g[2]), int(g[3]), int(g[4]), int(g[5])
             us = int(g[6][:6].ljust(6, "0")) if g[6] else 0
-            dt = _dt.datetime(y, mo, d, h, mi, sec, us)
-            return dt.timestamp()
+            return resolve_local_timestamp(y, mo, d, h, mi, sec, us=us, reference_ts=reference_ts, window_cutoff=window_cutoff)
         except Exception:
             pass
 
     return None
 
-def split_log_into_records(chunk_text):
+def split_log_into_records(chunk_text, reference_ts=None, window_cutoff=None):
     """
     将日志块切分为逻辑记录 (records)。
-    具有显式时间戳的行开启新 record；无时间戳的后续行（换行调用栈/详情）作为 continuation lines 合并入上一条 record。
+    具有显式时间戳的行开启新 record；
+    具有时间戳前缀但解析失败的行（损坏/未知时间戳）开启 timestamp=None 的独立 record；
+    普通换行调用栈/详情作为 continuation lines 合并入上一条 record。
     返回: [ (timestamp_epoch_or_None, record_text), ... ]
     """
     records = []
@@ -2708,11 +2784,17 @@ def split_log_into_records(chunk_text):
     current_lines = []
 
     for line in chunk_text.splitlines():
-        ts = parse_log_timestamp(line)
+        ts = parse_log_timestamp(line, reference_ts=reference_ts, window_cutoff=window_cutoff)
         if ts is not None:
             if current_lines:
                 records.append((current_ts, "\n".join(current_lines)))
             current_ts = ts
+            current_lines = [line]
+        elif looks_like_timestamp_prefix(line):
+            # 时间戳形态但解析失败：关闭前一条 record，开启独立的无时间戳 record
+            if current_lines:
+                records.append((current_ts, "\n".join(current_lines)))
+            current_ts = None
             current_lines = [line]
         else:
             current_lines.append(line)
@@ -2724,13 +2806,26 @@ def split_log_into_records(chunk_text):
 
 def check_oom_event(text):
     """
-    评估日志文本是否包含真实内核 OOM / Jetsam 进程杀伤事件。
-    严格执行 CONTEXT_SIGNAL + TERMINATION_EVENT 组合断言，坚决杜绝仅因出现
-    'memorystatus subsystem initialized' 等信息性日志产生误判。
+    评估日志文本是否包含真实宿主/内核全局 OOM / Jetsam 杀伤事件 (Family C)。
+    严格执行：
+    1. 必须具有全局 OOM/Jetsam 上下文 (jetsam, memorystatus, kernel-oom 等)；
+    2. 严格排除结构化 cgroup / rlimit / quota 配额约束事件（归属于 Family D）；
+    3. 过滤常见否定表达（如 'no process was killed'），只识别确定性肯定杀伤事件。
     """
     if not text:
         return False
     t_lower = text.lower()
+
+    # 结构化 cgroup/rlimit 约束杀伤必须归 Family D，排除在全局 Family C 之外
+    cgroup_structural_contexts = [
+        r"\bmemory\s+cgroup\s+out\s+of\s+memory\b",
+        r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|controller|quota)\b",
+        r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
+        r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
+        r"\brlimit\b"
+    ]
+    if any(bool(re.search(pat, t_lower)) for pat in cgroup_structural_contexts):
+        return False
 
     oom_contexts = [
         "jetsam",
@@ -2744,60 +2839,93 @@ def check_oom_event(text):
     if not any(c in t_lower for c in oom_contexts):
         return False
 
-    oom_events = [
-        "kill",
-        "killed",
-        "killing",
-        "victim",
-        "terminated",
-        "sigkill",
-        "exit_code=137",
-        "exit_code: 137",
-        "exit 137",
-        "per-process-limit",
-        "exceeded physical footprint",
-        "highwater"
+    # 剥离否定表达，避免如 'no process was killed' 误判为 kill event
+    cleaned = t_lower
+    oom_negations = [
+        r"no\s+process(?:es)?(?:\s+was|\s+were)?\s+killed",
+        r"(?:not|was\s+not|were\s+not)\s+killed",
+        r"\bno\s+kill\b",
+        r"\bno\s+oom\b",
+        r"\b0\s+processes?\s+killed\b",
+        r"without\s+killing",
     ]
-    return any(e in t_lower for e in oom_events)
+    for neg in oom_negations:
+        cleaned = re.sub(neg, " ", cleaned)
+
+    oom_events = [
+        r"\bkilled\b",
+        r"\bkilling\b",
+        r"\bkill\b",
+        r"\bvictim\b",
+        r"\bterminated\b",
+        r"\bsigkill\b",
+        r"\bexit_code[:=]\s*137\b",
+        r"\bexit\s+137\b",
+        r"\bper-process-limit\b",
+        r"\bexceeded\s+physical\s+footprint\b",
+        r"\bhighwater\b",
+        r"\boom-killer\b",
+        r"\boom-kill\b"
+    ]
+    return any(bool(re.search(e, cleaned)) for e in oom_events)
 
 def check_resource_limit_event(text):
     """
-    评估日志文本是否包含真实资源超限 (rlimit / cgroup / quota) 终止事件。
-    严格执行 CONTEXT_SIGNAL + TERMINATION_EVENT 组合断言，坚决杜绝仅因出现
-    'detected cgroup v2'、'/proc/self/cgroup' 等信息性探测日志产生误判。
+    评估日志文本是否包含真实资源超限 / cgroup / rlimit 终止事件 (Family D)。
+    严格执行：
+    1. 具有结构化 limit context (cgroup, rlimit, quota, memory.max 等)，排除任意字段中的 cgroup 字符；
+    2. 过滤常见否定表达（如 'limit not exceeded', 'no process killed'）；
+    3. 只识别确定性肯定超限与强杀事件。
     """
     if not text:
         return False
     t_lower = text.lower()
 
     limit_contexts = [
-        "rlimit",
-        "cgroup",
-        "resource limit",
-        "quota",
-        "memory.max",
-        "memory.high"
+        r"\bmemory\s+cgroup\s+out\s+of\s+memory\b",
+        r"\bcgroup\s+(?:[a-z0-9_.-]+\s+)*(?:out\s+of\s+memory|oom|limit|exhausted|kill|controller|quota)\b",
+        r"\bcgroup(?:\.[a-z0-9_-]+|\s+oom|\s+limit|\s+quota|\s+controller|\s+events|\s+v[12])\b",
+        r"\b(?:memory\.max|memory\.high|memory\.oom\.group)\b",
+        r"\brlimit(?:\s+limit|_limit|\s+quota|\s+exceeded|\b)",
+        r"\bresource\s+limit\b",
+        r"\bquota\s+(?:exceeded|exhausted|limit)\b",
     ]
-    has_context = any(c in t_lower for c in limit_contexts)
+    has_context = any(bool(re.search(pat, t_lower)) for pat in limit_contexts)
+
+    # 剥离否定表达
+    cleaned = t_lower
+    limit_negations = [
+        r"no\s+process(?:es)?(?:\s+was|\s+were)?\s+killed",
+        r"(?:not|was\s+not|were\s+not)\s+killed",
+        r"\bno\s+kill\b",
+        r"\bno\s+oom\b",
+        r"(?:not|was\s+not|were\s+not)\s+exceeded",
+        r"limit\s+not\s+exceeded",
+        r"quota\s+not\s+exceeded",
+        r"without\s+exceeding",
+        r"without\s+killing",
+    ]
+    for neg in limit_negations:
+        cleaned = re.sub(neg, " ", cleaned)
+
     if not has_context:
-        return "exceeded memory limit" in t_lower or "resource exhausted" in t_lower
+        return bool(re.search(r"exceeded\s+memory\s+limit", cleaned) or re.search(r"resource\s+exhausted", cleaned))
 
     limit_events = [
-        "exceeded",
-        "exceed",
-        "exhausted",
-        "oom-kill",
-        "oom_kill",
-        "kill",
-        "killed",
-        "killing",
-        "terminated",
-        "exit_code=137",
-        "exit_code: 137",
-        "exit 137",
-        "sigkill"
+        r"\bexceeded\b",
+        r"\bexceed\b",
+        r"\bexhausted\b",
+        r"\boom-kill\b",
+        r"\boom_kill\b",
+        r"\bkilled\b",
+        r"\bkilling\b",
+        r"\bkill\b",
+        r"\bterminated\b",
+        r"\bexit_code[:=]\s*137\b",
+        r"\bexit\s+137\b",
+        r"\bsigkill\b"
     ]
-    return any(e in t_lower for e in limit_events)
+    return any(bool(re.search(e, cleaned)) for e in limit_events)
 
 def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
     """
@@ -2974,19 +3102,19 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
     for mtime, fp, size in log_candidates[:10]:
         try:
             with open(fp, "rb") as f:
-                offset = max(0, size - 500 * 1024)
+                offset = max(0, size - TAIL_LIMIT_BYTES - TAIL_BACKTRACK_BYTES) if size > TAIL_LIMIT_BYTES else 0
                 f.seek(offset)
                 chunk = f.read().decode("utf-8", errors="ignore")
 
-            records = split_log_into_records(chunk)
+            records = split_log_into_records(chunk, reference_ts=now_ts, window_cutoff=cutoff_ts)
             for rec_ts, rec_text in records:
                 if not rec_text.strip():
                     continue
 
                 if cutoff_ts > 0:
-                    is_rec_incident = (rec_ts is not None and rec_ts >= cutoff_ts)
+                    is_rec_incident = (rec_ts is not None and cutoff_ts <= rec_ts <= (now_ts + CLOCK_SKEW_TOLERANCE_SECONDS))
                 else:
-                    is_rec_incident = True
+                    is_rec_incident = (rec_ts is not None and rec_ts <= (now_ts + CLOCK_SKEW_TOLERANCE_SECONDS))
 
                 target_ev = incident_evidence if is_rec_incident else historical_evidence
 
@@ -3003,11 +3131,11 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
                 if "sandbox.rules.fetch_profile 超时" in rec_text:
                     target_ev["profile_timeout_found"] = True
                     rec_matched = True
-                if check_oom_event(rec_text):
-                    target_ev["oom_found"] = True
-                    rec_matched = True
                 if check_resource_limit_event(rec_text):
                     target_ev["resource_limit_found"] = True
+                    rec_matched = True
+                if check_oom_event(rec_text):
+                    target_ev["oom_found"] = True
                     rec_matched = True
 
                 rule_lens = [int(m) for m in re.findall(r"rules_json_len=(\d+)", rec_text)]
@@ -3031,10 +3159,10 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
                         unscoped_evidence["pty_join_timeout_found"] = True
                     if "sandbox.rules.fetch_profile 超时" in rec_text:
                         unscoped_evidence["profile_timeout_found"] = True
-                    if check_oom_event(rec_text):
-                        unscoped_evidence["oom_found"] = True
                     if check_resource_limit_event(rec_text):
                         unscoped_evidence["resource_limit_found"] = True
+                    if check_oom_event(rec_text):
+                        unscoped_evidence["oom_found"] = True
                     if rule_lens and max_len > 1_000_000:
                         unscoped_evidence["rule_explosion_found"] = True
                         unscoped_evidence["max_rules_in_logs"] = max(unscoped_evidence["max_rules_in_logs"], max_len)
@@ -3067,19 +3195,19 @@ def inspect_137_failure(target_log_dir=None, incident_window_minutes=30):
         family = "B"
         reason = "官方二进制 MacPtyProcess::drop/InteractiveProcess::drop 在持有 master_fd 时等待 reader thread join 导致 5002ms 硬卡死"
 
-    # 3. 内核 OOM / Jetsam 杀伤 (Family C)
-    elif mem_pressure == "critical" or incident_evidence["oom_found"]:
-        classification = "OOM_LIKELY"
-        confidence = "MEDIUM"
-        family = "C"
-        reason = "操作系统处于极度内存压力或内核 Jetsam / OOM Killer 杀伤状态"
-
-    # 4. 进程配额超限 (Family D)
+    # 3. 进程配额超限 / cgroup OOM (Family D 优于 Family C 判定，保证容器/配额约束不被全局宿主 OOM 掩盖)
     elif incident_evidence["resource_limit_found"]:
         classification = "RESOURCE_LIMIT_LIKELY"
         confidence = "MEDIUM"
         family = "D"
         reason = "宿主环境或 cgroup / rlimit 配额硬顶超限终止进程"
+
+    # 4. 内核宿主全局 OOM / Jetsam 杀伤 (Family C)
+    elif mem_pressure == "critical" or incident_evidence["oom_found"]:
+        classification = "OOM_LIKELY"
+        confidence = "MEDIUM"
+        family = "C"
+        reason = "操作系统处于极度内存压力或内核 Jetsam / 全局 OOM Killer 杀伤状态"
 
     # 5. Supervisor 120s 超时强杀 (Family E)
     elif incident_evidence["supervisor_kill_found"]:
