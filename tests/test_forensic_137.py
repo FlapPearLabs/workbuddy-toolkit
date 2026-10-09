@@ -1232,6 +1232,20 @@ class TestForensic137(unittest.TestCase):
             "Host OOM record with headroom comparison must trigger Family C (not suppressed by limit context)"
         )
 
+        # Performance control: repeated informational RLIMIT identifiers in huge dump must complete in linear time (< 0.5s)
+        huge_dump = ("RLIMIT_CPU info " * 5000)
+        t_start = time.perf_counter()
+        self.assertFalse(
+            self.cli.check_resource_limit_event(huge_dump),
+            "Repeated informational RLIMIT identifiers without event must NOT trigger Family D"
+        )
+        self.assertFalse(
+            self.cli.check_oom_event(huge_dump),
+            "Repeated informational RLIMIT identifiers without OOM context must NOT trigger Family C"
+        )
+        t_elapsed = time.perf_counter() - t_start
+        self.assertLess(t_elapsed, 0.5, f"RLIMIT scanning must be linear-time; took {t_elapsed:.3f}s")
+
         # End-to-end inspect_137_failure classification test
         now_dt = datetime.datetime.now()
         ts_str = f"[{now_dt.year:04d}-{now_dt.month:02d}-{now_dt.day:02d} {now_dt.hour:02d}:{now_dt.minute:02d}:{now_dt.second:02d}]"
