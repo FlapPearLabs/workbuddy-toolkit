@@ -1132,6 +1132,14 @@ class TestForensic137(unittest.TestCase):
             "Host OOM killing process rlimit_cpu_exporter must trigger Family C (not rejected as Family D)"
         )
         self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123 (rlimit_cpu-exporter) total-vm:100000kB, anon-rss:50000kB"),
+            "Process name rlimit_cpu-exporter must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123 (rlimit_cpu-exporter) total-vm:100000kB, anon-rss:50000kB"),
+            "Host OOM killing process rlimit_cpu-exporter must trigger Family C (not rejected as Family D)"
+        )
+        self.assertFalse(
             self.cli.check_resource_limit_event("RLIMIT_CPU not exceeded; no process killed"),
             "Negated statement 'not exceeded; no process killed' must NOT trigger Family D"
         )
@@ -1173,8 +1181,16 @@ class TestForensic137(unittest.TestCase):
             self.cli.check_resource_limit_event("memory.max exceeding hard limit"),
             "exceeding must match"
         )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("memory.max not only exceeds hard limit; usage is twice the cap"),
+            "Affirmative 'not only exceeds' must match limit event"
+        )
 
         # NEGATIVE CONTROLS
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory.max usage no longer exceeds hard limit"),
+            "'no longer exceeds' must be stripped as negative"
+        )
         self.assertFalse(
             self.cli.check_resource_limit_event("memory.max does not exceed hard limit"),
             "does not exceed must be stripped as negative"
