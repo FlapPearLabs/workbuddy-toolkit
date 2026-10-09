@@ -1143,6 +1143,22 @@ class TestForensic137(unittest.TestCase):
             self.cli.check_resource_limit_event("RLIMIT_CPU not exceeded; no process killed"),
             "Negated statement 'not exceeded; no process killed' must NOT trigger Family D"
         )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123 (python); RLIMIT_CPU is unlimited"),
+            "Informational 'RLIMIT_CPU is unlimited' in Host OOM must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123 (python); RLIMIT_CPU is unlimited"),
+            "Host OOM record with informational RLIMIT mention must trigger Family C (not suppressed by RLIMIT)"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123 (python)\nRLIMIT_CPU is unlimited"),
+            "Multiline Host OOM record with RLIMIT continuation must NOT trigger Family D"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123 (python)\nRLIMIT_CPU is unlimited"),
+            "Multiline Host OOM record must trigger Family C"
+        )
 
         # End-to-end inspect_137_failure classification test
         now_dt = datetime.datetime.now()
@@ -1156,6 +1172,19 @@ class TestForensic137(unittest.TestCase):
         self.assertTrue(fp["incident_evidence"]["resource_limit_found"])
         self.assertEqual(fp["root_cause_family"], "D")
         self.assertEqual(fp["classification"], "RESOURCE_LIMIT_LIKELY")
+
+        # End-to-end classification test: Host OOM with informational RLIMIT must classify as Family C (OOM_LIKELY)
+        os.remove(log_file)
+        oom_log_line = f"{ts_str} Out of memory: Killed process 123 (python); RLIMIT_CPU is unlimited\n"
+        oom_log_file = os.path.join(self.temp_dir, "sandbox_oom.log")
+        with open(oom_log_file, "w", encoding="utf-8") as f:
+            f.write(oom_log_line)
+        fp_oom = self.cli.inspect_137_failure(target_log_dir=self.temp_dir, incident_window_minutes=30)
+        self.assertTrue(fp_oom["incident_evidence"]["oom_found"])
+        self.assertFalse(fp_oom["incident_evidence"]["resource_limit_found"])
+        self.assertEqual(fp_oom["root_cause_family"], "C")
+        self.assertEqual(fp_oom["classification"], "OOM_LIKELY")
+        os.remove(oom_log_file)
 
     def test_t19_exceed_inflections_and_negations(self):
         """
@@ -1238,6 +1267,30 @@ class TestForensic137(unittest.TestCase):
         self.assertFalse(
             self.cli.check_resource_limit_event("without exceeding memory.max"),
             "without exceeding must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("usage cannot exceed memory limit"),
+            "'cannot exceed' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("usage can't exceed memory limit"),
+            "'can\\'t exceed' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("usage can not exceed memory limit"),
+            "'can not exceed' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("usage could not exceed memory limit"),
+            "'could not exceed' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory limit cannot be exceeded"),
+            "'limit cannot be exceeded' modal negation must remain negative"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("memory limit can't be exceeded"),
+            "'limit can\\'t be exceeded' modal negation must remain negative"
         )
 
 
