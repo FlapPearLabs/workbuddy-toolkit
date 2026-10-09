@@ -1113,6 +1113,10 @@ class TestForensic137(unittest.TestCase):
             self.cli.check_resource_limit_event("RLIMIT_NPROC exceeded maximum limit"),
             "RLIMIT_NPROC exceeded must match resource limit event"
         )
+        self.assertTrue(
+            self.cli.check_resource_limit_event("RLIMIT_CPU: hard limit reached; process killed by SIGKILL"),
+            "RLIMIT_CPU with colon field separator must match resource limit event"
+        )
 
         # NEGATIVE CONTROLS
         self.assertFalse(
@@ -1158,6 +1162,14 @@ class TestForensic137(unittest.TestCase):
         self.assertTrue(
             self.cli.check_oom_event("Out of memory: Killed process 123 (python)\nRLIMIT_CPU is unlimited"),
             "Multiline Host OOM record must trigger Family C"
+        )
+        self.assertFalse(
+            self.cli.check_resource_limit_event("Out of memory: Killed process 123; RLIMIT_CPU was not exceeded"),
+            "Negated RLIMIT clause 'RLIMIT_CPU was not exceeded' must NOT establish context for unrelated kill"
+        )
+        self.assertTrue(
+            self.cli.check_oom_event("Out of memory: Killed process 123; RLIMIT_CPU was not exceeded"),
+            "Host OOM record with negated RLIMIT clause must trigger Family C (not suppressed by negated RLIMIT)"
         )
 
         # End-to-end inspect_137_failure classification test
