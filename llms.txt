@@ -1,9 +1,9 @@
 # WorkBuddy Toolkit
 
-> WorkBuddy (Tencent AI Coding Assistant) multi-account manager, automated check-in, Seatbelt sandbox self-healing, and failover routing toolkit.
+> WorkBuddy / CodeBuddy (Tencent AI Coding Assistant) multi-account manager, automated check-in, Seatbelt sandbox self-healing, and failover routing toolkit.
 
 ## Overview
-WorkBuddy Toolkit provides zero-touch local automation for WorkBuddy users across macOS, Linux, and Windows. It resolves sandbox rule explosions (macOS Seatbelt SBPL O(N^2) compilation deadlocks), enables seamless multi-account credential switching, automates daily check-in with keepalive conversations, and transparently routes AI completions via a local failover proxy (:8047).
+WorkBuddy Toolkit provides zero-touch local automation for WorkBuddy & CodeBuddy users across macOS, Linux, and Windows. It resolves sandbox rule explosions (macOS Seatbelt SBPL O(N^2) compilation deadlocks), enables seamless multi-account credential switching, automates daily check-in with keepalive conversations, and transparently routes AI completions via a local failover proxy (:8047).
 
 ## Core Capabilities & CLI Commands
 - `workbuddy login [alias]` (`wb-login`): Terminal 1:1 ANSI QR-code independent login without opening the Electron UI.
