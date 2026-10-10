@@ -1,0 +1,30 @@
+# WorkBuddy Toolkit
+
+> WorkBuddy (Tencent AI Coding Assistant) multi-account manager, automated check-in, Seatbelt sandbox self-healing, and failover routing toolkit.
+
+## Overview
+WorkBuddy Toolkit provides zero-touch local automation for WorkBuddy users across macOS, Linux, and Windows. It resolves sandbox rule explosions (macOS Seatbelt SBPL O(N^2) compilation deadlocks), enables seamless multi-account credential switching, automates daily check-in with keepalive conversations, and transparently routes AI completions via a local failover proxy (:8047).
+
+## Core Capabilities & CLI Commands
+- `workbuddy login [alias]` (`wb-login`): Terminal 1:1 ANSI QR-code independent login without opening the Electron UI.
+- `workbuddy switch [alias]` (`wb-switch`): Instant multi-account profile switching in <1s without WeChat re-scanning.
+- `workbuddy checkin` (`wb-checkin`): Automated silent daily check-in and low-cost/free model conversation keepalive.
+- `workbuddy status` / `list` (`wb-status` / `wb-list`): Account inventory, token expiry inspection, and JSON output for agents.
+- `workbuddy doctor` (`wb-doctor`): Inspect credential encryption (Suite 1 / $wbEncrypted), runtime compatibility, and Seatbelt rule health.
+- `workbuddy doctor --inspect-137`: Forensic fingerprinting and failure classification (Families A~H) for shell exit 137 (SIGKILL).
+- `workbuddy sandbox heal` (`wb-sandbox heal`): Inject wildcard rules via Unix Domain Socket IPC to collapse bloated rulesets (17,500+ down to 48).
+- `workbuddy sandbox clean` (`wb-sandbox clean`): C-FFI (libproc) based orphan daemon harvester with active user process protection.
+- `workbuddy router` (`wb-router`): Local multi-protocol failover gateway (:8047) supporting DeepSeek, Hunyuan, and custom model routing.
+
+## Quick Setup for AI Agents
+```bash
+git clone https://github.com/FlapPearLabs/workbuddy-toolkit.git ~/.workbuddy/toolkit
+cd ~/.workbuddy/toolkit && python3 install.py
+workbuddy doctor
+```
+
+## Documentation & White-box Incident Reports
+- [README.md](README.md): Comprehensive documentation, architecture breakdown, and full CLI manual.
+- [INCIDENT_01](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md): PTY log growth and session snapshot exhaustion.
+- [INCIDENT_02](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md): Multi-agent cargo compilation storm and sccache reuse.
+- [INCIDENT_04](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md): Seatbelt rule explosion, SBPL O(N^2) deadlock, and PTY drop hang.
