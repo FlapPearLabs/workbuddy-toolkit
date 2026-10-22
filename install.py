@@ -165,7 +165,8 @@ def setup_dirs():
 
 
 def _write_cmd(path, content):
-    with open(path, "w", encoding="ascii") as f:
+    # newline="" 阻止 Python 把内容里已有的 \r\n 再翻译成 \r\r\n
+    with open(path, "w", encoding="ascii", newline="") as f:
         f.write(content)
 
 
@@ -196,8 +197,12 @@ def install_cli():
             "@echo off\r\n"
             "setlocal\r\n"
             "set \"WBPY=\"\r\n"
-            "for /f \"delims=\" %%d in ('dir /b /ad /o-n \"%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\" 2^>nul') do (\r\n"
-            "    if not defined WBPY call :wb_try_bundled \"%%d\"\r\n"
+            "set \"WBBEST=000000\"\r\n"
+            "rem HOME first: in Git-Bash/MSYS it matches the WORKBUDDY_DIR derived from HOME\r\n"
+            "set \"WBHOME=%HOME%\"\r\n"
+            "if not defined WBHOME set \"WBHOME=%USERPROFILE%\"\r\n"
+            "for /f \"delims=\" %%d in ('dir /b /ad \"%WBHOME%\\.workbuddy\\binaries\\python\\versions\" 2^>nul') do (\r\n"
+            "    call :wb_probe_bundled \"%%d\"\r\n"
             ")\r\n"
             "if not defined WBPY (\r\n"
             "    for /f \"delims=\" %%i in ('where python 2^>nul ^| findstr /v /i /c:\"\\\\WindowsApps\\\\\"') do (\r\n"
@@ -215,12 +220,15 @@ def install_cli():
             "\"%WBPY%\" \"%~dp0{target}\" %*\r\n"
             "goto :eof\r\n"
             "\r\n"
-            ":wb_try_bundled\r\n"
-            "set \"WBCAND=%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\%~1\\python.exe\"\r\n"
+            ":wb_probe_bundled\r\n"
+            "set \"WBCAND=%WBHOME%\\.workbuddy\\binaries\\python\\versions\\%~1\\python.exe\"\r\n"
             "if not exist \"%WBCAND%\" goto :eof\r\n"
-            "\"%WBCAND%\" -c \"import sys;sys.exit(0 if sys.version_info>=(3,8) else 1)\" >nul 2>nul\r\n"
-            "if errorlevel 1 goto :eof\r\n"
-            "set \"WBPY=%WBCAND%\"\r\n"
+            "for /f \"delims=\" %%v in ('\"%WBCAND%\" -c \"import sys;v=sys.version_info;print('%%06d'%%(v[0]*10000+v[1]*100+v[2]))\" 2^>nul') do (\r\n"
+            "    if %%v GTR %WBBEST% (\r\n"
+            "        set \"WBBEST=%%v\"\r\n"
+            "        set \"WBPY=%WBCAND%\"\r\n"
+            "    )\r\n"
+            ")\r\n"
             "goto :eof\r\n"
         )
         for name in ["workbuddy.cmd", "wb.cmd"]:

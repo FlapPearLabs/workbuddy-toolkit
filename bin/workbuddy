@@ -495,26 +495,29 @@ def _win32_runtime_from_registry():
     """
     import winreg
 
-    roots = (
+    targets = (
         (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
     )
-    for hive, sub_path in roots:
-        try:
-            with winreg.OpenKey(hive, sub_path) as root:
-                index = 0
-                while True:
-                    try:
-                        name = winreg.EnumKey(root, index)
-                        index += 1
-                    except OSError:
-                        break
-                    candidate = _win32_runtime_from_uninstall_entry(root, name)
-                    if candidate:
-                        return candidate
-        except OSError:
-            continue
+    # 32 位解释器下 HKLM\SOFTWARE 会被 WOW64 重定向，这里两个视图都扫一遍，
+    # 而不是硬写 WOW6432Node（那样在 32 位解释器下会变成双层重定向）。
+    views = (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY)
+    for hive, sub_path in targets:
+        for view in views:
+            try:
+                with winreg.OpenKey(hive, sub_path, 0, winreg.KEY_READ | view) as root:
+                    index = 0
+                    while True:
+                        try:
+                            name = winreg.EnumKey(root, index)
+                            index += 1
+                        except OSError:
+                            break
+                        candidate = _win32_runtime_from_uninstall_entry(root, name)
+                        if candidate:
+                            return candidate
+            except OSError:
+                continue
 
     return None
 
