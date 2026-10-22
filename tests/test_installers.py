@@ -324,6 +324,29 @@ class TestInstallersE2E(unittest.TestCase):
         )
         self.assertTrue(res.stderr.strip(), "9009 分支必须输出可读提示")
 
+    def test_launcher_hint_matches_system_codepage(self):
+        """提示按系统代码页落盘：中文 Windows 用 ANSI(GBK)，英文 Windows 回退 ASCII"""
+        if sys.platform != "win32":
+            self.skipTest("launcher 只在 Windows 上生成")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "workbuddy.cmd")
+        with open(launcher, "rb") as f:
+            raw = f.read()
+
+        try:
+            text = raw.decode("ascii")
+            self.assertIn("No usable Python 3 found", text)
+        except UnicodeDecodeError:
+            text = raw.decode("mbcs")
+            self.assertIn("未找到可用的", text)
+
+        self.assertIn("exit /b 9009", text)
+        self.assertNotIn("\r\r\n", text)
+
 
 def _copy_repo(dest):
     shutil.copytree(REPO_DIR, dest, ignore=shutil.ignore_patterns(".git", "__pycache__", ".ruff_cache"))

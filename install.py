@@ -170,6 +170,45 @@ def _write_cmd(path, content):
         f.write(content)
 
 
+# 启动器报错提示：优先中文；英文 Windows 的 ANSI 代码页编码不了中文，回退英文。
+LAUNCHER_HINT_MISSING_ZH = "未找到可用的 Python 3（需要 3.8 及以上）"
+LAUNCHER_HINT_FIX_ZH = "请安装 Python 或将其加入 PATH，然后重试"
+LAUNCHER_HINT_MISSING_EN = "No usable Python 3 found (3.8+ required)."
+LAUNCHER_HINT_FIX_EN = "Install Python or add it to PATH, then re-run the installer."
+LAUNCHER_HINT_STORE_ZH = "不支持 Microsoft Store 版 Python，请改用官方安装包"
+LAUNCHER_HINT_STORE_EN = "Store-installed Python is not supported; use the official installer."
+
+
+def _render_launcher(template, target):
+    """返回 (中文文本, 英文文本)，由 _write_cmd_native 决定实际落盘哪一份。"""
+    zh = template.format(target=target,
+                         hint_missing=LAUNCHER_HINT_MISSING_ZH,
+                         hint_fix=LAUNCHER_HINT_FIX_ZH,
+                         hint_store=LAUNCHER_HINT_STORE_ZH)
+    en = template.format(target=target,
+                         hint_missing=LAUNCHER_HINT_MISSING_EN,
+                         hint_fix=LAUNCHER_HINT_FIX_EN,
+                         hint_store=LAUNCHER_HINT_STORE_EN)
+    return zh, en
+
+
+def _write_cmd_native(path, text_zh, text_en):
+    """按系统 ANSI 代码页写 .cmd，编码不了中文就退回纯 ASCII 版本。
+
+    cmd 按系统代码页解码批处理文件：UTF-8 在中文 Windows 上会乱码，而英文
+    Windows 的代码页又编码不了中文，所以准备两份文本做一次降级。
+    返回实际使用的编码。
+    """
+    for text, encoding in ((text_zh, "mbcs"), (text_en, "ascii")):
+        try:
+            with open(path, "w", encoding=encoding, newline="") as f:
+                f.write(text)
+            return encoding
+        except (LookupError, UnicodeEncodeError):
+            continue
+    raise OSError(f"无法写入启动器: {path}")
+
+
 def install_cli():
     src_bin = os.path.join(SCRIPT_DIR, "bin", "workbuddy")
     if not os.path.exists(src_bin):
@@ -211,9 +250,9 @@ def install_cli():
             "    for /f \"delims=\" %%i in ('where py 2^>nul') do if not defined WBPY set \"WBPY=%%i\"\r\n"
             ")\r\n"
             "if not defined WBPY (\r\n"
-            "    echo [workbuddy] No usable Python 3 found ^(3.8+ required^). 1>&2\r\n"
-            "    echo [workbuddy] Install Python or add it to PATH, then re-run the installer. 1>&2\r\n"
-            "    echo [workbuddy] Store-installed Python is not supported; use the official installer. 1>&2\r\n"
+            "    echo [workbuddy] {hint_missing} 1>&2\r\n"
+            "    echo [workbuddy] {hint_fix} 1>&2\r\n"
+            "    echo [workbuddy] {hint_store} 1>&2\r\n"
             "    exit /b 9009\r\n"
             ")\r\n"
             "\"%WBPY%\" \"%~dp0{target}\" %*\r\n"
@@ -228,8 +267,9 @@ def install_cli():
             "set \"WBPY=%WBCAND%\"\r\n"
             "goto :eof\r\n"
         )
+        launcher_zh, launcher_en = _render_launcher(py_launcher, "workbuddy")
         for name in ["workbuddy.cmd", "wb.cmd"]:
-            _write_cmd(os.path.join(bin_dir, name), py_launcher.format(target="workbuddy"))
+            _write_cmd_native(os.path.join(bin_dir, name), launcher_zh, launcher_en)
         for subcmd, names in WINDOWS_SUBCOMMAND_SHIMS.items():
             shim = f"@echo off\r\ncall \"%~dp0workbuddy.cmd\" {subcmd} %*\r\n"
             for name in names:
@@ -237,7 +277,8 @@ def install_cli():
 
         if os.path.exists(src_log_guard):
             shutil.copy2(src_log_guard, os.path.join(bin_dir, "workbuddy-log-guard"))
-            _write_cmd(os.path.join(bin_dir, "workbuddy-log-guard.cmd"), py_launcher.format(target="workbuddy-log-guard"))
+            guard_zh, guard_en = _render_launcher(py_launcher, "workbuddy-log-guard")
+            _write_cmd_native(os.path.join(bin_dir, "workbuddy-log-guard.cmd"), guard_zh, guard_en)
 
         # 配置 Windows 用户 PATH 环境变量
         try:
