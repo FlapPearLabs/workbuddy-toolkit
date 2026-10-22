@@ -386,7 +386,9 @@ def setup_scheduler(bin_path, bin_dir, opts):
         pythonw_exe = python_exe.replace("python.exe", "pythonw.exe")
         runner = pythonw_exe if os.path.exists(pythonw_exe) else python_exe
         if opts.get("checkin"):
-            cmd = f'"{runner}" "{bin_path}" checkin --no-chat'
+            # 每日任务保持原样（含保活对话，与文档一致）；只有降级路径关掉对话，
+            # 避免登录相关事件多次触发时重复发送
+            cmd = f'"{runner}" "{bin_path}" checkin'
             log_path = os.path.join(LOGS_DIR, "checkin.log")
             # 降级路径与 Linux 的 cron 分支对齐：把输出落到 checkin.log，
             # 否则 pythonw + 隐藏窗口会让失败完全无声。
