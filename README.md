@@ -181,6 +181,9 @@ wb-usage      积分消耗与流速统计
 > 文件夹写入 `WorkBuddyDailyCheckin.vbs` 作为兜底（只在启用了 `--with-checkin`
 > 且任务计划不可用时才会出现）。`uninstall.py` 会删除它，任务计划恢复后重新运行
 > 安装器也会自动清理。
+>
+> 如果 `schtasks` 本身可用、只是 `daily` 触发器被策略限制，也可以手动改用登录
+> 触发器：`schtasks /create /tn WorkBuddyDailyCheckin /tr "<命令>" /sc onlogon /f`。
 
 ### 开发者工具
 
