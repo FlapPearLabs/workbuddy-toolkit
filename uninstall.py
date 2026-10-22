@@ -100,6 +100,14 @@ def unregister_services():
                     print(f"{COLOR_GREEN}✔ 已注销 Windows 任务计划: {task}{COLOR_RESET}")
             except Exception:
                 pass
+        # 任务计划不可用时安装器会退回登录启动项，这里一并清理
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            fallback_vbs = os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
+                                        "Programs", "Startup", "WorkBuddyDailyCheckin.vbs")
+            if os.path.exists(fallback_vbs):
+                _remove(fallback_vbs)
+                print(f"{COLOR_GREEN}✔ 已删除登录启动项兜底: WorkBuddyDailyCheckin.vbs{COLOR_RESET}")
     else:  # Linux
         unit_dir = os.path.join(HOME, ".config", "systemd", "user")
         removed_any = False
