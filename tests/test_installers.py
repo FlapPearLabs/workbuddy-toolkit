@@ -11,6 +11,8 @@ import shutil
 import tempfile
 import unittest
 import subprocess
+import importlib.util
+from unittest import mock
 
 if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
@@ -124,6 +126,43 @@ class TestInstallersE2E(unittest.TestCase):
         # 验证 ~/.workbuddy/toolkit 伴随组件目录已物理 100% 移除
         toolkit_path = os.path.join(self.temp_home, ".workbuddy", "toolkit")
         self.assertFalse(os.path.exists(toolkit_path))
+
+    def _load_installer(self, name):
+        spec = importlib.util.spec_from_file_location(name, os.path.join(REPO_DIR, "install.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_startup_fallback_writes_utf16_with_bom(self):
+        """WSH 只认 ANSI 或 UTF-16+BOM；UTF-8 无 BOM 在中文用户名下会读成乱码"""
+        startup = os.path.join(self.env["APPDATA"], "Microsoft", "Windows",
+                               "Start Menu", "Programs", "Startup")
+        os.makedirs(startup)
+        installer = self._load_installer("install_utf16")
+
+        cmd = 'cmd /c ""C:\\Users\\张三\\pythonw.exe" "C:\\x" checkin >> "C:\\log" 2>&1"'
+        with mock.patch.dict(os.environ, {"APPDATA": self.env["APPDATA"]}):
+            path = installer._install_windows_startup_fallback("T", cmd)
+
+        self.assertTrue(path and os.path.exists(path))
+        with open(path, "rb") as f:
+            raw = f.read()
+        self.assertTrue(raw.startswith(b"\xff\xfe"))       # UTF-16LE BOM，WSH 才认
+        self.assertNotIn(b"\r\r\n", raw)                   # 换行没有被重复翻译
+        self.assertIn("张三", raw.decode("utf-16"))        # 中文路径无损往返
+
+    def test_startup_fallback_can_be_removed(self):
+        """任务计划恢复或卸载时必须能删掉，否则会一天跑两次"""
+        startup = os.path.join(self.env["APPDATA"], "Microsoft", "Windows",
+                               "Start Menu", "Programs", "Startup")
+        os.makedirs(startup)
+        installer = self._load_installer("install_remove")
+
+        with mock.patch.dict(os.environ, {"APPDATA": self.env["APPDATA"]}):
+            path = installer._install_windows_startup_fallback("T", "x")
+            self.assertTrue(path and os.path.exists(path))
+            self.assertTrue(installer._remove_windows_startup_fallback("T"))
+            self.assertFalse(os.path.exists(path))
 
 
 def _copy_repo(dest):

@@ -173,9 +173,14 @@ wb-usage      积分消耗与流速统计
 
 - macOS：`launchd`
 - Linux：`systemd --user`，必要时降级到 `cron`
-- Windows：任务计划程序
+- Windows：任务计划程序；被组策略或安全软件拦截时，自动降级为登录时执行
 
 > 多账号自动签到与保活对话会以客户端身份批量访问 WorkBuddy 服务，可能触发平台风控或违反服务条款，请自行评估。
+
+> **Windows 降级触发器**：如果 `schtasks` 注册失败，安装器会在当前用户的「启动」
+> 文件夹写入 `WorkBuddyDailyCheckin.vbs` 作为兜底（只在启用了 `--with-checkin`
+> 且任务计划不可用时才会出现）。`uninstall.py` 会删除它，任务计划恢复后重新运行
+> 安装器也会自动清理。
 
 ### 开发者工具
 
@@ -333,7 +338,7 @@ Toolkit 增加运行时兼容层，同时坚持一个边界：**需要解密能�
 |---|---|---|
 | macOS | `launchd` | WorkBuddy macOS 应用数据目录 |
 | Linux | `systemd --user` / `cron` 降级方案 | XDG 风格应用数据目录 |
-| Windows 10/11 | 任务计划程序 | `%APPDATA%` 应用数据目录 |
+| Windows 10/11 | 任务计划程序 / 登录启动项降级 | `%APPDATA%` 应用数据目录 |
 
 要求：
 

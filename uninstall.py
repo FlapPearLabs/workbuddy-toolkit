@@ -100,7 +100,8 @@ def unregister_services():
                     print(f"{COLOR_GREEN}✔ 已注销 Windows 任务计划: {task}{COLOR_RESET}")
             except Exception:
                 pass
-        # 任务计划不可用时安装器会退回登录启动项，这里一并清理
+        # 任务计划不可用时安装器会退回登录启动项，这里一并清理。
+        # 路径拼接与 install.py 的 _startup_fallback_path 保持一致，改动时两边同步。
         appdata = os.environ.get("APPDATA")
         if appdata:
             fallback_vbs = os.path.join(appdata, "Microsoft", "Windows", "Start Menu",

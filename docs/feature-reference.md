@@ -66,7 +66,7 @@ Toolkit 初始化本地共享机制，复用 WorkBuddy 已有的共享会话语�
 
 - macOS：`launchd`
 - Linux：`systemd --user`，必要时降级到 `cron`
-- Windows：任务计划程序
+- Windows：任务计划程序（`schtasks` 不可用时降级为登录启动项 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\WorkBuddyDailyCheckin.vbs`）
 
 后台调度不是必需项。你也可以完全手动使用 Toolkit。
 
