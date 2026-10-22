@@ -192,6 +192,34 @@ class TestInstallersE2E(unittest.TestCase):
         # 其它退出码意味着占位符被选中并执行了，正是这条用例要挡的。
         self.assertIn(res.returncode, (0, 9009), res.stdout + res.stderr)
 
+    def test_launcher_falls_back_to_bundled_python(self):
+        """PATH 里没有 python 时，应能选中 WorkBuddy 自带解释器
+
+        早期实现用 `for /f ... in ('"%WBCAND%" -c "..."')` 解析版本号，cmd 会把
+        以引号开头的命令串当成文件名，解析失败且静默落空；这条分支于是永远选不中，
+        最终落到 9009。本用例专门盯这条路径。
+        """
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+
+        bundled_root = os.path.join(os.path.expanduser("~"), ".workbuddy",
+                                    "binaries", "python", "versions")
+        if not os.path.isdir(bundled_root):
+            self.skipTest("本机没有 WorkBuddy 自带解释器，无法覆盖这条分支")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
+        env = dict(self.env)
+        env["USERPROFILE"] = os.path.expanduser("~")   # launcher 运行时按它找内置解释器
+        env["PATH"] = r"C:\Windows\System32"           # 确保 PATH 里既没有 python 也没有 py
+
+        res = subprocess.run(["cmd", "/c", launcher], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
 
 def _copy_repo(dest):
     shutil.copytree(REPO_DIR, dest, ignore=shutil.ignore_patterns(".git", "__pycache__", ".ruff_cache"))
