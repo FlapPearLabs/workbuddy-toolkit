@@ -125,6 +125,45 @@ class TestInstallersE2E(unittest.TestCase):
         toolkit_path = os.path.join(self.temp_home, ".workbuddy", "toolkit")
         self.assertFalse(os.path.exists(toolkit_path))
 
+    def test_launcher_skips_store_stub_and_fails_loudly(self):
+        """启动器必须过滤 WindowsApps 占位符，找不到解释器时以 9009 明确失败"""
+        if sys.platform != "win32":
+            self.skipTest("launcher 只在 Windows 上生成")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "workbuddy.cmd")
+        with open(launcher, "r", encoding="ascii", errors="replace") as f:
+            body = f.read()
+
+        self.assertIn("findstr /v", body)
+        self.assertIn("exit /b 9009", body)
+        self.assertNotIn("echo(%%i|", body)
+
+    def test_launcher_prefers_real_python_over_store_stub(self):
+        """真 Python 在前、商店 0 字节占位符在后时，必须选中真 Python"""
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # 造一个与商店占位符同形态的 0 字节假 python，排在真 python 之后
+        stub_dir = os.path.join(self.temp_home, "WindowsApps")
+        os.makedirs(stub_dir, exist_ok=True)
+        open(os.path.join(stub_dir, "python.exe"), "wb").close()
+
+        env = dict(self.env)
+        env["PATH"] = env.get("PATH", "") + os.pathsep + stub_dir
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
+
+        res = subprocess.run(["cmd", "/c", launcher], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
 
 def _copy_repo(dest):
     shutil.copytree(REPO_DIR, dest, ignore=shutil.ignore_patterns(".git", "__pycache__", ".ruff_cache"))

@@ -184,30 +184,44 @@ def install_cli():
         dest_bin = os.path.join(bin_dir, "workbuddy")
         shutil.copy2(src_bin, dest_bin)
 
-        # 解释器探测顺序：WorkBuddy 自带 Python > PATH 里的 python（跳过 Windows
+        # 解释器探测顺序：WorkBuddy 自带 Python > PATH 里的 python（排除 Windows
         # Store 的 0 字节占位符，它会拉起应用商店）> py launcher。都找不到时明确
-        # 报错退出，而不是把商店窗口弹给用户。
+        # 报错并返回 9009（本脚本登记的「无可用解释器」退出码）。
+        #
+        # 这里只能用 ASCII：_write_cmd() 以 encoding="ascii" 落盘。
+        # WindowsApps 过滤必须放进 for /f 的命令串里做：cmd 中管道两侧各起一个
+        # 子进程，写成 `if ... echo | findstr ... || set` 时 || 只看 findstr 的
+        # 退出码，会覆盖已经选好的解释器。
         py_launcher = (
             "@echo off\r\n"
             "setlocal\r\n"
             "set \"WBPY=\"\r\n"
             "for /f \"delims=\" %%d in ('dir /b /ad /o-n \"%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\" 2^>nul') do (\r\n"
-            "    if not defined WBPY if exist \"%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\%%d\\python.exe\" "
-            "set \"WBPY=%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\%%d\\python.exe\"\r\n"
+            "    if not defined WBPY call :wb_try_bundled \"%%d\"\r\n"
             ")\r\n"
             "if not defined WBPY (\r\n"
-            "    for /f \"delims=\" %%i in ('where python 2^>nul') do (\r\n"
-            "        if not defined WBPY echo(%%i| findstr /i /c:\"WindowsApps\" >nul || set \"WBPY=%%i\"\r\n"
+            "    for /f \"delims=\" %%i in ('where python 2^>nul ^| findstr /v /i /c:\"\\\\WindowsApps\\\\\"') do (\r\n"
+            "        if not defined WBPY set \"WBPY=%%i\"\r\n"
             "    )\r\n"
             ")\r\n"
             "if not defined WBPY (\r\n"
             "    for /f \"delims=\" %%i in ('where py 2^>nul') do if not defined WBPY set \"WBPY=%%i\"\r\n"
             ")\r\n"
             "if not defined WBPY (\r\n"
-            "    echo [workbuddy] Python 3 not found. Install Python or add it to PATH. 1>&2\r\n"
+            "    echo [workbuddy] No usable Python 3 found ^(3.8+ required^). 1>&2\r\n"
+            "    echo [workbuddy] Install Python or add it to PATH, then re-run the installer. 1>&2\r\n"
             "    exit /b 9009\r\n"
             ")\r\n"
             "\"%WBPY%\" \"%~dp0{target}\" %*\r\n"
+            "goto :eof\r\n"
+            "\r\n"
+            ":wb_try_bundled\r\n"
+            "set \"WBCAND=%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\%~1\\python.exe\"\r\n"
+            "if not exist \"%WBCAND%\" goto :eof\r\n"
+            "\"%WBCAND%\" -c \"import sys;sys.exit(0 if sys.version_info>=(3,8) else 1)\" >nul 2>nul\r\n"
+            "if errorlevel 1 goto :eof\r\n"
+            "set \"WBPY=%WBCAND%\"\r\n"
+            "goto :eof\r\n"
         )
         for name in ["workbuddy.cmd", "wb.cmd"]:
             _write_cmd(os.path.join(bin_dir, name), py_launcher.format(target="workbuddy"))

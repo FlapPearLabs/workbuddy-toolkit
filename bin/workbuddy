@@ -428,16 +428,72 @@ def _is_toolkit_cli(path):
 def _is_runnable_file(path):
     return bool(path) and os.path.isfile(path) and (sys.platform == "win32" or os.access(path, os.X_OK))
 
+def _win32_runtime_from_uninstall_entry(root, name):
+    """从一个 Uninstall 子键里解析出 WorkBuddy.exe，解析不出来返回 None。
+
+    只处理字符串值，不碰文件系统以外的状态，方便在测试里直接喂假数据。
+    """
+    import winreg
+
+    try:
+        with winreg.OpenKey(root, name) as key:
+            try:
+                display_name = str(winreg.QueryValueEx(key, "DisplayName")[0])
+            except OSError:
+                return None
+            if "workbuddy" not in display_name.lower():
+                return None
+
+            # 1) InstallLocation 最直接
+            try:
+                location = str(winreg.QueryValueEx(key, "InstallLocation")[0])
+                location = os.path.expandvars(location.strip().strip('"'))
+                if location:
+                    candidate = os.path.join(location, "WorkBuddy.exe")
+                    if os.path.isfile(candidate):
+                        return candidate
+            except OSError:
+                pass
+
+            # 2) DisplayIcon，形如 "D:\...\WorkBuddy.exe,0"
+            try:
+                icon = os.path.expandvars(str(winreg.QueryValueEx(key, "DisplayIcon")[0]))
+                candidate = icon.split(",")[0].strip().strip('"')
+                if candidate.lower().endswith("workbuddy.exe") and os.path.isfile(candidate):
+                    return candidate
+            except OSError:
+                pass
+
+            # 3) UninstallString：可能是带引号的 exe，也可能是不带引号的命令，
+            #    或 MSI 的 MsiExec.exe /X{GUID}
+            try:
+                uninstall = os.path.expandvars(str(winreg.QueryValueEx(key, "UninstallString")[0])).strip()
+                quoted = re.search(r'"([^"]+)"', uninstall)
+                if quoted:
+                    candidate = os.path.join(os.path.dirname(quoted.group(1)), "WorkBuddy.exe")
+                    if os.path.isfile(candidate):
+                        return candidate
+                else:
+                    head = uninstall.split(".exe")[0]
+                    if head:
+                        candidate = os.path.join(os.path.dirname(head + ".exe"), "WorkBuddy.exe")
+                        if os.path.isfile(candidate):
+                            return candidate
+            except OSError:
+                pass
+    except OSError:
+        return None
+
+    return None
+
 def _win32_runtime_from_registry():
     """从卸载注册表项反查 WorkBuddy 安装位置。
 
     WorkBuddy 安装包不限制目标盘符，用户可以把客户端装到任意目录。常见路径
-    全部落空时，卸载项里的 DisplayIcon / UninstallString 是唯一可靠的线索。
+    全部落空时，卸载项里的 InstallLocation / DisplayIcon / UninstallString
+    是仅剩的线索。
     """
-    try:
-        import winreg
-    except ImportError:
-        return None
+    import winreg
 
     roots = (
         (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
@@ -446,50 +502,19 @@ def _win32_runtime_from_registry():
     )
     for hive, sub_path in roots:
         try:
-            root = winreg.OpenKey(hive, sub_path)
+            with winreg.OpenKey(hive, sub_path) as root:
+                index = 0
+                while True:
+                    try:
+                        name = winreg.EnumKey(root, index)
+                        index += 1
+                    except OSError:
+                        break
+                    candidate = _win32_runtime_from_uninstall_entry(root, name)
+                    if candidate:
+                        return candidate
         except OSError:
             continue
-        index = 0
-        while True:
-            try:
-                name = winreg.EnumKey(root, index)
-                index += 1
-            except OSError:
-                break
-            try:
-                key = winreg.OpenKey(root, name)
-            except OSError:
-                continue
-            try:
-                try:
-                    display_name = str(winreg.QueryValueEx(key, "DisplayName")[0])
-                except OSError:
-                    continue
-                if "workbuddy" not in display_name.lower():
-                    continue
-
-                try:
-                    icon = str(winreg.QueryValueEx(key, "DisplayIcon")[0])
-                    candidate = icon.split(",")[0].strip().strip('"')
-                    if candidate.lower().endswith("workbuddy.exe") and os.path.isfile(candidate):
-                        return candidate
-                except OSError:
-                    pass
-
-                try:
-                    uninstall = str(winreg.QueryValueEx(key, "UninstallString")[0])
-                    quoted = re.search(r'"([^"]+)"', uninstall)
-                    if quoted:
-                        candidate = os.path.join(os.path.dirname(quoted.group(1)), "WorkBuddy.exe")
-                        if os.path.isfile(candidate):
-                            return candidate
-                except OSError:
-                    pass
-            finally:
-                try:
-                    winreg.CloseKey(key)
-                except Exception:
-                    pass
 
     return None
 
@@ -524,10 +549,8 @@ def find_workbuddy_runtime():
             candidates.append(os.path.join(app_bundle, "Contents", "MacOS", "Electron"))
     elif sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
-        registry_exe = _win32_runtime_from_registry()
-        if registry_exe:
-            candidates.append(registry_exe)
         candidates.append(os.path.join(local, "Programs", "WorkBuddy", "WorkBuddy.exe"))
+        candidates.append(os.path.join(local, "Programs", "workbuddy", "WorkBuddy.exe"))
         candidates.append(os.path.join(local, "Programs", "workbuddy", "WorkBuddy.exe"))
         for pvar in ("ProgramFiles", "ProgramFiles(x86)"):
             pval = os.environ.get(pvar)
@@ -546,6 +569,13 @@ def find_workbuddy_runtime():
     for p in candidates:
         if _is_runnable_file(p) and not _is_toolkit_cli(p):
             return os.path.abspath(p)
+
+    # 标准位置全部落空，才去注册表翻线索。注册表可能残留换盘重装、Beta 与正式
+    # 版并存留下的旧记录，所以它只能兜底，不能排在 per-user 安装之前。
+    if sys.platform == "win32":
+        registry_exe = _win32_runtime_from_registry()
+        if registry_exe and _is_runnable_file(registry_exe) and not _is_toolkit_cli(registry_exe):
+            return os.path.abspath(registry_exe)
 
     raise CredentialError("RUNTIME_NOT_FOUND")
 
