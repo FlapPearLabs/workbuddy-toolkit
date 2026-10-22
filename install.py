@@ -184,15 +184,30 @@ def install_cli():
         dest_bin = os.path.join(bin_dir, "workbuddy")
         shutil.copy2(src_bin, dest_bin)
 
+        # 解释器探测顺序：WorkBuddy 自带 Python > PATH 里的 python（跳过 Windows
+        # Store 的 0 字节占位符，它会拉起应用商店）> py launcher。都找不到时明确
+        # 报错退出，而不是把商店窗口弹给用户。
         py_launcher = (
             "@echo off\r\n"
             "setlocal\r\n"
-            "where python >nul 2>nul\r\n"
-            "if %ERRORLEVEL% equ 0 (\r\n"
-            "    python \"%~dp0{target}\" %*\r\n"
-            ") else (\r\n"
-            "    py \"%~dp0{target}\" %*\r\n"
+            "set \"WBPY=\"\r\n"
+            "for /f \"delims=\" %%d in ('dir /b /ad /o-n \"%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\" 2^>nul') do (\r\n"
+            "    if not defined WBPY if exist \"%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\%%d\\python.exe\" "
+            "set \"WBPY=%USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\%%d\\python.exe\"\r\n"
             ")\r\n"
+            "if not defined WBPY (\r\n"
+            "    for /f \"delims=\" %%i in ('where python 2^>nul') do (\r\n"
+            "        if not defined WBPY echo(%%i| findstr /i /c:\"WindowsApps\" >nul || set \"WBPY=%%i\"\r\n"
+            "    )\r\n"
+            ")\r\n"
+            "if not defined WBPY (\r\n"
+            "    for /f \"delims=\" %%i in ('where py 2^>nul') do if not defined WBPY set \"WBPY=%%i\"\r\n"
+            ")\r\n"
+            "if not defined WBPY (\r\n"
+            "    echo [workbuddy] Python 3 not found. Install Python or add it to PATH. 1>&2\r\n"
+            "    exit /b 9009\r\n"
+            ")\r\n"
+            "\"%WBPY%\" \"%~dp0{target}\" %*\r\n"
         )
         for name in ["workbuddy.cmd", "wb.cmd"]:
             _write_cmd(os.path.join(bin_dir, name), py_launcher.format(target="workbuddy"))
