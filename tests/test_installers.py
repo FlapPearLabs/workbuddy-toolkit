@@ -164,6 +164,34 @@ class TestInstallersE2E(unittest.TestCase):
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
+    def test_launcher_ignores_store_stub_when_it_comes_first(self):
+        """占位符排在 PATH 第一位时也不能被选中：要么用真 Python，要么明确 9009
+
+        旧写法把过滤放在 `if ... echo | findstr ... || set` 里，第一轮选中占位符
+        后就再也不会被替换；这条用例专门覆盖那个顺序。
+        """
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        stub_dir = os.path.join(self.temp_home, "WindowsApps")
+        os.makedirs(stub_dir, exist_ok=True)
+        open(os.path.join(stub_dir, "python.exe"), "wb").close()
+
+        env = dict(self.env)
+        env["PATH"] = stub_dir + os.pathsep + env.get("PATH", "")   # 占位符在前
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
+
+        res = subprocess.run(["cmd", "/c", launcher], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # 0 = 选中了真 Python；9009 = 过滤后确实没有可用解释器。
+        # 其它退出码意味着占位符被选中并执行了，正是这条用例要挡的。
+        self.assertIn(res.returncode, (0, 9009), res.stdout + res.stderr)
+
 
 def _copy_repo(dest):
     shutil.copytree(REPO_DIR, dest, ignore=shutil.ignore_patterns(".git", "__pycache__", ".ruff_cache"))

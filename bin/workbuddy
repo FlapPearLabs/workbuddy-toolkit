@@ -431,7 +431,8 @@ def _is_runnable_file(path):
 def _win32_runtime_from_uninstall_entry(root, name):
     """从一个 Uninstall 子键里解析出 WorkBuddy.exe，解析不出来返回 None。
 
-    只处理字符串值，不碰文件系统以外的状态，方便在测试里直接喂假数据。
+    依次尝试 InstallLocation、DisplayIcon、UninstallString 三条线索，命中后
+    用 os.path.isfile 确认文件真实存在。
     """
     import winreg
 
@@ -470,15 +471,20 @@ def _win32_runtime_from_uninstall_entry(root, name):
                 uninstall = os.path.expandvars(str(winreg.QueryValueEx(key, "UninstallString")[0])).strip()
                 quoted = re.search(r'"([^"]+)"', uninstall)
                 if quoted:
-                    candidate = os.path.join(os.path.dirname(quoted.group(1)), "WorkBuddy.exe")
-                    if os.path.isfile(candidate):
-                        return candidate
+                    base = os.path.dirname(quoted.group(1))
+                    # 卸载器可能放在 <安装目录>\uninstall\ 下，父目录也试一次
+                    for folder in (base, os.path.dirname(base)):
+                        candidate = os.path.join(folder, "WorkBuddy.exe")
+                        if os.path.isfile(candidate):
+                            return candidate
                 else:
                     head = uninstall.split(".exe")[0]
                     if head:
-                        candidate = os.path.join(os.path.dirname(head + ".exe"), "WorkBuddy.exe")
-                        if os.path.isfile(candidate):
-                            return candidate
+                        base = os.path.dirname(head + ".exe")
+                        for folder in (base, os.path.dirname(base)):
+                            candidate = os.path.join(folder, "WorkBuddy.exe")
+                            if os.path.isfile(candidate):
+                                return candidate
             except OSError:
                 pass
     except OSError:
@@ -553,7 +559,6 @@ def find_workbuddy_runtime():
     elif sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
         candidates.append(os.path.join(local, "Programs", "WorkBuddy", "WorkBuddy.exe"))
-        candidates.append(os.path.join(local, "Programs", "workbuddy", "WorkBuddy.exe"))
         candidates.append(os.path.join(local, "Programs", "workbuddy", "WorkBuddy.exe"))
         for pvar in ("ProgramFiles", "ProgramFiles(x86)"):
             pval = os.environ.get(pvar)
