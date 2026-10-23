@@ -355,11 +355,10 @@ Toolkit 增加运行时兼容层，同时坚持一个边界：**需要解密能�
 > Python → `PATH` 中的 `python`（自动跳过 Microsoft Store 的占位符）
 > → `py` launcher；三者都不可用时以退出码 9009 报错，而不是弹出应用商店。
 >
-> **不支持 Microsoft Store 版 Python**：它的入口同样是
-> `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`，与「0 字节占位符」路径相同、
-> 形态相同，无法区分。如果只装了商店版 Python，启动器会返回 9009 并提示改用官方
-> 安装包；也可以依赖 WorkBuddy 自带解释器。
-
+> 启动器会把 `%LOCALAPPDATA%\Microsoft\WindowsApps\` 整段排除。该目录下既可能是
+> 0 字节占位符（执行会弹出应用商店），也可能是商店版 Python 的可执行别名；
+> 为了避免把占位符当解释器执行，这里选择一律排除，而不是逐个探测。
+> 商店版 Python 用户请改用官方安装包，或依赖 WorkBuddy 自带解释器。
 实际兼容性请运行：
 
 ```bash
