@@ -6,6 +6,7 @@ Runs on macOS, Linux, and Windows to verify that install.py and platform scripts
 """
 
 import os
+import re
 import sys
 import shutil
 import tempfile
@@ -324,6 +325,18 @@ class TestInstallersE2E(unittest.TestCase):
         )
         self.assertTrue(res.stderr.strip(), "9009 分支必须输出可读提示")
 
+    def _load_installer(self, name):
+        spec = importlib.util.spec_from_file_location(name, os.path.join(REPO_DIR, "install.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_batch_text_escaping(self):
+        """echo 参数里的 cmd 控制符必须转义，否则会提前闭合 if 块或截断命令"""
+        installer = self._load_installer("install_escape")
+        self.assertEqual(installer._escape_batch_text("a(1) & b|c"), "a^(1^) ^& b^|c")
+        self.assertEqual(installer._escape_batch_text("^x"), "^^x")
+
     def test_launcher_hint_matches_system_codepage(self):
         """提示按系统代码页落盘：中文 Windows 用 ANSI(GBK)，英文 Windows 回退 ASCII"""
         if sys.platform != "win32":
@@ -346,6 +359,13 @@ class TestInstallersE2E(unittest.TestCase):
 
         self.assertIn("exit /b 9009", text)
         self.assertNotIn("\r\r\n", text)
+
+        # echo 行里的半角括号会提前闭合 if 块（解析期错误，整份脚本失效），必须转义
+        for line in text.splitlines():
+            if line.strip().lower().startswith("echo"):
+                bare = re.sub(r"\^[()]", "", line)
+                self.assertNotIn("(", bare, line)
+                self.assertNotIn(")", bare, line)
 
 
 def _copy_repo(dest):

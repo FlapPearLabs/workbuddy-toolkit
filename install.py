@@ -179,16 +179,27 @@ LAUNCHER_HINT_STORE_ZH = "不支持 Microsoft Store 版 Python，请改用官方
 LAUNCHER_HINT_STORE_EN = "Store-installed Python is not supported; use the official installer."
 
 
+def _escape_batch_text(text):
+    """转义 echo 参数里的 cmd 控制符。
+
+    `^` 必须最先处理，否则会把后面新加进去的 `^` 再转一遍。括号在 goto 结构下
+    已经没有语法意义，仍然一并转义——将来有人往文案里加括号时不会再咬人。
+    """
+    for ch in ("^", "&", "|", "<", ">", "(", ")"):
+        text = text.replace(ch, "^" + ch)
+    return text
+
+
 def _render_launcher(template, target):
     """返回 (中文文本, 英文文本)，由 _write_cmd_native 决定实际落盘哪一份。"""
     zh = template.format(target=target,
-                         hint_missing=LAUNCHER_HINT_MISSING_ZH,
-                         hint_fix=LAUNCHER_HINT_FIX_ZH,
-                         hint_store=LAUNCHER_HINT_STORE_ZH)
+                         hint_missing=_escape_batch_text(LAUNCHER_HINT_MISSING_ZH),
+                         hint_fix=_escape_batch_text(LAUNCHER_HINT_FIX_ZH),
+                         hint_store=_escape_batch_text(LAUNCHER_HINT_STORE_ZH))
     en = template.format(target=target,
-                         hint_missing=LAUNCHER_HINT_MISSING_EN,
-                         hint_fix=LAUNCHER_HINT_FIX_EN,
-                         hint_store=LAUNCHER_HINT_STORE_EN)
+                         hint_missing=_escape_batch_text(LAUNCHER_HINT_MISSING_EN),
+                         hint_fix=_escape_batch_text(LAUNCHER_HINT_FIX_EN),
+                         hint_store=_escape_batch_text(LAUNCHER_HINT_STORE_EN))
     return zh, en
 
 
@@ -249,12 +260,13 @@ def install_cli():
             "if not defined WBPY (\r\n"
             "    for /f \"delims=\" %%i in ('where py 2^>nul') do if not defined WBPY set \"WBPY=%%i\"\r\n"
             ")\r\n"
-            "if not defined WBPY (\r\n"
-            "    echo [workbuddy] {hint_missing} 1>&2\r\n"
-            "    echo [workbuddy] {hint_fix} 1>&2\r\n"
-            "    echo [workbuddy] {hint_store} 1>&2\r\n"
-            "    exit /b 9009\r\n"
-            ")\r\n"
+            "if defined WBPY goto :wb_run\r\n"
+            "echo [workbuddy] {hint_missing} 1>&2\r\n"
+            "echo [workbuddy] {hint_fix} 1>&2\r\n"
+            "echo [workbuddy] {hint_store} 1>&2\r\n"
+            "exit /b 9009\r\n"
+            "\r\n"
+            ":wb_run\r\n"
             "\"%WBPY%\" \"%~dp0{target}\" %*\r\n"
             "goto :eof\r\n"
             "\r\n"
