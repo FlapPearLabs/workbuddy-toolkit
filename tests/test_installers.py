@@ -241,8 +241,11 @@ class TestInstallersE2E(unittest.TestCase):
         env = dict(self.env)
         env["PATH"] = r"C:\Windows\System32"     # 既没有 python 也没有 py
 
+        # 不用 text=True：提示文案的编码跟随系统代码页（中文 Windows 是 GBK），
+        # 而 WorkBuddy 客户端会强制 PYTHONUTF8=1，utf-8 解码 GBK 会直接崩掉读取线程。
+        # bytes 模式对任何编码都安全；内容断言由 hint 那条测试负责。
         res = subprocess.run(["cmd", "/c", launcher], env=env,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(res.returncode, 9009, res.stdout + res.stderr)
         self.assertTrue(res.stderr.strip(), "9009 分支必须输出可读提示")
 
