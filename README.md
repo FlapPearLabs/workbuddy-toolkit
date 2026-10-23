@@ -337,7 +337,7 @@ Toolkit 增加运行时兼容层，同时坚持一个边界：**需要解密能�
 
 要求：
 
-- Python 3.8+
+- Python 3.8+（3.8 校验只针对 WorkBuddy 自带解释器；PATH 里的解释器按原样使用，不做版本检查）
 - WorkBuddy 已安装并至少登录过一次
 - Toolkit 基础安装主要使用 Python 标准库，不要求额外 pip 依赖
 
