@@ -241,12 +241,19 @@ class TestInstallersE2E(unittest.TestCase):
         env = dict(self.env)
         env["PATH"] = r"C:\Windows\System32"     # 既没有 python 也没有 py
 
+        # cmd 自己「命令找不到」的原生退出码也是 9009：启动器若没生成，
+        # 下面的断言会在一片绿意中通过。先确认它真的存在。
+        self.assertTrue(os.path.isfile(launcher), "启动器没生成，这条测试就没有意义")
+
         # 不用 text=True：提示文案的编码跟随系统代码页（中文 Windows 是 GBK），
         # 而 WorkBuddy 客户端会强制 PYTHONUTF8=1，utf-8 解码 GBK 会直接崩掉读取线程。
-        # bytes 模式对任何编码都安全；内容断言由 hint 那条测试负责。
+        # bytes 模式对任何编码都安全；本分支落盘纯 ASCII 文案，同形字节。
         res = subprocess.run(["cmd", "/c", launcher], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(res.returncode, 9009, res.stdout + res.stderr)
+        # 9009 必须是我们主动返回的：stderr 里要有商店版那句可执行的下一步，
+        # 而不是 cmd 的「找不到命令」或任意替换文案。
+        self.assertIn(b"Store-installed", res.stderr)
         self.assertTrue(res.stderr.strip(), "9009 分支必须输出可读提示")
 
 
