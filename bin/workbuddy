@@ -449,7 +449,8 @@ def _win32_runtime_from_uninstall_entry(root, name):
             try:
                 location = str(winreg.QueryValueEx(key, "InstallLocation")[0])
                 location = os.path.expandvars(location.strip().strip('"'))
-                if location:
+                # 相对路径会落到当前工作目录，宁可不用
+                if location and os.path.isabs(location):
                     candidate = os.path.join(location, "WorkBuddy.exe")
                     if os.path.isfile(candidate):
                         return candidate
@@ -460,7 +461,8 @@ def _win32_runtime_from_uninstall_entry(root, name):
             try:
                 icon = os.path.expandvars(str(winreg.QueryValueEx(key, "DisplayIcon")[0]))
                 candidate = icon.split(",")[0].strip().strip('"')
-                if candidate.lower().endswith("workbuddy.exe") and os.path.isfile(candidate):
+                if candidate.lower().endswith("workbuddy.exe") and os.path.isabs(candidate) \
+                        and os.path.isfile(candidate):
                     return candidate
             except OSError:
                 pass
@@ -475,7 +477,7 @@ def _win32_runtime_from_uninstall_entry(root, name):
                     # 卸载器可能放在 <安装目录>\uninstall\ 下，父目录也试一次
                     for folder in (base, os.path.dirname(base)):
                         candidate = os.path.join(folder, "WorkBuddy.exe")
-                        if os.path.isfile(candidate):
+                        if os.path.isabs(candidate) and os.path.isfile(candidate):
                             return candidate
                 else:
                     head = uninstall.split(".exe")[0]
@@ -483,7 +485,7 @@ def _win32_runtime_from_uninstall_entry(root, name):
                         base = os.path.dirname(head + ".exe")
                         for folder in (base, os.path.dirname(base)):
                             candidate = os.path.join(folder, "WorkBuddy.exe")
-                            if os.path.isfile(candidate):
+                            if os.path.isabs(candidate) and os.path.isfile(candidate):
                                 return candidate
             except OSError:
                 pass

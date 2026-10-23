@@ -213,6 +213,7 @@ def install_cli():
             "if not defined WBPY (\r\n"
             "    echo [workbuddy] No usable Python 3 found ^(3.8+ required^). 1>&2\r\n"
             "    echo [workbuddy] Install Python or add it to PATH, then re-run the installer. 1>&2\r\n"
+            "    echo [workbuddy] Store-installed Python is not supported; use the official installer. 1>&2\r\n"
             "    exit /b 9009\r\n"
             ")\r\n"
             "\"%WBPY%\" \"%~dp0{target}\" %*\r\n"

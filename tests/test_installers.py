@@ -198,6 +198,10 @@ class TestInstallersE2E(unittest.TestCase):
         早期实现用 `for /f ... in ('"%WBCAND%" -c "..."')` 解析版本号，cmd 会把
         以引号开头的命令串当成文件名，解析失败且静默落空；这条分支于是永远选不中，
         最终落到 9009。本用例专门盯这条路径。
+
+        注意：需要本机存在 %USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\*，
+        只有装了 WorkBuddy 客户端的机器才会真正执行，CI 上恒 skip——它不构成门禁，
+        门禁是 test_launcher_reports_missing_python 与占位符那两条。
         """
         if sys.platform != "win32":
             self.skipTest("Windows only")
@@ -219,6 +223,28 @@ class TestInstallersE2E(unittest.TestCase):
         res = subprocess.run(["cmd", "/c", launcher], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_launcher_reports_missing_python(self):
+        """PATH 里完全没有解释器时，应以 9009 失败并给出可读提示
+
+        与 `test_launcher_skips_store_stub_and_fails_loudly` 的区别：那条只断言
+        生成文本里有没有某个字符串，这条真的跑一遍启动器。
+        """
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
+        env = dict(self.env)
+        env["PATH"] = r"C:\Windows\System32"     # 既没有 python 也没有 py
+
+        res = subprocess.run(["cmd", "/c", launcher], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 9009, res.stdout + res.stderr)
+        self.assertTrue(res.stderr.strip(), "9009 分支必须输出可读提示")
 
 
 def _copy_repo(dest):
