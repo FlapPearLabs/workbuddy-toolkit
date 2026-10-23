@@ -148,8 +148,10 @@ class TestInstallersE2E(unittest.TestCase):
         with open(path, "rb") as f:
             raw = f.read()
         self.assertTrue(raw.startswith(b"\xff\xfe"))       # UTF-16LE BOM，WSH 才认
-        self.assertNotIn(b"\r\r\n", raw)                   # 换行没有被重复翻译
-        self.assertIn("张三", raw.decode("utf-16"))        # 中文路径无损往返
+        body = raw[2:].decode("utf-16-le")
+        self.assertEqual(body.count("\r\n"), 2)            # 三行、两处换行，不多不少
+        self.assertNotIn("\r\r\n", body)                   # 解码后断言才有意义
+        self.assertIn("张三", body)                        # 中文路径无损往返
 
     def test_startup_fallback_can_be_removed(self):
         """任务计划恢复或卸载时必须能删掉，否则会一天跑两次"""
@@ -163,6 +165,29 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(path and os.path.exists(path))
             self.assertTrue(installer._remove_windows_startup_fallback("T"))
             self.assertFalse(os.path.exists(path))
+
+    def test_scheduler_success_removes_leftover_startup_entry(self):
+        """任务计划恢复后必须删掉旧的 .vbs，否则同一天会触发两次
+
+        把 setup_scheduler 里那句 _remove_windows_startup_fallback() 改成 pass，
+        这条用例就会失败——它是本 PR 互斥承诺的唯一守卫。
+        """
+        installer = self._load_installer("install_mutex")
+        startup = os.path.join(self.env["APPDATA"], "Microsoft", "Windows",
+                               "Start Menu", "Programs", "Startup")
+        os.makedirs(startup)
+
+        with mock.patch.dict(os.environ, {"APPDATA": self.env["APPDATA"]}):
+            installer._install_windows_startup_fallback("WorkBuddyDailyCheckin", "x")
+            vbs = installer._startup_fallback_path()
+            self.assertTrue(os.path.exists(vbs))
+
+            with mock.patch("sys.platform", "win32"), \
+                    mock.patch.object(installer.subprocess, "run") as run:
+                run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+                installer.setup_scheduler("/tmp/bin", "/tmp", {"checkin": True})
+
+            self.assertFalse(os.path.exists(vbs), "任务计划成功后旧启动项必须被删除")
 
 
 def _copy_repo(dest):

@@ -34,7 +34,7 @@ python install.py
 | 参数 | 作用 |
 |---|---|
 | `--init-workspace` | 开启多账号工作区共享（等同 `workbuddy init`，可用 `workbuddy rollback` 恢复） |
-| `--with-checkin` | 注册每日 09:00 自动签到（会给每个已保存账号发送一次保活对话）。Windows 上若任务计划程序不可用，自动降级为登录时执行 |
+| `--with-checkin` | 注册每日 09:00 自动签到（会给每个已保存账号发送一次保活对话）。Windows 上若任务计划程序不可用，自动降级为登录时执行（仅签到，不含保活对话） |
 | `--with-log-guard` | 注册日志 / 沙盒看门狗（每 30 分钟） |
 | `--with-router` | 注册容灾路由常驻服务 127.0.0.1:8047（仅 macOS LaunchAgent） |
 | `--with-services` | 以上三项后台任务全部开启 |

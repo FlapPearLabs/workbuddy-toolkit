@@ -397,12 +397,18 @@ def setup_scheduler(bin_path, bin_dir, opts):
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if res.returncode == 0:
                 # 两个触发器互斥：任务计划恢复后必须删掉旧启动项，否则会一天跑两次
-                _remove_windows_startup_fallback()
+                stale = _startup_fallback_path()
+                if stale and os.path.exists(stale) and not _remove_windows_startup_fallback():
+                    print(f"{COLOR_YELLOW}   [警告] 旧的登录启动项删除失败，请手工删除: {stale}{COLOR_RESET}")
                 print(f"{COLOR_GREEN}   ✔ Windows 任务计划已激活: 每天 09:00 签到 (WorkBuddyDailyCheckin){COLOR_RESET}")
             else:
+                # 上一次可能注册成功过；这次被策略拒绝时那条任务仍然有效，
+                # 不删就会和登录触发并存，同一天签到两次
+                subprocess.run(["schtasks", "/delete", "/tn", "WorkBuddyDailyCheckin", "/f"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 fallback_path = _install_windows_startup_fallback("WorkBuddyDailyCheckin", fallback_cmd)
                 if fallback_path:
-                    print(f"{COLOR_YELLOW}   [降级] 任务计划不可用，已改为登录时签到: {fallback_path}{COLOR_RESET}")
+                    print(f"{COLOR_YELLOW}   [降级] 任务计划不可用，已改为登录时签到（仅签到，不含保活对话）: {fallback_path}{COLOR_RESET}")
                     print(f"{COLOR_YELLOW}          输出日志: {log_path}{COLOR_RESET}")
                 else:
                     detail = res.stderr.strip() or res.stdout.strip() or "unknown"
