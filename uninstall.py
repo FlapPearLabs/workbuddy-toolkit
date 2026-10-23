@@ -60,6 +60,7 @@ TOOLKIT_OWNED_FILES = [
     os.path.join("cache", "heal.lock"),
     os.path.join("logs", "failover_router.log"),
     os.path.join("logs", "checkin.log"),
+    os.path.join("logs", "boot_checkin.log"),
     os.path.join("logs", "log-guard.log"),
     os.path.join("logs", "log-guard.out"),
     os.path.join("logs", "log-guard.err"),
@@ -88,14 +89,15 @@ def _remove(path):
 
 def unregister_services():
     if sys.platform == "darwin":
-        for label in ("com.workbuddy.dailycheckin", "com.workbuddy.failover-router", "com.workbuddy.log-guard"):
+        for label in ("com.workbuddy.dailycheckin", "com.workbuddy.bootcheckin",
+                      "com.workbuddy.failover-router", "com.workbuddy.log-guard"):
             plist = os.path.join(HOME, "Library", "LaunchAgents", f"{label}.plist")
             if os.path.exists(plist):
                 subprocess.run(["launchctl", "unload", plist], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
                 _remove(plist)
                 print(f"{COLOR_GREEN}✔ 已注销并删除 LaunchAgent: {label}{COLOR_RESET}")
     elif sys.platform == "win32":
-        for task in ("WorkBuddyDailyCheckin", "WorkBuddyLogGuard"):
+        for task in ("WorkBuddyDailyCheckin", "WorkBuddyBootCheckin", "WorkBuddyLogGuard"):
             try:
                 res = subprocess.run(["schtasks", "/delete", "/tn", task, "/f"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
                 if res.returncode == 0:
@@ -106,11 +108,13 @@ def unregister_services():
         # 路径拼接与 install.py 的 _startup_fallback_path 保持一致，改动时两边同步。
         appdata = os.environ.get("APPDATA")
         if appdata:
-            fallback_vbs = os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
-                                        "Programs", "Startup", "WorkBuddyDailyCheckin.vbs")
-            if os.path.exists(fallback_vbs):
-                _remove(fallback_vbs)
-                print(f"{COLOR_GREEN}✔ 已删除登录启动项兜底: WorkBuddyDailyCheckin.vbs{COLOR_RESET}")
+            startup_dir = os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
+                                       "Programs", "Startup")
+            for task in ("WorkBuddyDailyCheckin", "WorkBuddyBootCheckin"):
+                fallback_vbs = os.path.join(startup_dir, f"{task}.vbs")
+                if os.path.exists(fallback_vbs):
+                    _remove(fallback_vbs)
+                    print(f"{COLOR_GREEN}✔ 已删除登录启动项兜底: {task}.vbs{COLOR_RESET}")
     else:  # Linux
         unit_dir = os.path.join(HOME, ".config", "systemd", "user")
         removed_any = False
@@ -132,7 +136,10 @@ def unregister_services():
                 proc = subprocess.run(["crontab", "-l"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
                 if proc.returncode == 0:
                     lines = proc.stdout.splitlines()
-                    kept = [l for l in lines if "workbuddy checkin" not in l and "workbuddy-log-guard" not in l]
+                    kept = [l for l in lines
+                            if "workbuddy checkin" not in l
+                            and "workbuddy-log-guard" not in l
+                            and "boot-checkin.sh" not in l]
                     if len(kept) != len(lines):
                         set_proc = subprocess.Popen(["crontab", "-"], stdin=subprocess.PIPE, text=True)
                         set_proc.communicate("\n".join(kept) + "\n")
@@ -143,6 +150,23 @@ def unregister_services():
     # 手动启动的 router（非 launchd）也一并停止
     if sys.platform != "win32" and shutil.which("pkill"):
         subprocess.run(["pkill", "-f", "toolkit/sidecar/router_engine.py"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+
+
+def remove_boot_checkin_artifacts():
+    """清理开机打卡辅助脚本与单日幂等标记（calendar 轨也会部署它们）。"""
+    scripts_dir = os.path.join(WORKBUDDY_DIR, "scripts")
+    removed = []
+    for name in ("boot-checkin.sh", "boot-checkin.cmd"):
+        if _remove(os.path.join(scripts_dir, name)):
+            removed.append(name)
+    if _remove(os.path.join(WORKBUDDY_DIR, ".last_boot_checkin")):
+        removed.append(".last_boot_checkin")
+    if removed:
+        print(f"{COLOR_GREEN}✔ 已清理开机打卡脚本与标记: {', '.join(removed)}{COLOR_RESET}")
+    try:
+        os.rmdir(scripts_dir)   # 只在目录已空时成功，不碰用户自己放进去的东西
+    except OSError:
+        pass
 
 
 def restore_models_json():
@@ -254,6 +278,7 @@ def uninstall(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     print(f"\n{COLOR_YELLOW}正在卸载 WorkBuddy Toolkit ({sys.platform})...{COLOR_RESET}")
     unregister_services()
+    remove_boot_checkin_artifacts()
     restore_models_json()
     rollback_database(argv)
     remove_cli()

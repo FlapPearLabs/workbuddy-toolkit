@@ -70,7 +70,7 @@ macOS / Linux   ./install.sh
 Windows         .\install.ps1
 ```
 
-默认只安装命令行工具，**不改数据库、不注册后台任务**。交互式终端中会逐项询问可选能力；也可用 `--init-workspace`、`--with-checkin`、`--with-log-guard`、`--with-router`、`--with-services`、`--no-input` 显式指定，详见 [入门指南](docs/getting-started.md#2-推荐安装方式)。
+默认只安装命令行工具，**不改数据库、不注册后台任务**。交互式终端中会逐项询问可选能力；也可用 `--init-workspace`、`--with-checkin`、`--with-boot-checkin`、`--checkin-mode=calendar|boot|none`、`--with-log-guard`、`--with-router`、`--with-services`、`--no-input` 显式指定，详见 [入门指南](docs/getting-started.md#2-推荐安装方式)。
 
 ### 2. 初始化并检查环境
 
@@ -112,7 +112,10 @@ wb-audit
 3. 依次运行 workbuddy init、workbuddy doctor、workbuddy status。
 4. 不要修改 WorkBuddy 应用包本体。
 5. 如果 doctor 报告不兼容，停止后续写操作并告诉我具体诊断结果。
-6. 如果环境支持任务调度，再询问我是否启用每日 wb-checkin；我确认后再运行 `install.py --with-checkin`，不要擅自创建我没有确认的后台任务。
+6. 如果环境支持任务调度，请先询问我的使用习惯再推进调度配置（不要擅自创建未经我确认的后台任务）：
+   - 习惯 A：电脑常开机（台式机/服务器）-> 配置每天 09:00 定时打卡（install.py --checkin-mode=calendar）
+   - 习惯 B：经常合盖休眠或关机（笔记本）-> 配置开机且连上网后 5 秒内自动打卡（install.py --checkin-mode=boot）
+   - 习惯 C：不需要后台任务 -> 仅保留手动命令（install.py --checkin-mode=none）
 7. 最后汇报安装位置、doctor 结果、当前账号状态和后台调度状态。
 ```
 
@@ -166,25 +169,26 @@ wb-audit      检查账号健康度
 
 核心目标不是“能切号”，而是**切号时尽量不破坏 WorkBuddy 已经刷新的最新状态**。
 
-### 自动化
+### 自动化调度
 
 ```text
 wb-checkin    每日签到与连续任务
 wb-usage      积分消耗与流速统计
 ```
 
-后台任务默认不开启。需要时用 `install.py --with-checkin` 接入系统原生调度：
+Toolkit 提供**双轨自动化打卡体系**，后台任务默认不开启，需要时按使用习惯选择：
 
-- macOS：`launchd`
-- Linux：`systemd --user`，必要时降级到 `cron`
-- Windows：任务计划程序；被组策略或安全软件拦截时，自动降级为登录时执行
+- **轨 A（定时巡检）**：适用于台式机 / 长期开机的设备，每天 09:00 通过系统原生服务（macOS `launchd` / Linux `systemd --user`，必要时降级 `cron` / Windows 任务计划）静默执行 `wb-checkin`；
+- **轨 B（开机即签）**：适用于经常关机或合盖休眠的笔记本。由零额外开销的原生脚本（macOS/Linux: `boot-checkin.sh`，Windows: `boot-checkin.cmd`）接管，开机登录且网络就绪后 5 秒内自动打卡（内置单日防重幂等锁，当天已签立即静默退出；装配 HTTP/DNS 双重网络探针与 90 秒熔断防耗电）。
+
+安装时可按需交互选择，也可显式指定 `--checkin-mode=calendar|boot|none`（`--with-checkin` 等价于 calendar，`--with-boot-checkin` 等价于 boot）。两轨互斥：切换时会自动注销另一轨，避免同一天重复打卡。如果不需要后台任务，可以完全跳过，仅保留手动命令。
 
 > 多账号自动签到与保活对话会以客户端身份批量访问 WorkBuddy 服务，可能触发平台风控或违反服务条款，请自行评估。
 
 > **Windows 降级触发器**：如果 `schtasks` 注册失败，安装器会在当前用户的「启动」
-> 文件夹写入 `WorkBuddyDailyCheckin.vbs` 作为兜底（只在启用了 `--with-checkin`
-> 且任务计划不可用时才会出现）。`uninstall.py` 会删除它，任务计划恢复后重新运行
-> 安装器也会自动清理。
+> 文件夹写入 `WorkBuddyDailyCheckin.vbs`（轨 A）或 `WorkBuddyBootCheckin.vbs`（轨 B）
+> 作为兜底，只在启用对应打卡轨且任务计划不可用时才会出现。`uninstall.py` 会删除它们，
+> 任务计划恢复后重新运行安装器也会自动清理。
 >
 > 如果 `schtasks` 本身可用、只是 `daily` 触发器被策略限制，也可以手动改用登录
 > 触发器：`schtasks /create /tn WorkBuddyDailyCheckin /tr "<命令>" /sc onlogon /f`。

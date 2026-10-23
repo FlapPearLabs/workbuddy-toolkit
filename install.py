@@ -8,13 +8,20 @@ https://github.com/FlapPearLabs/workbuddy-toolkit
 默认只安装命令行工具与 sidecar 模块，不会修改 WorkBuddy 数据库，也不会注册任何后台任务。
 需要的能力请显式开启（交互式终端中会逐项询问，默认为否）:
 
-    python3 install.py                     # 仅安装 CLI
-    python3 install.py --init-workspace    # 同时开启多账号工作区共享 (等同 workbuddy init)
-    python3 install.py --with-checkin      # 注册每日签到 (09:00；任务计划不可用时降级为登录时)
-    python3 install.py --with-log-guard    # 注册日志/沙盒看门狗 (每 30 分钟)
-    python3 install.py --with-router       # 注册容灾路由常驻服务 (macOS LaunchAgent)
-    python3 install.py --with-services     # 以上三项后台任务全部开启
-    python3 install.py --no-input          # 不询问，未显式开启的一律跳过
+    python3 install.py                          # 仅安装 CLI
+    python3 install.py --init-workspace         # 同时开启多账号工作区共享 (等同 workbuddy init)
+    python3 install.py --with-checkin           # 注册每日 09:00 签到 (轨 A: calendar)
+    python3 install.py --with-boot-checkin      # 注册开机联网后自动签到 (轨 B: boot)
+    python3 install.py --checkin-mode=boot      # 显式指定打卡模式: calendar|boot|none
+    python3 install.py --with-log-guard         # 注册日志/沙盒看门狗 (每 30 分钟)
+    python3 install.py --with-router            # 注册容灾路由常驻服务 (macOS LaunchAgent)
+    python3 install.py --with-services          # 以上三项后台任务全部开启
+    python3 install.py --no-input               # 不询问，未显式开启的一律跳过
+
+打卡双轨:
+    轨 A calendar  台式机/常开设备，每天 09:00 由系统原生调度执行 wb-checkin
+    轨 B boot      笔记本/经常关机，开机登录且网络就绪后由 boot-checkin 脚本执行
+    两轨互斥：安装器会先注销另一轨，避免同一天重复打卡。
 """
 
 import os
@@ -70,10 +77,14 @@ CLI_ALIASES = sorted({n for names in WINDOWS_SUBCOMMAND_SHIMS.values() for n in 
 
 OPTIONAL_FEATURES = [
     ("init_workspace", "--init-workspace", "开启多账号工作区/历史会话共享 (修改 WorkBuddy 数据库，可用 workbuddy rollback 恢复)"),
-    ("checkin", "--with-checkin", "注册每日 09:00 自动签到 (会为每个已保存账号发送一次保活对话)"),
+    ("checkin", "--with-checkin", "注册自动签到 (默认轨 A: 每天 09:00；可用 --checkin-mode=boot 改为开机即签)"),
     ("log_guard", "--with-log-guard", "注册日志/沙盒看门狗 (每 30 分钟清理 WorkBuddy 日志与快照)"),
     ("router", "--with-router", "注册容灾路由常驻服务 127.0.0.1:8047 (仅 macOS LaunchAgent)"),
 ]
+
+# 双轨打卡模式：calendar=每天 09:00 定时；boot=开机联网后自动；none=不注册后台打卡
+CHECKIN_MODES = ("calendar", "boot", "none")
+DEFAULT_CHECKIN_MODE = "calendar"
 
 
 def print_banner():
@@ -82,17 +93,61 @@ def print_banner():
     print(f"{COLOR_BOLD}{COLOR_CYAN}========================================================{COLOR_RESET}")
 
 
+def _parse_checkin_mode(argv):
+    """提取 --checkin-mode=... 等打卡模式参数；未指定返回 None。
+
+    同一命令行里重复指定时后者覆盖前者，便于脚本追加参数覆盖默认值。
+    """
+    mode = None
+    for arg in argv:
+        if arg.startswith("--checkin-mode="):
+            value = arg.split("=", 1)[1].strip().lower()
+            if value not in CHECKIN_MODES:
+                print(f"{COLOR_RED}错误: --checkin-mode 只接受 {'|'.join(CHECKIN_MODES)}，收到: {value}{COLOR_RESET}")
+                sys.exit(2)
+            mode = value
+        elif arg in ("--boot", "--boot-checkin"):
+            mode = "boot"
+        elif arg in ("--calendar", "--daily"):
+            mode = "calendar"
+        elif arg in ("--no-checkin", "--without-checkin"):
+            mode = "none"
+    return mode
+
+
+def _ask_checkin_mode():
+    """交互式选择打卡轨道。直接回车沿用 calendar，保持向后兼容。"""
+    print(f"\n{COLOR_BOLD}请选择自动签到的执行方式:{COLOR_RESET}")
+    print("  [1] 每天 09:00 定时打卡 (适合台式机/常开服务器)")
+    print("  [2] 开机且连上网后自动打卡 (适合经常关机或合盖休眠的笔记本)")
+    print("  [3] 不配置后台打卡 (仅手动执行 wb-checkin)")
+    try:
+        choice = input("    请选择 [1/2/3, 默认 1]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return DEFAULT_CHECKIN_MODE
+    return {"2": "boot", "3": "none"}.get(choice, DEFAULT_CHECKIN_MODE)
+
+
 def parse_options(argv):
-    """解析可选能力开关。返回 {feature_key: bool}。"""
+    """解析可选能力开关。返回 {feature_key: bool, "checkin_mode": str}。"""
     if any(a in ("-h", "--help") for a in argv):
         print(__doc__)
         sys.exit(0)
     opts = {key: False for key, _, _ in OPTIONAL_FEATURES}
     explicit = set()
+    checkin_mode = _parse_checkin_mode(argv)
+    mode_explicit = checkin_mode is not None or "--with-boot-checkin" in argv
+    if "--with-boot-checkin" in argv:
+        checkin_mode = "boot"
     for key, flag, _ in OPTIONAL_FEATURES:
         if flag in argv:
             opts[key] = True
             explicit.add(key)
+    if checkin_mode is not None:
+        # --checkin-mode=calendar|boot 本身即表示开启签到；none 表示关闭
+        opts["checkin"] = checkin_mode != "none"
+        explicit.add("checkin")
     if "--with-services" in argv:
         for key in ("checkin", "log_guard", "router"):
             opts[key] = True
@@ -114,6 +169,20 @@ def parse_options(argv):
                 print()
                 ans = ""
             opts[key] = ans in ("y", "yes")
+
+    # 打卡轨道与「是否开启签到」分开：只有真正要开签到、且没有显式指定轨道时才追问
+    if not mode_explicit and opts.get("checkin") and interactive:
+        checkin_mode = _ask_checkin_mode()
+        mode_explicit = True
+    if opts.get("checkin"):
+        if checkin_mode is None:
+            checkin_mode = DEFAULT_CHECKIN_MODE
+    elif not (mode_explicit and checkin_mode == "none"):
+        # 未提到签到（如只加 --with-log-guard）时不要把它当成显式 none，
+        # 否则增量安装会误删已有的打卡配置
+        checkin_mode = None
+    opts["checkin_mode"] = checkin_mode
+    opts["checkin_mode_set"] = mode_explicit
     return opts
 
 
@@ -213,6 +282,25 @@ def _write_cmd_native(path, text_zh, text_en):
     raise OSError(f"无法写入启动器: {path}")
 
 
+def install_boot_scripts():
+    """部署开机打卡辅助脚本到 ~/.workbuddy/scripts。
+
+    两个平台都安装：Windows 的任务计划调用 .cmd，macOS/Linux 调用 .sh；
+    体积可忽略，且允许用户之后仅切换调度而不必重跑安装器。
+    """
+    scripts_dir = os.path.join(WORKBUDDY_DIR, "scripts")
+    os.makedirs(scripts_dir, exist_ok=True)
+    sh_src = os.path.join(SCRIPT_DIR, "scripts", "boot-checkin.sh")
+    if os.path.exists(sh_src):
+        sh_dest = os.path.join(scripts_dir, "boot-checkin.sh")
+        shutil.copy2(sh_src, sh_dest)
+        os.chmod(sh_dest, 0o755)
+    cmd_src = os.path.join(SCRIPT_DIR, "scripts", "boot-checkin.cmd")
+    if os.path.exists(cmd_src):
+        shutil.copy2(cmd_src, os.path.join(scripts_dir, "boot-checkin.cmd"))
+    return scripts_dir
+
+
 def install_cli():
     src_bin = os.path.join(SCRIPT_DIR, "bin", "workbuddy")
     if not os.path.exists(src_bin):
@@ -221,6 +309,7 @@ def install_cli():
     src_log_guard = os.path.join(SCRIPT_DIR, "bin", "workbuddy-log-guard")
 
     deploy_sidecar()
+    install_boot_scripts()
 
     if sys.platform == "win32":
         bin_dir = os.path.join(WORKBUDDY_DIR, "bin")
@@ -431,10 +520,14 @@ def _install_windows_startup_fallback(task_name, cmd):
     return path
 
 
-def _add_cron_lines(new_lines):
+def _add_cron_lines(new_lines, remove_markers=None):
+    """重写 crontab：先删掉匹配标记的旧行，再追加本次任务。
+
+    remove_markers 用于「只清理、不新增」的场景（例如 --checkin-mode=none）。
+    """
     proc = subprocess.run(["crontab", "-l"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     existing = proc.stdout if proc.returncode == 0 else ""
-    markers = [m for m, _ in new_lines]
+    markers = list(remove_markers or []) + [m for m, _ in new_lines]
     lines = [l for l in existing.splitlines() if not any(m in l for m in markers)]
     lines.extend(line for _, line in new_lines)
     set_proc = subprocess.Popen(["crontab", "-"], stdin=subprocess.PIPE, text=True)
@@ -442,16 +535,166 @@ def _add_cron_lines(new_lines):
     return set_proc.returncode == 0
 
 
-def setup_scheduler(bin_path, bin_dir, opts):
-    wanted = [k for k in ("checkin", "log_guard", "router") if opts.get(k)]
-    if not wanted:
-        print("3. [跳过] 未注册任何后台任务。需要时重新运行: python3 install.py --with-checkin / --with-log-guard / --with-router")
+def _remove_launch_agent(name):
+    """unload 并删除本工具注册的 LaunchAgent；不存在时静默跳过。"""
+    plist = os.path.join(HOME, "Library", "LaunchAgents", f"{name}.plist")
+    if not os.path.exists(plist):
+        return False
+    subprocess.run(["launchctl", "unload", plist], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    try:
+        os.remove(plist)
+    except OSError:
+        return False
+    return True
+
+
+def _remove_systemd_unit(base):
+    """停用并删除 systemd user timer/service，返回是否真的清理过。"""
+    unit_dir = os.path.join(HOME, ".config", "systemd", "user")
+    tmr = os.path.join(unit_dir, f"{base}.timer")
+    svc = os.path.join(unit_dir, f"{base}.service")
+    if not (os.path.exists(tmr) or os.path.exists(svc)):
+        return False
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "disable", "--now", f"{base}.timer"],
+                       stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    for path in (tmr, svc):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "daemon-reload"], stderr=subprocess.DEVNULL)
+    return True
+
+
+def _configure_macos_checkin(mode):
+    """按轨道装载 LaunchAgent，并注销另一轨，保证一天只打一次卡。"""
+    agents = {
+        "calendar": "com.workbuddy.dailycheckin",
+        "boot": "com.workbuddy.bootcheckin",
+    }
+    if mode == "none":
+        removed = [_remove_launch_agent(label) for label in agents.values()]
+        if any(removed):
+            print(f"{COLOR_YELLOW}   ✔ 已移除自动打卡 LaunchAgent (您可随时运行 wb-checkin 手动打卡){COLOR_RESET}")
         return
-    print("3. 正在注册已开启的后台任务...")
+    for track, label in agents.items():
+        if track != mode:
+            _remove_launch_agent(label)
+    if not _load_launch_agent(agents[mode]):
+        return
+    if mode == "calendar":
+        print(f"{COLOR_GREEN}   ✔ LaunchAgent 已激活: 轨 A - 每天 09:00 定时打卡{COLOR_RESET}")
+    else:
+        print(f"{COLOR_GREEN}   ✔ LaunchAgent 已激活: 轨 B - 开机连上网后 5 秒内自动打卡{COLOR_RESET}")
+
+
+def _delete_windows_task(name):
+    try:
+        subprocess.run(["schtasks", "/delete", "/tn", name, "/f"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def _configure_windows_checkin(mode, bin_path, runner):
+    """按轨道注册 Windows 任务计划，并在任务计划不可用时降级到登录启动项。"""
+    calendar_task = "WorkBuddyDailyCheckin"
+    boot_task = "WorkBuddyBootCheckin"
+
+    if mode == "none":
+        for task in (calendar_task, boot_task):
+            _delete_windows_task(task)
+            _remove_windows_startup_fallback(task)
+        print(f"{COLOR_YELLOW}   ✔ 已跳过自动打卡任务计划 (您可随时运行 wb-checkin 手动打卡){COLOR_RESET}")
+        return
+
+    if mode == "calendar":
+        _delete_windows_task(boot_task)
+        _remove_windows_startup_fallback(boot_task)
+        # 每日任务保持原样（含保活对话，与文档一致）；只有降级路径关掉对话，
+        # 避免登录相关事件多次触发时重复发送
+        cmd = f'"{runner}" "{bin_path}" checkin'
+        log_path = os.path.join(LOGS_DIR, "checkin.log")
+        # 降级路径与 Linux 的 cron 分支对齐：把输出落到 checkin.log，
+        # 否则 pythonw + 隐藏窗口会让失败完全无声。
+        fallback_cmd = f'cmd /c ""{runner}" "{bin_path}" checkin --no-chat >> "{log_path}" 2>&1"'
+        res = subprocess.run(["schtasks", "/create", "/tn", calendar_task, "/tr", cmd,
+                              "/sc", "daily", "/st", "09:00", "/f"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0:
+            # 两个触发器互斥：任务计划恢复后必须删掉旧启动项，否则会一天跑两次
+            stale = _startup_fallback_path(calendar_task)
+            if stale and os.path.exists(stale) and not _remove_windows_startup_fallback(calendar_task):
+                print(f"{COLOR_YELLOW}   [警告] 旧的登录启动项删除失败，请手工删除: {stale}{COLOR_RESET}")
+            print(f"{COLOR_GREEN}   ✔ Windows 任务计划已激活: 轨 A - 每天 09:00 签到 ({calendar_task}){COLOR_RESET}")
+            return
+        # 上一次可能注册成功过；这次被策略拒绝时那条任务仍然有效，
+        # 不删就会和登录触发并存，同一天签到两次
+        _delete_windows_task(calendar_task)
+        fallback_path = _install_windows_startup_fallback(calendar_task, fallback_cmd)
+        if fallback_path:
+            print(f"{COLOR_YELLOW}   [降级] 任务计划不可用，已改为登录时签到（仅签到，不含保活对话）: {fallback_path}{COLOR_RESET}")
+            print(f"{COLOR_YELLOW}          输出日志: {log_path}{COLOR_RESET}")
+        else:
+            detail = res.stderr.strip() or res.stdout.strip() or "unknown"
+            print(f"{COLOR_YELLOW}   [提示] 任务计划注册失败，且无法写入启动项: {detail}{COLOR_RESET}")
+        return
+
+    # mode == "boot"
+    _delete_windows_task(calendar_task)
+    _remove_windows_startup_fallback(calendar_task)
+    boot_cmd = os.path.join(WORKBUDDY_DIR, "scripts", "boot-checkin.cmd")
+    log_path = os.path.join(LOGS_DIR, "boot_checkin.log")
+    cmd = f'cmd /c "{boot_cmd}"'
+    res = subprocess.run(["schtasks", "/create", "/tn", boot_task, "/tr", cmd,
+                          "/sc", "onlogon", "/f"],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode == 0:
+        stale = _startup_fallback_path(boot_task)
+        if stale and os.path.exists(stale) and not _remove_windows_startup_fallback(boot_task):
+            print(f"{COLOR_YELLOW}   [警告] 旧的登录启动项删除失败，请手工删除: {stale}{COLOR_RESET}")
+        print(f"{COLOR_GREEN}   ✔ Windows 任务计划已激活: 轨 B - 开机登录联网后自动打卡 ({boot_task}){COLOR_RESET}")
+        return
+    # onlogon 同样被策略拒绝时退回启动文件夹，语义一致，都是登录后执行一次
+    _delete_windows_task(boot_task)
+    fallback_cmd = f'cmd /c ""{boot_cmd}" >> "{log_path}" 2>&1"'
+    fallback_path = _install_windows_startup_fallback(boot_task, fallback_cmd)
+    if fallback_path:
+        print(f"{COLOR_YELLOW}   [降级] 任务计划不可用，已改为登录时执行开机打卡: {fallback_path}{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}          输出日志: {log_path}{COLOR_RESET}")
+    else:
+        detail = res.stderr.strip() or res.stdout.strip() or "unknown"
+        print(f"{COLOR_YELLOW}   [提示] 任务计划注册失败，且无法写入启动项: {detail}{COLOR_RESET}")
+
+
+def setup_scheduler(bin_path, bin_dir, opts, mode=None):
+    """注册后台任务；打卡轨道由 mode / opts["checkin_mode"] 决定。
+
+    mode 取值 calendar|boot|none。显式 none 会清理双轨残留；未提到签到
+    （如只用 --with-log-guard）时不碰已有的签到配置，保持增量安装语义。
+    """
+    requested = mode or opts.get("checkin_mode")
+    mode_set = opts.get("checkin_mode_set", mode is not None)
+    checkin_action = bool(opts.get("checkin"))
+    disable_checkin = not checkin_action and mode_set and requested == "none"
+    if checkin_action and requested not in ("calendar", "boot", "none"):
+        requested = DEFAULT_CHECKIN_MODE
+    if disable_checkin:
+        requested = "none"
+
+    wanted = [k for k in ("checkin", "log_guard", "router") if opts.get(k)]
+    if disable_checkin:
+        wanted.append("checkin")
+    if not wanted:
+        print("3. [跳过] 未注册任何后台任务。需要时重新运行: python3 install.py --with-checkin [--checkin-mode=boot] / --with-log-guard / --with-router")
+        return
+    print(f"3. 正在注册已开启的后台任务 (打卡模式: {requested if (checkin_action or disable_checkin) else '未变更'})...")
 
     if sys.platform == "darwin":
-        if opts.get("checkin") and _load_launch_agent("com.workbuddy.dailycheckin"):
-            print(f"{COLOR_GREEN}   ✔ LaunchAgent 已激活: 每天 09:00 签到{COLOR_RESET}")
+        if checkin_action or disable_checkin:
+            _configure_macos_checkin(requested)
         if opts.get("router") and _load_launch_agent("com.workbuddy.failover-router"):
             print(f"{COLOR_GREEN}   ✔ LaunchAgent 已激活: Failover Router 容灾路由 (127.0.0.1:8047){COLOR_RESET}")
         if opts.get("log_guard") and _load_launch_agent("com.workbuddy.log-guard"):
@@ -465,37 +708,12 @@ def setup_scheduler(bin_path, bin_dir, opts):
         python_exe = sys.executable
         pythonw_exe = python_exe.replace("python.exe", "pythonw.exe")
         runner = pythonw_exe if os.path.exists(pythonw_exe) else python_exe
-        if opts.get("checkin"):
-            # 每日任务保持原样（含保活对话，与文档一致）；只有降级路径关掉对话，
-            # 避免登录相关事件多次触发时重复发送
-            cmd = f'"{runner}" "{bin_path}" checkin'
-            log_path = os.path.join(LOGS_DIR, "checkin.log")
-            # 降级路径与 Linux 的 cron 分支对齐：把输出落到 checkin.log，
-            # 否则 pythonw + 隐藏窗口会让失败完全无声。
-            fallback_cmd = f'cmd /c ""{runner}" "{bin_path}" checkin --no-chat >> "{log_path}" 2>&1"'
-            res = subprocess.run(["schtasks", "/create", "/tn", "WorkBuddyDailyCheckin", "/tr", cmd, "/sc", "daily", "/st", "09:00", "/f"],
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if res.returncode == 0:
-                # 两个触发器互斥：任务计划恢复后必须删掉旧启动项，否则会一天跑两次
-                stale = _startup_fallback_path()
-                if stale and os.path.exists(stale) and not _remove_windows_startup_fallback():
-                    print(f"{COLOR_YELLOW}   [警告] 旧的登录启动项删除失败，请手工删除: {stale}{COLOR_RESET}")
-                print(f"{COLOR_GREEN}   ✔ Windows 任务计划已激活: 每天 09:00 签到 (WorkBuddyDailyCheckin){COLOR_RESET}")
-            else:
-                # 上一次可能注册成功过；这次被策略拒绝时那条任务仍然有效，
-                # 不删就会和登录触发并存，同一天签到两次
-                subprocess.run(["schtasks", "/delete", "/tn", "WorkBuddyDailyCheckin", "/f"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                fallback_path = _install_windows_startup_fallback("WorkBuddyDailyCheckin", fallback_cmd)
-                if fallback_path:
-                    print(f"{COLOR_YELLOW}   [降级] 任务计划不可用，已改为登录时签到（仅签到，不含保活对话）: {fallback_path}{COLOR_RESET}")
-                    print(f"{COLOR_YELLOW}          输出日志: {log_path}{COLOR_RESET}")
-                else:
-                    detail = res.stderr.strip() or res.stdout.strip() or "unknown"
-                    print(f"{COLOR_YELLOW}   [提示] 任务计划注册失败，且无法写入启动项: {detail}{COLOR_RESET}")
+        if checkin_action or disable_checkin:
+            _configure_windows_checkin(requested, bin_path, runner)
         if opts.get("log_guard"):
             guard_cmd = f'"{runner}" "{os.path.join(bin_dir, "workbuddy-log-guard")}"'
-            res = subprocess.run(["schtasks", "/create", "/tn", "WorkBuddyLogGuard", "/tr", guard_cmd, "/sc", "minute", "/mo", "30", "/f"],
+            res = subprocess.run(["schtasks", "/create", "/tn", "WorkBuddyLogGuard", "/tr", guard_cmd,
+                                  "/sc", "minute", "/mo", "30", "/f"],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if res.returncode == 0:
                 print(f"{COLOR_GREEN}   ✔ Windows 任务计划已激活: 每 30 分钟日志治理 (WorkBuddyLogGuard){COLOR_RESET}")
@@ -503,28 +721,58 @@ def setup_scheduler(bin_path, bin_dir, opts):
                 print(f"{COLOR_YELLOW}   [提示] Log Guard 任务计划注册返回: {res.stderr.strip()}{COLOR_RESET}")
         return
 
-    # Linux: 优先 systemd --user，失败再降级 cron
-    cron_lines = []
+    # Linux: 定时轨道优先 systemd --user，开机轨道用 cron @reboot
     has_systemd = shutil.which("systemctl") is not None
-    if opts.get("checkin"):
-        if has_systemd and _install_systemd_unit("workbuddy-dailycheckin"):
-            print(f"{COLOR_GREEN}   ✔ systemd user timer 已激活: 每天 09:00 签到{COLOR_RESET}")
-        else:
-            cron_lines.append(("workbuddy checkin", f"0 9 * * * {bin_path} checkin >> {LOGS_DIR}/checkin.log 2>&1"))
+    cron_lines = []
+    cron_remove = []
+    if checkin_action or disable_checkin:
+        if requested == "calendar":
+            cron_remove.append("boot-checkin.sh")
+            if has_systemd and _install_systemd_unit("workbuddy-dailycheckin"):
+                print(f"{COLOR_GREEN}   ✔ systemd user timer 已激活: 轨 A - 每天 09:00 签到{COLOR_RESET}")
+            else:
+                cron_lines.append(("workbuddy checkin",
+                                   f"0 9 * * * {bin_path} checkin >> {LOGS_DIR}/checkin.log 2>&1"))
+        elif requested == "boot":
+            if _remove_systemd_unit("workbuddy-dailycheckin"):
+                print(f"{COLOR_YELLOW}   ✔ 已停用轨 A systemd timer（切换到开机打卡）{COLOR_RESET}")
+            cron_remove.append("workbuddy checkin")
+            boot_sh = os.path.join(WORKBUDDY_DIR, "scripts", "boot-checkin.sh")
+            if os.path.exists(boot_sh):
+                cron_lines.append(("boot-checkin.sh",
+                                   f"@reboot {boot_sh} >> {LOGS_DIR}/boot_checkin.log 2>&1"))
+            else:
+                print(f"{COLOR_YELLOW}   [提示] 未找到 {boot_sh}，开机打卡无法注册{COLOR_RESET}")
+        else:  # none
+            if _remove_systemd_unit("workbuddy-dailycheckin"):
+                print(f"{COLOR_YELLOW}   ✔ 已停用轨 A systemd timer{COLOR_RESET}")
+            cron_remove.extend(["workbuddy checkin", "boot-checkin.sh"])
     if opts.get("log_guard"):
         if has_systemd and _install_systemd_unit("workbuddy-log-guard"):
             print(f"{COLOR_GREEN}   ✔ systemd user timer 已激活: 每 30 分钟日志治理{COLOR_RESET}")
         else:
-            cron_lines.append(("workbuddy-log-guard", f"0,30 * * * * {bin_dir}/workbuddy-log-guard >> {LOGS_DIR}/log-guard.log 2>&1"))
-    if cron_lines:
-        if shutil.which("crontab"):
-            try:
-                if _add_cron_lines(cron_lines):
-                    print(f"{COLOR_GREEN}   ✔ crontab 定时任务已配置 ({len(cron_lines)} 项){COLOR_RESET}")
-            except Exception as e:
-                print(f"{COLOR_YELLOW}   [提示] crontab 配置失败: {e}{COLOR_RESET}")
-        else:
-            print(f"{COLOR_YELLOW}   [提示] 未找到 systemd/crontab，后台任务未注册，可随时手动运行。{COLOR_RESET}")
+            cron_lines.append(("workbuddy-log-guard",
+                               f"0,30 * * * * {bin_dir}/workbuddy-log-guard >> {LOGS_DIR}/log-guard.log 2>&1"))
+
+    if not (cron_lines or cron_remove):
+        return
+    if not shutil.which("crontab"):
+        print(f"{COLOR_YELLOW}   [提示] 未找到 systemd/crontab，后台任务未注册，可随时手动运行。{COLOR_RESET}")
+        return
+    try:
+        if not _add_cron_lines(cron_lines, cron_remove):
+            print(f"{COLOR_YELLOW}   [提示] crontab 写入失败，可随时手动运行。{COLOR_RESET}")
+            return
+        if requested == "boot" and checkin_action and cron_lines:
+            print(f"{COLOR_GREEN}   ✔ crontab 已配置: 轨 B - @reboot 开机联网打卡{COLOR_RESET}")
+        elif requested == "calendar" and checkin_action and cron_lines:
+            print(f"{COLOR_GREEN}   ✔ crontab 已配置: 轨 A - 每天 09:00 自动打卡{COLOR_RESET}")
+        elif disable_checkin:
+            print(f"{COLOR_YELLOW}   ✔ 已从 crontab 移除自动打卡{COLOR_RESET}")
+        if opts.get("log_guard") and any(m == "workbuddy-log-guard" for m, _ in cron_lines):
+            print(f"{COLOR_GREEN}   ✔ crontab 已配置: 每 30 分钟日志治理{COLOR_RESET}")
+    except Exception as e:
+        print(f"{COLOR_YELLOW}   [提示] crontab 配置失败: {e}{COLOR_RESET}")
 
 
 def setup_antigravity_sidecar(dest_bin, opts):
