@@ -224,8 +224,11 @@ class TestInstallersE2E(unittest.TestCase):
         env["PATH"] = env.get("PATH", "") + os.pathsep + stub_dir
         launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
 
+        # 不用 text=True：本地化提示按系统代码页落盘（中文 Windows 是 GBK），
+        # 而 WorkBuddy 客户端强制 PYTHONUTF8=1，utf-8 解码 GBK 会崩掉读取线程。
+        # bytes 模式对任何编码安全。
         res = subprocess.run(["cmd", "/c", launcher], env=env,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
     def test_launcher_ignores_store_stub_when_it_comes_first(self):
@@ -249,8 +252,9 @@ class TestInstallersE2E(unittest.TestCase):
         env["PATH"] = stub_dir + os.pathsep + env.get("PATH", "")   # 占位符在前
         launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
 
+        # 同上：bytes 模式，避免 GBK 输出在 PYTHONUTF8=1 环境下崩掉读取线程
         res = subprocess.run(["cmd", "/c", launcher], env=env,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         # 0 = 选中了真 Python；9009 = 过滤后确实没有可用解释器。
         # 其它退出码意味着占位符被选中并执行了，正是这条用例要挡的。
@@ -324,12 +328,6 @@ class TestInstallersE2E(unittest.TestCase):
             f"9009 提示缺少商店版说明: {res.stderr!r}",
         )
         self.assertTrue(res.stderr.strip(), "9009 分支必须输出可读提示")
-
-    def _load_installer(self, name):
-        spec = importlib.util.spec_from_file_location(name, os.path.join(REPO_DIR, "install.py"))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
 
     def test_batch_text_escaping(self):
         """echo 参数里的 cmd 控制符必须转义，否则会提前闭合 if 块或截断命令"""
