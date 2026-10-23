@@ -7,7 +7,7 @@
 ## 1. 系统要求
 
 - macOS、Linux 或 Windows 10/11
-- Python 3.8+
+- Python 3.8+（版本校验只针对 WorkBuddy 自带解释器；PATH 里的解释器按原样使用）
 - 已安装并至少登录过一次 WorkBuddy 客户端
 - 不要求额外的 Python 第三方依赖
 

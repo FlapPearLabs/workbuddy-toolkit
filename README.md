@@ -345,9 +345,20 @@ Toolkit 增加运行时兼容层，同时坚持一个边界：**需要解密能�
 
 要求：
 
-- Python 3.8+
+- Python 3.8+（3.8 校验只针对 WorkBuddy 自带解释器；PATH 里的解释器按原样使用，不做版本检查）
 - WorkBuddy 已安装并至少登录过一次
 - Toolkit 基础安装主要使用 Python 标准库，不要求额外 pip 依赖
+
+> **Windows 用户注意**：`wb-*.cmd` 启动器是安装时生成的文本，不是运行时解释的。
+> 升级 Toolkit、或修复了启动器相关的问题之后，需要重新运行一次
+> `python install.py` 才会生效。启动器查找解释器的顺序是：WorkBuddy 自带
+> Python → `PATH` 中的 `python`（自动跳过 Microsoft Store 的占位符）
+> → `py` launcher；三者都不可用时以退出码 9009 报错，而不是弹出应用商店。
+>
+> **不支持 Microsoft Store 版 Python**：它的入口同样是
+> `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`，与「0 字节占位符」路径相同、
+> 形态相同，无法区分。如果只装了商店版 Python，启动器会返回 9009 并提示改用官方
+> 安装包；也可以依赖 WorkBuddy 自带解释器。
 
 实际兼容性请运行：
 

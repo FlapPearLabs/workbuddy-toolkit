@@ -188,6 +188,141 @@ class TestInstallersE2E(unittest.TestCase):
                 installer.setup_scheduler("/tmp/bin", "/tmp", {"checkin": True})
 
             self.assertFalse(os.path.exists(vbs), "任务计划成功后旧启动项必须被删除")
+    def test_launcher_skips_store_stub_and_fails_loudly(self):
+        """启动器必须过滤 WindowsApps 占位符，找不到解释器时以 9009 明确失败"""
+        if sys.platform != "win32":
+            self.skipTest("launcher 只在 Windows 上生成")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "workbuddy.cmd")
+        with open(launcher, "r", encoding="ascii", errors="replace") as f:
+            body = f.read()
+
+        self.assertIn("findstr /v", body)
+        self.assertIn("exit /b 9009", body)
+        self.assertNotIn("echo(%%i|", body)
+
+    def test_launcher_prefers_real_python_over_store_stub(self):
+        """真 Python 在前、商店 0 字节占位符在后时，必须选中真 Python"""
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # 造一个与商店占位符同形态的 0 字节假 python，排在真 python 之后
+        stub_dir = os.path.join(self.temp_home, "WindowsApps")
+        os.makedirs(stub_dir, exist_ok=True)
+        open(os.path.join(stub_dir, "python.exe"), "wb").close()
+
+        env = dict(self.env)
+        env["PATH"] = env.get("PATH", "") + os.pathsep + stub_dir
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
+
+        res = subprocess.run(["cmd", "/c", launcher], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_launcher_ignores_store_stub_when_it_comes_first(self):
+        """占位符排在 PATH 第一位时也不能被选中：要么用真 Python，要么明确 9009
+
+        旧写法把过滤放在 `if ... echo | findstr ... || set` 里，第一轮选中占位符
+        后就再也不会被替换；这条用例专门覆盖那个顺序。
+        """
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        stub_dir = os.path.join(self.temp_home, "WindowsApps")
+        os.makedirs(stub_dir, exist_ok=True)
+        open(os.path.join(stub_dir, "python.exe"), "wb").close()
+
+        env = dict(self.env)
+        env["PATH"] = stub_dir + os.pathsep + env.get("PATH", "")   # 占位符在前
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
+
+        res = subprocess.run(["cmd", "/c", launcher], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # 0 = 选中了真 Python；9009 = 过滤后确实没有可用解释器。
+        # 其它退出码意味着占位符被选中并执行了，正是这条用例要挡的。
+        self.assertIn(res.returncode, (0, 9009), res.stdout + res.stderr)
+
+    def test_launcher_falls_back_to_bundled_python(self):
+        """PATH 里没有 python 时，应能选中 WorkBuddy 自带解释器
+
+        早期实现用 `for /f ... in ('"%WBCAND%" -c "..."')` 解析版本号，cmd 会把
+        以引号开头的命令串当成文件名，解析失败且静默落空；这条分支于是永远选不中，
+        最终落到 9009。本用例专门盯这条路径。
+
+        注意：需要本机存在 %USERPROFILE%\\.workbuddy\\binaries\\python\\versions\\*，
+        只有装了 WorkBuddy 客户端的机器才会真正执行，CI 上恒 skip——它不构成门禁，
+        门禁是 test_launcher_reports_missing_python 与占位符那两条。
+        """
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+
+        bundled_root = os.path.join(os.path.expanduser("~"), ".workbuddy",
+                                    "binaries", "python", "versions")
+        if not os.path.isdir(bundled_root):
+            self.skipTest("本机没有 WorkBuddy 自带解释器，无法覆盖这条分支")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
+        env = dict(self.env)
+        env["USERPROFILE"] = os.path.expanduser("~")   # launcher 运行时按它找内置解释器
+        env["PATH"] = r"C:\Windows\System32"           # 确保 PATH 里既没有 python 也没有 py
+
+        res = subprocess.run(["cmd", "/c", launcher], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_launcher_reports_missing_python(self):
+        """PATH 里完全没有解释器时，应以 9009 失败并给出可读提示
+
+        与 `test_launcher_skips_store_stub_and_fails_loudly` 的区别：那条只断言
+        生成文本里有没有某个字符串，这条真的跑一遍启动器。
+        """
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+
+        installer = os.path.join(REPO_DIR, "install.py")
+        subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                       env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        launcher = os.path.join(self.temp_home, ".workbuddy", "bin", "wb-help.cmd")
+        env = dict(self.env)
+        env["PATH"] = r"C:\Windows\System32"     # 既没有 python 也没有 py
+
+        # cmd 自己「命令找不到」的原生退出码也是 9009：启动器若没生成，
+        # 下面的断言会在一片绿意中通过。先确认它真的存在。
+        self.assertTrue(os.path.isfile(launcher), "启动器没生成，这条测试就没有意义")
+
+        # 不用 text=True：提示文案的编码跟随系统代码页（中文 Windows 是 GBK），
+        # 而 WorkBuddy 客户端会强制 PYTHONUTF8=1，utf-8 解码 GBK 会直接崩掉读取线程。
+        # bytes 模式对任何编码都安全；本分支落盘纯 ASCII 文案，同形字节。
+        res = subprocess.run(["cmd", "/c", launcher], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(res.returncode, 9009, res.stdout + res.stderr)
+        # 9009 必须是我们主动返回的：stderr 里要有商店版那句可执行的下一步。
+        # 本分支落盘纯 ASCII（"Store-installed ..."）；#20 合入后中文 Windows
+        # 会落 GBK 中文（"不支持 Microsoft Store 版 Python..."）。两种文案没有
+        # 公共强锚点，用 or 各自命中，避免本地化合入时本用例假红。
+        self.assertTrue(
+            b"Store-installed" in res.stderr or b"Microsoft Store" in res.stderr,
+            f"9009 提示缺少商店版说明: {res.stderr!r}",
+        )
+        self.assertTrue(res.stderr.strip(), "9009 分支必须输出可读提示")
 
 
 def _copy_repo(dest):

@@ -428,6 +428,107 @@ def _is_toolkit_cli(path):
 def _is_runnable_file(path):
     return bool(path) and os.path.isfile(path) and (sys.platform == "win32" or os.access(path, os.X_OK))
 
+def _win32_runtime_from_uninstall_entry(root, name):
+    """从一个 Uninstall 子键里解析出 WorkBuddy.exe，解析不出来返回 None。
+
+    依次尝试 InstallLocation、DisplayIcon、UninstallString 三条线索，命中后
+    用 os.path.isfile 确认文件真实存在。
+    """
+    import winreg
+
+    try:
+        with winreg.OpenKey(root, name) as key:
+            try:
+                display_name = str(winreg.QueryValueEx(key, "DisplayName")[0])
+            except OSError:
+                return None
+            if "workbuddy" not in display_name.lower():
+                return None
+
+            # 1) InstallLocation 最直接
+            try:
+                location = str(winreg.QueryValueEx(key, "InstallLocation")[0])
+                location = os.path.expandvars(location.strip().strip('"'))
+                # 相对路径会落到当前工作目录，宁可不用
+                if location and os.path.isabs(location):
+                    candidate = os.path.join(location, "WorkBuddy.exe")
+                    if os.path.isfile(candidate):
+                        return candidate
+            except OSError:
+                pass
+
+            # 2) DisplayIcon，形如 "D:\...\WorkBuddy.exe,0"
+            try:
+                icon = os.path.expandvars(str(winreg.QueryValueEx(key, "DisplayIcon")[0]))
+                candidate = icon.split(",")[0].strip().strip('"')
+                if candidate.lower().endswith("workbuddy.exe") and os.path.isabs(candidate) \
+                        and os.path.isfile(candidate):
+                    return candidate
+            except OSError:
+                pass
+
+            # 3) UninstallString：可能是带引号的 exe，也可能是不带引号的命令，
+            #    或 MSI 的 MsiExec.exe /X{GUID}
+            try:
+                uninstall = os.path.expandvars(str(winreg.QueryValueEx(key, "UninstallString")[0])).strip()
+                quoted = re.search(r'"([^"]+)"', uninstall)
+                if quoted:
+                    base = os.path.dirname(quoted.group(1))
+                    # 卸载器可能放在 <安装目录>\uninstall\ 下，父目录也试一次
+                    for folder in (base, os.path.dirname(base)):
+                        candidate = os.path.join(folder, "WorkBuddy.exe")
+                        if os.path.isabs(candidate) and os.path.isfile(candidate):
+                            return candidate
+                else:
+                    head = uninstall.split(".exe")[0]
+                    if head:
+                        base = os.path.dirname(head + ".exe")
+                        for folder in (base, os.path.dirname(base)):
+                            candidate = os.path.join(folder, "WorkBuddy.exe")
+                            if os.path.isabs(candidate) and os.path.isfile(candidate):
+                                return candidate
+            except OSError:
+                pass
+    except OSError:
+        return None
+
+    return None
+
+def _win32_runtime_from_registry():
+    """从卸载注册表项反查 WorkBuddy 安装位置。
+
+    WorkBuddy 安装包不限制目标盘符，用户可以把客户端装到任意目录。常见路径
+    全部落空时，卸载项里的 InstallLocation / DisplayIcon / UninstallString
+    是仅剩的线索。
+    """
+    import winreg
+
+    targets = (
+        (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    )
+    # 32 位解释器下 HKLM\SOFTWARE 会被 WOW64 重定向，这里两个视图都扫一遍，
+    # 而不是硬写 WOW6432Node（那样在 32 位解释器下会变成双层重定向）。
+    views = (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY)
+    for hive, sub_path in targets:
+        for view in views:
+            try:
+                with winreg.OpenKey(hive, sub_path, 0, winreg.KEY_READ | view) as root:
+                    index = 0
+                    while True:
+                        try:
+                            name = winreg.EnumKey(root, index)
+                            index += 1
+                        except OSError:
+                            break
+                        candidate = _win32_runtime_from_uninstall_entry(root, name)
+                        if candidate:
+                            return candidate
+            except OSError:
+                continue
+
+    return None
+
 def find_workbuddy_runtime():
     """
     定位本机 WorkBuddy 可执行文件/运行时路径。
@@ -478,6 +579,13 @@ def find_workbuddy_runtime():
     for p in candidates:
         if _is_runnable_file(p) and not _is_toolkit_cli(p):
             return os.path.abspath(p)
+
+    # 标准位置全部落空，才去注册表翻线索。注册表可能残留换盘重装、Beta 与正式
+    # 版并存留下的旧记录，所以它只能兜底，不能排在 per-user 安装之前。
+    if sys.platform == "win32":
+        registry_exe = _win32_runtime_from_registry()
+        if registry_exe and _is_runnable_file(registry_exe) and not _is_toolkit_cli(registry_exe):
+            return os.path.abspath(registry_exe)
 
     raise CredentialError("RUNTIME_NOT_FOUND")
 
