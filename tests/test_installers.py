@@ -251,9 +251,14 @@ class TestInstallersE2E(unittest.TestCase):
         res = subprocess.run(["cmd", "/c", launcher], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(res.returncode, 9009, res.stdout + res.stderr)
-        # 9009 必须是我们主动返回的：stderr 里要有商店版那句可执行的下一步，
-        # 而不是 cmd 的「找不到命令」或任意替换文案。
-        self.assertIn(b"Store-installed", res.stderr)
+        # 9009 必须是我们主动返回的：stderr 里要有商店版那句可执行的下一步。
+        # 本分支落盘纯 ASCII（"Store-installed ..."）；#20 合入后中文 Windows
+        # 会落 GBK 中文（"不支持 Microsoft Store 版 Python..."）。两种文案没有
+        # 公共强锚点，用 or 各自命中，避免本地化合入时本用例假红。
+        self.assertTrue(
+            b"Store-installed" in res.stderr or b"Microsoft Store" in res.stderr,
+            f"9009 提示缺少商店版说明: {res.stderr!r}",
+        )
         self.assertTrue(res.stderr.strip(), "9009 分支必须输出可读提示")
 
 
