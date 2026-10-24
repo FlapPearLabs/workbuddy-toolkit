@@ -2523,6 +2523,11 @@ def notify_desktop(title, message):
     title_str = str(title)
     msg_str = str(message)
 
+    if os.environ.get("WB_NO_NOTIFY") == "1":
+        # 测试/CI 里的假账号会触发真实桌面通知，用户会以为自己的凭据失效了。
+        # 需要断言通知内容的用例请直接 patch 本函数，而不是让它真的弹窗。
+        return False
+
     if sys.platform == "darwin":
         try:
             safe_title = title_str.replace('\\', '\\\\').replace('"', '\\"').replace('\r', ' ').replace('\n', ' ')
@@ -3020,10 +3025,12 @@ def empty_trash(force=False):
 def remove_main(args):
     """`workbuddy remove ...` 与 wb-remove 软链的统一入口。"""
     if any(a in ("-h", "--help", "help") for a in args):
-        print("用法: workbuddy remove <账号别名> [-y]\n"
+        print("用法: workbuddy remove <账号别名> [-y] [--force]\n"
               "      workbuddy remove --list-trash\n"
               "      workbuddy remove --restore <回收站文件名>\n"
-              "      workbuddy remove --empty-trash [-y]")
+              "      workbuddy remove --empty-trash [-y]\n"
+              "  -y/--yes   跳过普通确认；删除当前登录账号的备份仍需二次确认\n"
+              "  --force    放宽活跃账号保护（不再二次确认），不用于跳过普通确认")
         return
     mode_flags = [f for f in ("--list-trash", "--empty-trash", "--restore") if f in args]
     if len(mode_flags) > 1:
@@ -3037,13 +3044,16 @@ def remove_main(args):
         # 若被静默吞掉，用户以为在预演，实际执行的是真删除
         print(f"{COLOR_RED}错误: 未知选项 {', '.join(unknown)}（支持 -y/--yes、--force/-f、--list-trash、--restore <名>、--empty-trash）{COLOR_RESET}")
         sys.exit(1)
-    skip_confirm = any(a in ("-y", "--yes", "--force", "-f") for a in args)
+    # 两类选项语义分离：-y 只跳过普通确认；--force 放宽活跃账号保护。
+    # 混用会让同一个 flag 在 save/remove 之间含义相反（评审 #24 第 2、5 条）。
+    assume_yes = any(a in ("-y", "--yes") for a in args)
+    relax_protection = any(a in ("--force", "-f") for a in args)
 
     if "--list-trash" in args:
         list_trash()
         return
     if "--empty-trash" in args:
-        sys.exit(0 if empty_trash(force=skip_confirm) else 1)
+        sys.exit(0 if empty_trash(force=assume_yes) else 1)
     if "--restore" in args:
         idx = args.index("--restore")
         if idx + 1 >= len(args):
@@ -3057,18 +3067,22 @@ def remove_main(args):
         print(f"{COLOR_RED}错误: 一次只能删除一个账号，收到 {len(clean_args)} 个: {', '.join(clean_args)}{COLOR_RESET}")
         sys.exit(1)
     if clean_args:
-        ok = remove_profile(clean_args[0], force=skip_confirm)
+        ok = remove_profile(clean_args[0], assume_yes=assume_yes, force=relax_protection)
         sys.exit(0 if ok else 1)
     print(f"{COLOR_RED}请提供要删除的账号别名，例如: workbuddy remove myaccount{COLOR_RESET}")
     print(f"可用账号列表: {', '.join(get_profiles().keys()) or '（空）'}")
     sys.exit(1)
 
-def remove_profile(target_name, force=False):
+def remove_profile(target_name, assume_yes=False, force=False):
     """将指定账号的 Profile 移入本地回收站（auth_profiles/.trash/）。
 
     只动备份库里的一个 .info 文件：客户端当前登录（AUTH_FILE）不受影响，
     checkin / audit / status 都是运行时遍历 profiles 目录，下次运行自然少一个账号，
     无任何残留状态需要清理。回收站里的文件随时可手工移回 PROFILES_DIR 恢复。
+
+    参数语义（与 save --force 区分开）：
+    - assume_yes=True：跳过普通确认（对应 -y/--yes）
+    - force=True：放宽活跃账号保护，不再要求二次确认（对应 --force）
     """
     profiles = get_profiles()
     matched_name, target = resolve_profile_target(profiles, target_name, allow_uid_prefix=False, quiet=True)
@@ -3095,9 +3109,16 @@ def remove_profile(target_name, force=False):
         print(f"{COLOR_YELLOW}  但 checkin / audit / status 将不再管理它，且每日签到也不会自动重新收录；{COLOR_RESET}")
         print(f"{COLOR_YELLOW}  该账号的登录态在客户端切换/退出后需重新扫码 (workbuddy login)。{COLOR_RESET}")
 
-    if not force:
+    # 确认策略：-y 只跳过普通确认。删除"当前登录账号的备份"属高危操作，
+    # 即便带了 -y 也要再问一次，只有显式 --force 才放宽（评审 #24 第 3 条）。
+    prompt = None
+    if is_active and not force:
+        prompt = f"{COLOR_YELLOW}这是当前登录账号，确认把它的备份移入回收站? [y/N]: {COLOR_RESET}"
+    elif not assume_yes:
+        prompt = f"{COLOR_YELLOW}确认移入回收站? [y/N]: {COLOR_RESET}"
+    if prompt:
         try:
-            ans = input(f"{COLOR_YELLOW}确认移入回收站? [y/N]: {COLOR_RESET}").strip().lower()
+            ans = input(prompt).strip().lower()
         except (KeyboardInterrupt, EOFError):
             print("\n已取消。")
             return False
@@ -3108,15 +3129,33 @@ def remove_profile(target_name, force=False):
     try:
         trash_dir = get_trash_dir()
         os.makedirs(trash_dir, exist_ok=True)
-        # 微秒级时间戳：把同秒碰撞概率压到可忽略，_N 递增只作兜底
+        # 微秒级时间戳把碰撞概率压到可忽略；O_CREAT|O_EXCL 原子占位则彻底关掉
+        # "先 exists 再 replace" 的 TOCTOU 窗口——并发删同一别名时，两个进程
+        # 不可能抢到同一个回收站文件名（评审 #24 第 4 条，借鉴 #25 的做法）
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        trash_path = os.path.join(trash_dir, f"{target_name}.{stamp}.info")
-        seq = 1
-        while os.path.exists(trash_path):
-            trash_path = os.path.join(trash_dir, f"{target_name}.{stamp}_{seq}.info")
-            seq += 1
-        # 同盘 rename：原子且瞬时，凭据文件全程不落第三方位置
-        os.replace(target["path"], trash_path)
+        seq = 0
+        while True:
+            suffix = "" if seq == 0 else f"_{seq}"
+            trash_path = os.path.join(trash_dir, f"{target_name}.{stamp}{suffix}.info")
+            try:
+                fd = os.open(trash_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                seq += 1
+                if seq > 999:
+                    raise OSError(f"回收站文件名连续冲突，已放弃: {target_name}")
+                continue
+            os.close(fd)
+            break
+        try:
+            # 同盘 rename：原子且瞬时，凭据文件全程不落第三方位置
+            os.replace(target["path"], trash_path)
+        except OSError:
+            # 占位成功但搬运失败：清掉空占位，别在回收站留垃圾
+            try:
+                os.remove(trash_path)
+            except OSError:
+                pass
+            raise
     except OSError as e:
         print(f"{COLOR_RED}删除失败: {e}{COLOR_RESET}")
         return False

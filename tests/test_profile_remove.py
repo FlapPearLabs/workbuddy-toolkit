@@ -48,7 +48,8 @@ class TestProfileRemove(unittest.TestCase):
         self.base = tempfile.mkdtemp(prefix="wb_remove_case_")
         self.env = dict(os.environ, USERPROFILE=self.base, HOME=self.base,
                         APPDATA=os.path.join(self.base, "AppData", "Roaming"),
-                        LOCALAPPDATA=os.path.join(self.base, "AppData", "Local"))
+                        LOCALAPPDATA=os.path.join(self.base, "AppData", "Local"),
+                        WB_NO_NOTIFY="1")   # 假账号不得触发真实桌面通知
         self.prof = os.path.join(self.base, ".workbuddy", "auth_profiles")
         os.makedirs(self.prof)
         self.trash = os.path.join(self.prof, ".trash")
@@ -137,11 +138,28 @@ class TestProfileRemove(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertTrue(os.path.exists(os.path.join(self.prof, "beta.info")))
 
-    def test_remove_force_skips_confirm(self):
+    def test_remove_force_still_confirms(self):
+        """--force 只放宽活跃账号保护，不再兼任"跳过确认"（评审第 2 条）"""
         self._make("beta", "uid-b")
-        r = self._run("remove", "beta", "--force")
+        r = self._run("remove", "beta", "--force", stdin="n\n")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("已取消", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "beta.info")))
+
+    def test_remove_yes_still_confirms_active_account(self):
+        """-y 不能跳过活跃账号的二次确认（评审第 3 条）"""
+        self._make("work", "uid-work", active=True)
+        r = self._run("remove", "work", "-y", stdin="")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("当前登录账号", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "work.info")))
+
+    def test_remove_force_relaxes_active_protection(self):
+        """--force + -y 才允许无交互删除活跃账号的备份"""
+        self._make("work2", "uid-work2", active=True)
+        r = self._run("remove", "work2", "-y", "--force", stdin="")
         self.assertEqual(r.returncode, 0)
-        self.assertFalse(os.path.exists(os.path.join(self.prof, "beta.info")))
+        self.assertFalse(os.path.exists(os.path.join(self.prof, "work2.info")))
 
     def test_remove_active_account_warns_and_tombstones(self):
         """删除活跃账号：黄色警告 + 次日签到的自动发现不再复活该账号"""
@@ -177,7 +195,7 @@ class TestProfileRemove(unittest.TestCase):
 
     def test_remove_exit_code_success(self):
         self._make("alpha", "uid-a")
-        self.assertEqual(self._run("remove", "alpha", "--force").returncode, 0)
+        self.assertEqual(self._run("remove", "alpha", "-y").returncode, 0)
 
     def test_tui_end_to_end(self):
         """TUI：主菜单2 → 账号5 → 选号 → y → 返回 → 退出，落进回收站"""
@@ -236,13 +254,13 @@ class TestProfileRemove(unittest.TestCase):
         self.assertEqual(self._trash_names(), [])
 
     def test_yes_flag_skips_confirm(self):
-        """精进 #3：-y/--yes 是删除侧的一等公民；--force/-f 保留兼容"""
+        """-y/--yes 是跳过普通确认的一等公民；--force 只管放宽保护"""
         self._make("alpha", "uid-a")
         self.assertEqual(self._run("remove", "alpha", "-y").returncode, 0)
         self._make("beta", "uid-b")
         self.assertEqual(self._run("remove", "beta", "--yes").returncode, 0)
         self._make("gamma", "uid-c")
-        self.assertEqual(self._run("remove", "gamma", "--force").returncode, 0)
+        self.assertEqual(self._run("remove", "gamma", "--force", stdin="y\n").returncode, 0)
         self.assertEqual([f for f in os.listdir(self.prof) if f.endswith(".info")], [])
 
     def test_status_shows_trash_count(self):
@@ -273,10 +291,26 @@ class TestProfileRemove(unittest.TestCase):
         # 删除路径同样必须走 remove 而不是切号：切号会改写 AUTH_FILE
         auth_file = os.path.join(self.base, ".workbuddy", "auth", "workbuddy-desktop.info")
         auth_before = open(auth_file, "rb").read()
-        r = self._run("alpha", "-y", script=script)
+        r = self._run("alpha", "-y", "--force", script=script)
         self.assertEqual(r.returncode, 0)
         self.assertIn("已移入回收站", r.stdout)
         self.assertEqual(open(auth_file, "rb").read(), auth_before, "wb-remove 触发了切号！")
+
+    def test_concurrent_remove_same_alias(self):
+        """评审第 4 条：并发删同一别名时，恰好一个成功、回收站恰好一份"""
+        self._make("alpha", "uid-a")
+        procs = [
+            subprocess.Popen([sys.executable, WB, "remove", "alpha", "-y"], env=self.env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for _ in range(2)
+        ]
+        codes = sorted(p.wait(timeout=60) for p in procs)
+        for p in procs:
+            p.stdout.close()
+            p.stderr.close()
+        self.assertEqual(codes, [0, 1], f"并发删除退出码异常: {codes}")
+        self.assertEqual(len(self._trash_names()), 1, self._trash_names())
+        self.assertFalse(os.path.exists(os.path.join(self.prof, "alpha.info")))
 
     def test_remove_mode_flags_mutually_exclusive(self):
         """--restore 与 --empty-trash 同用会静默销毁想恢复的文件，必须拒绝"""
