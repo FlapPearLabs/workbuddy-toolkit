@@ -13,7 +13,8 @@ import tempfile
 import unittest
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WB = os.path.join(REPO_DIR, "bin", "workbuddy")
+# WB_BIN 允许变异校验脚本指向"故意改坏"的副本，用来证明这些用例真的能抓到缺陷
+WB = os.environ.get("WB_BIN") or os.path.join(REPO_DIR, "bin", "workbuddy")
 
 
 def _snapshot(root):
@@ -26,6 +27,20 @@ def _snapshot(root):
         for dn in dirs:
             out.add(os.path.relpath(os.path.join(root_, dn), root) + os.sep)
     return out
+
+
+def _assert_isolated(env, base):
+    """事前拦截：四个环境变量必须全部落在临时目录里。
+
+    tearDownClass 的快照是"事后"断言，测试中途崩溃时根本不会执行；
+    get_auth_file() 的候选顺序是 APPDATA → LOCALAPPDATA → USERPROFILE，
+    只改后两个时 AUTH_FILE 仍指向真实客户端凭据，测试里的切号会把它覆盖掉。
+    """
+    base_real = os.path.realpath(base)
+    for key in ("USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA"):
+        got = os.path.realpath(env.get(key) or "")
+        if not got.startswith(base_real):
+            raise AssertionError(f"{key} 未重定向到临时目录: {got}")
 
 
 class TestProfileRemove(unittest.TestCase):
@@ -69,6 +84,7 @@ class TestProfileRemove(unittest.TestCase):
                            "auth": {"expiresAt": 0}}, f, ensure_ascii=False)
 
     def _run(self, *args, stdin=None, script=None):
+        _assert_isolated(self.env, self.base)   # 每次起子进程前都拦一次
         return subprocess.run([sys.executable, script or WB, *args], env=self.env, input=stdin,
                               capture_output=True, text=True, timeout=60)
 
@@ -322,16 +338,26 @@ class TestProfileRemove(unittest.TestCase):
         self.assertEqual(len(self._trash_names()), 1, "回收站被误清空")
 
     def test_restore_rejects_path_traversal(self):
-        """--restore ../alpha 不得把凭据搬出备份库"""
+        """--restore ../victim 不得越界查找/搬动备份库之外的文件"""
         self._make("alpha", "uid-a")
-        r = self._run("remove", "alpha", "-y")
-        self.assertEqual(r.returncode, 0)
-        r = self._run("remove", "--restore", "../alpha")
+        self.assertEqual(self._run("remove", "alpha", "-y").returncode, 0)
+
+        # 在备份库之外放一个真实存在的 .info：只有它存在，"越界"才有意义
+        outside = os.path.join(os.path.dirname(self.prof), "victim.info")
+        with open(outside, "w", encoding="utf-8") as f:
+            f.write('{"account": {"uid": "uid-victim"}}')
+        with open(outside, "rb") as f:
+            before = f.read()
+
+        r = self._run("remove", "--restore", "../victim")
         self.assertEqual(r.returncode, 1)
-        trash_root = os.path.dirname(self.trash)
-        # 凭据仍应在回收站里，而不是被搬到 auth_profiles 之外
+        # basename 先把路径压回文件名，所以查找范围始终在 .trash 内；
+        # 去掉 basename 才会走到"非法文件名"分支——两种都拒绝，这里锁定"不越界查找"
+        self.assertIn("回收站里没有", r.stdout)
+        with open(outside, "rb") as f:
+            self.assertEqual(f.read(), before, "备份库外的文件被搬动")
+        self.assertFalse(os.path.exists(os.path.join(self.prof, "victim.info")))
         self.assertTrue(any("alpha" in n for n in self._trash_names()))
-        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(trash_root), "alpha.info")))
 
     def test_restore_rejects_duplicate_uid(self):
         """恢复出同 uid 的第二份副本会让 checkin 对同一账号签两次，必须拒绝"""
@@ -344,6 +370,42 @@ class TestProfileRemove(unittest.TestCase):
         self.assertIn("已在备份库中", r.stdout)
         self.assertIn(stamped, self._trash_names())
         self.assertTrue(os.path.exists(os.path.join(self.prof, "beta.info")))
+
+    def test_tombstone_does_not_shadow_resaved_account(self):
+        """删号后重新 save 同 uid：签到不该每天刷"已被删除，跳过自动入库"的假消息。
+
+        这条锁定墓碑判断与"是否已在库"的先后顺序——顺序放反时用例必红。
+        """
+        self._make("work", "uid-work", active=True)
+        self.assertEqual(self._run("remove", "work", stdin="y\n").returncode, 0)
+        self.assertEqual(self._run("save", "work").returncode, 0)
+        r = self._run("checkin")
+        self.assertNotIn("跳过自动入库", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "work.info")))
+
+    # ---------------- 隔离与跨平台证据（评审标注"无法核验"的三项） ----------------
+
+    def test_isolation_guard_rejects_real_paths(self):
+        """正断言不是摆设：把 APPDATA 指回真实目录时必须拦下来"""
+        bad = dict(self.env, APPDATA=os.path.join(os.path.expanduser("~"), "AppData", "Roaming"))
+        with self.assertRaises(AssertionError):
+            _assert_isolated(bad, self.base)
+
+    def test_child_process_sees_temp_home(self):
+        """子进程里 expanduser('~') 必须落在临时目录——证明重定向真的生效"""
+        r = subprocess.run([sys.executable, "-c", "import os;print(os.path.expanduser('~'))"],
+                           env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(os.path.realpath(r.stdout.strip()).startswith(os.path.realpath(self.base)),
+                        r.stdout)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX 同盘语义")
+    def test_trash_is_same_device_as_profiles(self):
+        """POSIX：回收站与备份库同 st_dev，os.replace 才是原子 rename 而非跨盘拷贝"""
+        self._make("alpha", "uid-a")
+        self.assertEqual(self._run("remove", "alpha", "-y").returncode, 0)
+        trash_file = os.path.join(self.trash, self._trash_names()[0])
+        self.assertEqual(os.stat(trash_file).st_dev, os.stat(self.prof).st_dev)
 
 
 if __name__ == "__main__":

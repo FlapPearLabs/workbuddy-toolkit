@@ -40,6 +40,13 @@ jobs:
         run: |
           python scripts/ci_test_report.py tests
 
+      # 显式一步：在真实的 macOS / Linux 文件系统上跑删除路径（真实的
+      # os.replace、真实的 st_dev），而不是只依赖汇总脚本里的隐式执行。
+      - name: POSIX delete path (real os.replace, no mocks)
+        if: runner.os != 'Windows'
+        run: |
+          python -m unittest tests.test_profile_remove -v
+
       - name: Test Native Shell Installer (Linux / macOS)
         if: runner.os != 'Windows'
         run: |
