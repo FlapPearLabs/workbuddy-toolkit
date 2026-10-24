@@ -47,10 +47,11 @@
 | 本地分支 | `feat/logout-command` |
 | 基准 SHA | `4e832c07bf35ffcae12fe42d2c71ffcf674cbabe`（origin/main） |
 | 功能提交 SHA | `e8e83e8c9419f20de57225f03e2183214430b1ee` |
-| 最终 SHA | `97448ee82ce6b48d9ddd0eef877c3e00d6dba9e6`（含本审计报告） |
+| 报告提交 SHA | `97448ee82ce6b48d9ddd0eef877c3e00d6dba9e6` |
+| 最终 SHA | 以 PR 页面 head 为准（缺陷修复提交位于本报告更新之后） |
 | 远端状态 | 已推送至 fork `nlsans/workbuddy-toolkit`，分支 `feat/logout-command` |
-| 变更文件 | `bin/workbuddy` (+155)、`install.py` (+3)、`tests/test_logout.py` (+163，新增)、`PR_ENGINEERING_AUDIT.md` (+581，新增) |
-| 合计 | **902 insertions, 0 deletions, 4 files, 2 commits** |
+| 变更文件 | `bin/workbuddy`（logout 相关函数与两处路由）、`install.py`（别名注册）、`tests/test_logout.py`（11 项测试，新增文件）、`PR_ENGINEERING_AUDIT.md`（本报告，新增文件） |
+| 合计 | 4 files，全部为新增，无既有逻辑改写（精确行数以 PR 页面 Files changed 为准） |
 | 功能 | 新增 `workbuddy logout` / `wb-logout`：写登出标记后删除本地凭据文件，可预览、可备份 |
 
 ### 1.1 PR 创建过程（已核验）
@@ -109,13 +110,14 @@ PR 并非一次达成，前后经历三次失败：
 
 | 级别 | 风险 | 状态 |
 |---|---|---|
-| P1 | `-f` / `--force` 被当作 `--yes` 别名，可跳过预览直接删除；与上游 #25 的 `--force` 语义冲突 | **未修复** |
-| P2 | `_logout_cache_targets()` 用未校验的 uid 拼接路径，理论上可越界 | **未修复** |
+| P1 | `-f` / `--force` 被当作 `--yes` 别名，可跳过预览直接删除；与上游 #25 的 `--force` 语义冲突 | **已修复**（见 8.4） |
+| P2 | `_logout_cache_targets()` 用未校验的 uid 拼接路径，理论上可越界 | **已修复**（见 8.4） |
 | P2 | Linux 分支 `pgrep -f "CodeBuddy"` 为推测，未在 Linux 验证 | 未验证 |
 | P3 | 备份目录无上限清理 | 未修复 |
 
 ### 2.4 测试状态
-- 新增测试 9/9 通过（`tests.test_logout`）。
+- 新增测试 **11/11** 通过（`tests.test_logout`）：初审时 9 项，缺陷修复后补 2 项。
+- 补充的 2 项经**先红后绿**验证：回退到修复前版本时均失败，恢复后通过（见 8.4）。
 - 上游全量 219 项：1 项报错，单独重跑该项通过，判定为中文 Windows 编码环境问题，与本次改动无关。
 - 真实环境冒烟：预览模式验证通过，未修改任何真实凭据。
 
@@ -148,6 +150,8 @@ PR 并非一次达成，前后经历三次失败：
 | 14:55 | 审计 | 学生 | 要求独立审计 | 消息原文 |
 | 15:05 | 提交要求 | 学生 | 要求把审计报告附加到 PR 并提交上游 | 消息原文 |
 | 15:06 | **PR 创建完成** | Agent 执行 + 学生人工授权 | fork `nlsans/workbuddy-toolkit` → push `feat/logout-command` → REST API 建 PR #27 | PR 元数据、`git push` 输出 |
+| 15:11 | 缺陷修复 | **学生**（回复"修"） | 修缺陷 A/B 两处、补 2 项测试、执行先红后绿校验、同步报告与 PR 正文 | diff、测试输出 |
+| 15:12 | 报告一致性修正 | Agent | 因 PR 创建，原报告 §1"PR 不存在"失效，改写为实际状态 | commit diff |
 
 **阶段跳过的记录**：全程**没有**出现"方案讨论—学生确认—再实现"的显式环节；**没有** Worktree；**没有**多 Agent 分工；**没有**独立审查者（无论人或 Agent）。
 
@@ -394,7 +398,9 @@ C:/tmp/wtk  e8e83e8 [feat/logout-command]
 - 学生要求独立验证，不相信 Agent 自述
 - 学生识别不合理的复杂设计
 
-### 8.3 审计发现的残留缺陷（**当前 HEAD 未修复**）
+### 8.3 审计发现的残留缺陷
+
+以下问题在提交者要求下已修复，修复细节与验证见 8.4。**审计结论保留原始记录，不做追溯美化。**
 
 #### 缺陷 A（P1）：`-f`/`--force` 被当作 `--yes` 别名
 
@@ -436,6 +442,42 @@ res = subprocess.run(["pgrep", "-f", "CodeBuddy"], ...)
 
 每次登出生成 `~/.workbuddy/logout_backup/<ts>/`，无上限。上游对日志有 log_guard 治理，此处未对齐。
 
+### 8.4 缺陷修复记录（A、B）
+
+提交者审阅本报告后要求修复 A、B 两处缺陷。修复内容与验证如下。
+
+| 缺陷 | 修复方式 | 位置 |
+|---|---|---|
+| A（P1） | 确认条件收敛为 `("--yes", "-y")`，移除 `-f` / `--force`；并加注释说明为何不复用 `--force` | `bin/workbuddy:885-887` |
+| B（P2） | uid 增加字符白名单 `re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(uid))`，不符则跳过该缓存目标 | `bin/workbuddy:869-875` |
+
+**测试补强**（`tests/test_logout.py`，用例数 9 → 11）：
+
+| 用例 | 断言 |
+|---|---|
+| `test_10_force_is_not_accepted_as_confirm` | 传 `--force` 或 `-f` 均不得删除凭据、不得写入标记 |
+| `test_11_uid_traversal_ignored_in_deep` | `uid` 为 `../` 时，`--deep` 不得删除 `~/.workbuddy` 之外的同名文件（用哨兵文件断言） |
+
+**先红后绿验证**（用于排除"恒真测试"）：将 `bin/workbuddy` 临时回退到修复前版本，重跑这两个用例：
+
+```
+FAIL: test_10_force_is_not_accepted_as_confirm (tests.test_logout.TestLogout...)
+FAIL: test_11_uid_traversal_ignored_in_deep (tests.test_logout.TestLogout...)
+Ran 2 tests in 0.102s
+FAILED (failures=2)
+```
+
+恢复修复后：
+
+```
+Ran 11 tests in 0.274s
+OK
+```
+
+这一步是本次修复中唯一能证明"测试真的有效"的证据。若只展示 `Ran 11 tests OK`，无法排除两条新用例是恒真断言。
+
+**仍未修复**：缺陷 C（Linux 进程探测未验证）、缺陷 D（备份目录无清理），保留在 §10 未解决问题中。
+
 ---
 
 ## 9. 测试和验收矩阵
@@ -444,7 +486,9 @@ res = subprocess.run(["pgrep", "-f", "CodeBuddy"], ...)
 
 | # | 场景 | 命令 | 结果 | 范围 | 证据 |
 |---|---|---|---|---|---|
-| T1 | 新增测试全量 | `python -m unittest tests.test_logout` | `Ran 9 tests … OK` | 标记路径/预览零写/写标删凭/备份/进程拦截/覆盖/幂等/deep 边界 | 会话输出 |
+| T1 | 新增测试（初审时） | `python -m unittest tests.test_logout` | `Ran 9 tests … OK` | 标记路径/预览零写/写标删凭/备份/进程拦截/覆盖/幂等/deep 边界 | 会话输出 |
+| T1b | 新增测试（缺陷修复后） | 同上 | `Ran 11 tests … OK` | 增加 `-f`/`--force` 拒绝、uid 越界拒绝 | 会话输出 |
+| T1c | 先红后绿校验 | 将 `bin/workbuddy` 回退到修复前，重跑新增 2 项 | `FAILED (failures=2)` | 证明两个用例非恒真断言 | 会话输出 |
 | T2 | 上游全量回归 | `python -m unittest discover -s tests -t .` | `Ran 219 tests`，1 error，skipped=14 | 全仓 | 会话输出 |
 | T3 | 失败项单独重跑 | 同 T2 指定单测 | `Ran 1 test … OK` | log_guard | 会话输出 |
 | T4 | 真实环境冒烟 | `python bin/workbuddy logout`（预览） | 正确识别命令、定位真实凭据、进程占用告警、零修改 | 端到端路径 | 会话输出 |
@@ -457,8 +501,8 @@ res = subprocess.run(["pgrep", "-f", "CodeBuddy"], ...)
 | 删除真实活跃账号（执行态） | **未验证** | 有意不执行，避免破坏本机登录态 |
 | 客户端已在运行时强制 `--allow-running` 的真实效果 | **未验证** | 仅代码路径存在，无端到端证据 |
 | Linux / macOS 行为 | **未验证** | 仅 Windows 环境 |
-| uid 路径穿越（缺陷 B） | **未覆盖** | 无对应测试 |
-| `-f` / `--force` 别名（缺陷 A） | **未覆盖** | 无对应测试 |
+| uid 路径穿越（缺陷 B） | **已补测** | `test_11_uid_traversal_ignored_in_deep`，先红后绿见 8.4 |
+| `-f` / `--force` 别名（缺陷 A） | **已补测** | `test_10_force_is_not_accepted_as_confirm`，先红后绿见 8.4 |
 | 备份失败路径（磁盘满 / 权限） | **未覆盖** | 无对应测试 |
 | 并发调用登出 | **未覆盖** | 上游 #25 做了 5 线程并发测试，此处没有 |
 | 与 `wb-switch` 联合的凭据同步 | **未覆盖** | 登出后切号的行为未验证 |
@@ -528,8 +572,8 @@ res = subprocess.run(["pgrep", "-f", "CodeBuddy"], ...)
 | 原子写实现 | 代码 | `bin/workbuddy:814-833` |
 | 进程探测 | 代码 | `bin/workbuddy:839-854` |
 | deep 清理范围 | 代码 | `bin/workbuddy:856-873` |
-| **缺陷 A（`-f` 别名）** | 代码 | `bin/workbuddy:882` |
-| **缺陷 B（uid 未校验）** | 代码 | `bin/workbuddy:870` |
+| **缺陷 A（`-f` 别名，已修复）** | 代码 | `bin/workbuddy:885-887`（修复前为 `:882`） |
+| **缺陷 B（uid 未校验，已修复）** | 代码 | `bin/workbuddy:869-875`（修复前为 `:870`） |
 | 命令注册 | 代码 | `install.py:54`、`install.py:68`、`install.py:573` |
 | 路由分支 | 代码 | `bin/workbuddy:4378-4383`（prog_name）、`:4497-4504`（cmd） |
 | 上游凭据路径交叉验证 | 代码 | `bin/workbuddy:63-64`（origin/main） |
@@ -549,7 +593,7 @@ res = subprocess.run(["pgrep", "-f", "CodeBuddy"], ...)
 
 1. **顺序问题**：如果把 `run_logout` 中"写标记"和"删凭据"两步顺序对调，会出现什么现象？请结合 WB-44172 说明原因。
 
-2. **缺陷 A**：`bin/workbuddy:882` 把 `-f` 和 `--force` 当作 `--yes` 的别名。请说明这个设计与上游 PR #25 中 `--force` 的语义有何冲突，会产生什么误操作风险。
+2. **缺陷 A 的修复依据**：`bin/workbuddy:887` 最初把 `-f` / `--force` 当作 `--yes` 的别名，现已移除。请说明：为什么 `--force` 在本仓库其他命令里的语义与"跳过确认"相反？若一个用户从 #25 的 `wb-remove --force` 迁移过来，他会预期什么、实际会发生什么？
 
 3. **测试盲区**：`tests/test_logout.py` 中 9 个用例全部 mock 了 `is_workbuddy_running`。请说明这个函数为什么"客户端在运行"时必须返回 True，以及当前 Linux 分支的实现为什么可能不安全。
 
@@ -584,7 +628,7 @@ res = subprocess.run(["pgrep", "-f", "CodeBuddy"], ...)
 
 - 功能实现与根因分析**有完整源码级证据**。
 - 工程质量与同批 #25 相比，在测试深度、文档完整性、对抗性验证三个维度上**明显偏弱**。
-- 存在 2 处未修复缺陷（1 个 P1、1 个 P2），且其中 P1 与上游语义冲突。
+- 审计发现的 2 处缺陷（P1 的 `-f` 别名、P2 的 uid 未校验）已在审阅后修复并补测；仍有 2 项未处理（Linux 进程探测未验证、备份目录无清理）。
 - Git 使用了独立分支、完成 push 与 PR #27，但**未分阶段提交**（全程仅 2 个 commit，功能与文档各一）。
 - Worktree 与多 Agent **确认未使用**。
 - 学生主导的判断集中在"约束设定"与"优先级纠偏"，**未参与技术方案设计与代码审查**。

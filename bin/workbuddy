@@ -867,9 +867,12 @@ def _logout_cache_targets():
     except Exception:
         uid = None
     if uid:
-        sidebar = os.path.expanduser(SIDEBAR_SNAPSHOT_TEMPLATE.format(uid=uid))
-        if os.path.exists(sidebar):
-            targets.append(sidebar)
+        # uid 读自本地可写文件，只接受安全字符。否则 "../" 之类的值会拼出
+        # ~/.workbuddy 之外的路径，让清理动作越界。
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(uid)):
+            sidebar = os.path.expanduser(SIDEBAR_SNAPSHOT_TEMPLATE.format(uid=uid))
+            if os.path.exists(sidebar):
+                targets.append(sidebar)
     return targets
 
 def run_logout(args):
@@ -879,7 +882,9 @@ def run_logout(args):
     但凭据被删而标记缺失时，会被判定为"凭据意外丢失"并保留内存会话（源码注释 WB-44172），
     表现为"删了文件也退不掉"。所以顺序必须是先写标记、再删凭据，不可颠倒。
     """
-    assume_yes = any(a in ("--yes", "-y", "--force", "-f") for a in args)
+    # 只认 --yes / -y。不再复用 -f / --force：-f 只有两字符容易误触，
+    # 且 --force 在本仓库其他命令里表示"放宽保护"，与"跳过确认"语义相反。
+    assume_yes = any(a in ("--yes", "-y") for a in args)
     deep = "--deep" in args
     allow_running = "--allow-running" in args
 

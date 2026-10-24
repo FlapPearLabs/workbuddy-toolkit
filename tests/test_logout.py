@@ -158,6 +158,39 @@ class TestLogout(unittest.TestCase):
         self.assertTrue(os.path.exists(workbuddy.ACCOUNT_SNAPSHOT_FILE),
                         "不带 --deep 时不应清理账号缓存")
 
+    def test_10_force_is_not_accepted_as_confirm(self):
+        """-f / --force 不再等同于 --yes：误触不能跳过预览直接删凭据。"""
+        self.write_auth()
+        with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+            workbuddy.run_logout(["--force"])
+            workbuddy.run_logout(["-f"])
+        self.assertTrue(os.path.exists(workbuddy.AUTH_FILE),
+                        "带 --force / -f 时不得删除凭据")
+        self.assertFalse(os.path.exists(workbuddy.get_logout_marker_path()))
+
+    def test_11_uid_traversal_ignored_in_deep(self):
+        """uid 含路径穿越字符时，--deep 不得越界清理。"""
+        self.write_auth()
+        sentinel = os.path.join(os.path.dirname(self.test_dir),
+                                "sidebar-list-snapshot.json")
+        with open(sentinel, "w", encoding="utf-8") as f:
+            f.write("sentinel")
+
+        def _cleanup():
+            if os.path.exists(sentinel):
+                os.remove(sentinel)
+        self.addCleanup(_cleanup)
+
+        os.makedirs(os.path.dirname(workbuddy.ACCOUNT_SNAPSHOT_FILE), exist_ok=True)
+        with open(workbuddy.ACCOUNT_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+            json.dump({"primary": {"uid": "../"}}, f)
+
+        with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+            workbuddy.run_logout(["--yes", "--deep"])
+
+        self.assertTrue(os.path.exists(sentinel),
+                        "uid 越界时不得删除 ~/.workbuddy 之外的同名文件")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
