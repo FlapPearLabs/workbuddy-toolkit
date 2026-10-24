@@ -88,6 +88,16 @@ class TestProfileRemove(unittest.TestCase):
         return subprocess.run([sys.executable, script or WB, *args], env=self.env, input=stdin,
                               capture_output=True, text=True, timeout=60)
 
+    def _write_info(self, path, uid, token, nickname="n"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"account": {"uid": uid, "nickname": nickname, "uin": "0"},
+                       "auth": {"accessToken": token, "expiresAt": 0}}, f, ensure_ascii=False)
+
+    def _read_bytes(self, path):
+        with open(path, "rb") as f:
+            return f.read()
+
     def _trash_names(self):
         return sorted(os.listdir(self.trash)) if os.path.isdir(self.trash) else []
 
@@ -382,6 +392,39 @@ class TestProfileRemove(unittest.TestCase):
         r = self._run("checkin")
         self.assertNotIn("跳过自动入库", r.stdout)
         self.assertTrue(os.path.exists(os.path.join(self.prof, "work.info")))
+
+    def test_cancel_is_zero_write(self):
+        """回答 n 时不得改写备份字节（评审行内 P2：原先确认前就 sync 了）"""
+        self._make("work", "uid-work", active=True)
+        prof_path = os.path.join(self.prof, "work.info")
+        self._write_info(prof_path, "uid-work", "OLD", "旧昵称")
+        auth_file = os.path.join(self.base, ".workbuddy", "auth", "workbuddy-desktop.info")
+        self._write_info(auth_file, "uid-work", "NEW", "新昵称")
+        before = self._read_bytes(prof_path)
+
+        r = self._run("remove", "work", stdin="n\n")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("已取消", r.stdout)
+        self.assertEqual(self._read_bytes(prof_path), before, "取消后备份字节被改写")
+        self.assertIn("旧昵称", before.decode("utf-8"))
+
+    def test_sync_only_touches_target_profile(self):
+        """同 uid 的另一个别名不得被同步改写（评审行内 P2：原先写同 uid 全部）"""
+        self._make("alpha", "uid-shared")
+        self._make("beta", "uid-shared")
+        prof_alpha = os.path.join(self.prof, "alpha.info")
+        prof_beta = os.path.join(self.prof, "beta.info")
+        self._write_info(prof_alpha, "uid-shared", "OLD-A", "A")
+        self._write_info(prof_beta, "uid-shared", "OLD-B", "B")
+        auth_file = os.path.join(self.base, ".workbuddy", "auth", "workbuddy-desktop.info")
+        self._write_info(auth_file, "uid-shared", "NEW", "NEW-NICK")
+        before_beta = self._read_bytes(prof_beta)
+
+        r = self._run("remove", "alpha", stdin="y\n")   # 活跃账号 → 二次确认
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self._read_bytes(prof_beta), before_beta, "同 uid 的非目标 profile 被改写")
+        trash_file = os.path.join(self.trash, self._trash_names()[0])
+        self.assertIn("NEW", self._read_bytes(trash_file).decode("utf-8"))
 
     # ---------------- 隔离与跨平台证据（评审标注"无法核验"的三项） ----------------
 

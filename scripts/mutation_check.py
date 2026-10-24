@@ -65,6 +65,13 @@ MUTATIONS = [
         test=CLS + "test_restore_rejects_duplicate_uid",
         why="不去重时恢复出第二份副本，checkin 会对同一账号签两次",
     ),
+    dict(
+        name="回收站文件名防覆盖",
+        old='os.O_CREAT | os.O_EXCL | os.O_WRONLY',
+        new='os.O_CREAT | os.O_WRONLY',
+        test="tests.test_trash_collision.TestTrashCollision.test_collision_keeps_existing_bytes",
+        why="去掉 O_EXCL 后同名占位会覆盖既有回收站文件，软删除静默失效",
+    ),
 ]
 
 

@@ -3102,9 +3102,7 @@ def remove_profile(target_name, assume_yes=False, force=False):
     active_uid = str(active_data.get("account", {}).get("uid") or "").strip() if active_data else None
     is_active = bool(active_uid and active_uid == target["uid"])
     if is_active:
-        # 删除前把客户端里的最新 token 同步回这份备份，保证回收站归档的是
-        # 可恢复的最新凭据，而不是上次 save 时的旧 token
-        sync_active_token_to_profiles()
+        # 警告在确认前展示；但写盘必须等确认之后——用户回答 n 时不能有任何副作用
         print(f"{COLOR_YELLOW}▲ 注意: 这是当前正在登录使用的账号。删除备份不影响本次登录，{COLOR_RESET}")
         print(f"{COLOR_YELLOW}  但 checkin / audit / status 将不再管理它，且每日签到也不会自动重新收录；{COLOR_RESET}")
         print(f"{COLOR_YELLOW}  该账号的登录态在客户端切换/退出后需重新扫码 (workbuddy login)。{COLOR_RESET}")
@@ -3125,6 +3123,21 @@ def remove_profile(target_name, assume_yes=False, force=False):
         if ans not in ("y", "yes"):
             print("已取消。")
             return False
+
+    if is_active:
+        # 确认之后才归档，取消 = 零写入（评审行内 P2：原先写在确认前）。
+        # 且只写即将移走的那一份，不碰同 uid 的其他别名——用户可能刻意保留它们。
+        latest = get_active_account()
+        synced_ok = False
+        if latest:
+            try:
+                atomic_write_json(target["path"], latest)
+                synced_ok = True
+            except Exception:
+                synced_ok = False
+        if not synced_ok:
+            print(f"{COLOR_YELLOW}▲ 警告: 未能把客户端最新凭据写回这份备份。{COLOR_RESET}")
+            print(f"{COLOR_YELLOW}  回收站里保存的可能是上次保存的旧 token，恢复后或需重新扫码。{COLOR_RESET}")
 
     try:
         trash_dir = get_trash_dir()
