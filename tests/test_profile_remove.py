@@ -265,6 +265,17 @@ class TestProfileRemove(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertTrue(os.path.exists(os.path.join(self.prof, "alpha.info")))
 
+    def test_restore_tolerates_surrounding_whitespace(self):
+        # 命令行粘贴常带首尾空白：校验按 strip 后的入参放行，查找也必须用同一份，
+        # 否则 " xxx.info " 会被拼成不存在的 " xxx.info .info" 并误报不存在
+        self._make("alpha", "uid-a")
+        self._run("remove", "alpha", "-y")
+        stamped = self._trash_names()[0]
+        r = self._run("remove", "--restore", f"  {stamped} ")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "alpha.info")))
+        self.assertEqual(self._trash_names(), [])
+
     def test_restore_missing_errors(self):
         r = self._run("remove", "--restore", "ghost")
         self.assertEqual(r.returncode, 1)

@@ -86,7 +86,7 @@ wb-remove --empty-trash [-y]         # 清空回收站（不可恢复）
 
 顶层别名 `rm` / `del` / `delete` 与 `remove` 等价（如 `workbuddy rm <别名>`），仅为习惯兼容；脚本里建议写全 `remove`，避免与 shell 的 `rm` 混淆。
 
-把账号从本地备份库移入回收站（`auth_profiles/.trash/`），文件名统一带删除时间戳，同名同秒碰撞自动追加 `_N` 序号，并用 `O_CREAT|O_EXCL` 原子占位，绝不覆盖既有凭据。
+把账号从本地备份库移入回收站（`auth_profiles/.trash/`），文件名统一带微秒级删除时间戳，同微秒戳碰撞自动追加 `_N` 序号，并用 `O_CREAT|O_EXCL` 原子占位，绝不覆盖既有凭据。
 
 要点：
 

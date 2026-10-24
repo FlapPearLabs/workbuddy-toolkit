@@ -3037,7 +3037,9 @@ def _restore_profile_locked(trash_name):
             or os.sep in raw or (os.altsep and os.altsep in raw) or ":" in raw):
         print(f"{COLOR_RED}错误: 非法的回收站文件名 '{trash_name}'。{COLOR_RESET}")
         return False
-    fname = os.path.basename(str(trash_name).rstrip("/\\"))
+    # 校验用 strip 后的入参（容忍命令行粘贴带入的首尾空白），后续查找也必须
+    # 用同一份，否则 " alpha.info " 会被拼接成不存在的 " alpha.info .info"
+    fname = os.path.basename(raw)
     if not fname.endswith(".info"):
         fname += ".info"
     src = os.path.join(trash_dir, fname)
