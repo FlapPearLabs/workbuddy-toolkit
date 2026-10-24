@@ -92,6 +92,7 @@ if [ -f "$SCRIPT_DIR/bin/workbuddy-log-guard" ]; then
     chmod +x "$INSTALL_BIN/workbuddy-log-guard"
 fi
 
+# 别名清单需与 install.py 的 WINDOWS_SUBCOMMAND_SHIMS、uninstall.py 的 CLI_NAMES 保持一致
 for alias in wb-help workbuddy-help wb-login workbuddy-login wb-remove workbuddy-remove wb-audit workbuddy-audit \
              wb-list workbuddy-list wb-status workbuddy-status wb-switch workbuddy-switch \
              wb-checkin workbuddy-checkin wb-chat workbuddy-chat wb-doctor workbuddy-doctor \

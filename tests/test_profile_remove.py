@@ -64,8 +64,7 @@ class TestProfileRemove(unittest.TestCase):
         self.base = tempfile.mkdtemp(prefix="wb_remove_case_")
         self.env = dict(os.environ, USERPROFILE=self.base, HOME=self.base,
                         APPDATA=os.path.join(self.base, "AppData", "Roaming"),
-                        LOCALAPPDATA=os.path.join(self.base, "AppData", "Local"),
-                        WB_NO_NOTIFY="1")   # 假账号不得触发真实桌面通知
+                        LOCALAPPDATA=os.path.join(self.base, "AppData", "Local"))
         self.prof = os.path.join(self.base, ".workbuddy", "auth_profiles")
         os.makedirs(self.prof)
         self.trash = os.path.join(self.prof, ".trash")
@@ -248,12 +247,14 @@ class TestProfileRemove(unittest.TestCase):
         self.assertIn("回收站为空", r.stdout)
 
     def test_restore_moves_back(self):
+        """恢复必须还原删除前的别名，而不是把时间戳带进别名"""
         self._make("alpha", "uid-a")
         self._run("remove", "alpha", "-y")
         stamped = self._trash_names()[0]
         r = self._run("remove", "--restore", stamped)
         self.assertEqual(r.returncode, 0)
-        self.assertTrue(os.path.exists(os.path.join(self.prof, stamped)))
+        self.assertIn("已恢复为账号别名 'alpha'", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "alpha.info")))
         self.assertEqual(self._trash_names(), [])
 
     def test_restore_accepts_name_without_suffix(self):
@@ -262,7 +263,7 @@ class TestProfileRemove(unittest.TestCase):
         stamped = self._trash_names()[0]
         r = self._run("remove", "--restore", stamped[:-5])  # 不带 .info 后缀
         self.assertEqual(r.returncode, 0)
-        self.assertTrue(os.path.exists(os.path.join(self.prof, stamped)))
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "alpha.info")))
 
     def test_restore_missing_errors(self):
         r = self._run("remove", "--restore", "ghost")
@@ -377,9 +378,8 @@ class TestProfileRemove(unittest.TestCase):
 
         r = self._run("remove", "--restore", "../victim")
         self.assertEqual(r.returncode, 1)
-        # basename 先把路径压回文件名，所以查找范围始终在 .trash 内；
-        # 去掉 basename 才会走到"非法文件名"分支——两种都拒绝，这里锁定"不越界查找"
-        self.assertIn("回收站里没有", r.stdout)
+        # 入参带路径成分时直接拒绝，连 .trash 之外的路径都不会被查找
+        self.assertIn("非法的回收站文件名", r.stdout)
         with open(outside, "rb") as f:
             self.assertEqual(f.read(), before, "备份库外的文件被搬动")
         self.assertFalse(os.path.exists(os.path.join(self.prof, "victim.info")))
@@ -396,6 +396,59 @@ class TestProfileRemove(unittest.TestCase):
         self.assertIn("已在备份库中", r.stdout)
         self.assertIn(stamped, self._trash_names())
         self.assertTrue(os.path.exists(os.path.join(self.prof, "beta.info")))
+
+    def test_restore_rejects_corrupt_entry(self):
+        """0 字节/坏 JSON 不得恢复成功——否则备份库会出现命令看不见的账号"""
+        os.makedirs(self.trash, exist_ok=True)
+        bad = os.path.join(self.trash, "broken.20261024-120000-000000.info")
+        open(bad, "wb").close()
+        r = self._run("remove", "--restore", "broken.20261024-120000-000000.info")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("无法解析", r.stdout)
+        self.assertTrue(os.path.exists(bad), "坏条目被搬走或删除了")
+        self.assertEqual([f for f in os.listdir(self.prof) if f.endswith(".info")], [])
+
+    def test_restore_rejects_missing_uid(self):
+        os.makedirs(self.trash, exist_ok=True)
+        p = os.path.join(self.trash, "noid.20261024-120000-000000.info")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write('{"account": {"nickname": "x"}}')
+        r = self._run("remove", "--restore", "noid.20261024-120000-000000.info")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("缺少账号 uid", r.stdout)
+        self.assertTrue(os.path.exists(p))
+
+    def test_restore_restores_alias_with_suffix_on_collision(self):
+        """原别名被其他账号占用时用 _1，绝不覆盖既有凭据"""
+        self._make("alpha", "uid-a")
+        self._run("remove", "alpha", "-y")
+        stamped = self._trash_names()[0]
+        self._write_info(os.path.join(self.prof, "alpha.info"), "uid-other", "OTHER", "其他")
+        before = self._read_bytes(os.path.join(self.prof, "alpha.info"))
+
+        r = self._run("remove", "--restore", stamped)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("alpha_1", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "alpha_1.info")))
+        self.assertEqual(self._read_bytes(os.path.join(self.prof, "alpha.info")), before)
+
+    def test_restore_rejects_option_as_filename(self):
+        r = self._run("remove", "--restore", "-y")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("而不是选项", r.stdout)
+
+    def test_checkin_fails_closed_on_corrupt_trash(self):
+        """回收站条目读不出时，签到必须放弃自动入库，而不是把已删账号复活"""
+        auth = os.path.join(self.base, ".workbuddy", "auth", "workbuddy-desktop.info")
+        self._write_info(auth, "uid-new", "TOKEN", "新号")
+        os.makedirs(self.trash, exist_ok=True)
+        with open(os.path.join(self.trash, "broken.info"), "w", encoding="utf-8") as f:
+            f.write("{")
+
+        r = self._run("checkin")
+        self.assertIn("跳过自动入库", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.prof, "新号.info")),
+                         "墓碑读不出时仍然把账号自动入库了")
 
     def test_tombstone_does_not_shadow_resaved_account(self):
         """删号后重新 save 同 uid：签到不该每天刷"已被删除，跳过自动入库"的假消息。

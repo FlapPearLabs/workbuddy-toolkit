@@ -2524,11 +2524,6 @@ def notify_desktop(title, message):
     title_str = str(title)
     msg_str = str(message)
 
-    if os.environ.get("WB_NO_NOTIFY") == "1":
-        # 测试/CI 里的假账号会触发真实桌面通知，用户会以为自己的凭据失效了。
-        # 需要断言通知内容的用例请直接 patch 本函数，而不是让它真的弹窗。
-        return False
-
     if sys.platform == "darwin":
         try:
             safe_title = title_str.replace('\\', '\\\\').replace('"', '\\"').replace('\r', ' ').replace('\n', ' ')
@@ -2619,9 +2614,16 @@ def run_checkin(target_name=None, with_chat=True):
         already_saved = active_uid and any(p["uid"] == active_uid for p in profiles.values())
         # 墓碑检查放在"是否已在库"之后：用户删号后重新 login 并 save 了新副本时，
         # 不该每天刷一条"跳过自动入库"的假消息——那不是跳过，是本来就没有要入库
-        if active_uid and not already_saved and active_uid in get_trashed_uids():
+        trashed = None
+        if active_uid and not already_saved:
+            try:
+                trashed = get_trashed_uids(strict=True)
+            except OSError as e:
+                # fail closed：读不出墓碑时宁可不入库，也不能把已删账号复活
+                print(f"{COLOR_YELLOW}▲ 警告: {e}；本次跳过自动入库，避免已删账号被重新收录。{COLOR_RESET}")
+        if active_uid and not already_saved and trashed is not None and active_uid in trashed:
             print("（当前登录账号的 Profile 已被删除，跳过自动入库）")
-        elif active_uid and not already_saved:
+        elif active_uid and not already_saved and trashed is not None:
             nickname = get_display_nickname(active_data.get("account", {}) if isinstance(active_data, dict) else {}, default_name=str(active_uid)[:8])
             clean_name = re.sub(r"[^\w\-]", "_", str(nickname)).strip("_") or str(active_uid)[:8]
             cand = clean_name
@@ -2969,11 +2971,14 @@ def _trash_files():
     except OSError:
         return []
 
-def get_trashed_uids():
+def get_trashed_uids(strict=False):
     """回收站里所有凭据的 uid 集合，用作删除墓碑。
 
     run_checkin 的自动发现据此跳过已删账号——否则用户删掉的账号会在
     次日签到时以昵称别名被静默重新收录，别名还可能与既有账号撞车。
+
+    strict=True 时任一条目读取失败就抛 OSError（fail closed）：调用方宁可
+    跳过本次自动入库，也不能因为读不出墓碑把已删账号复活。
     """
     uids = set()
     for fname in _trash_files():
@@ -2983,8 +2988,9 @@ def get_trashed_uids():
             uid = (data.get("account", {}) or {}).get("uid") if isinstance(data, dict) else None
             if uid:
                 uids.add(str(uid).strip())
-        except Exception:
-            pass
+        except Exception as e:
+            if strict:
+                raise OSError(f"回收站条目 '{fname}' 读取失败: {e}")
     return uids
 
 def list_trash():
@@ -3006,8 +3012,8 @@ def list_trash():
 def restore_profile(trash_name):
     """把回收站里的凭据移回 profiles 备份库。
 
-    文件名中的时间戳后缀会成为账号别名（如 alpha.20261024-120000），
-    与 remove 时的提示一致；如需短别名，恢复后手工重命名 .info 文件即可。
+    自动还原删除前的别名（`<别名>.<时间戳>[_N].info` → `<别名>.info`）；
+    原别名已被其他账号占用时自动追加 `_1/_2`，不覆盖任何既有凭据。
     """
     try:
         with _TrashLock():
@@ -3018,43 +3024,68 @@ def restore_profile(trash_name):
         return False
 
 def _restore_profile_locked(trash_name):
-    """restore_profile 的锁内实现：查重 + 同 uid 校验 + 原子搬回。"""
+    """restore_profile 的锁内实现：入参/内容校验 + 还原别名 + 原子搬回。
+
+    校验全部 fail closed：带路径成分的入参、读不出的条目、缺 uid、同 uid
+    已存在，都拒绝恢复并原样留在回收站——绝不把坏条目搬进备份库造出
+    "文件在、所有命令都看不见"的隐形账号。
+    """
     trash_dir = get_trash_dir()
-    # 只从 .trash 取、只往库根放：文件名来自用户输入，必须剥掉任何路径成分，
-    # 否则 `--restore ../alpha` 会把凭据搬出备份库且绕过所有确认
+    raw = str(trash_name).strip()
+    # 只接受纯文件名：带任何路径成分都直接拒绝（不是静默 basename 后继续）
+    if (not raw or raw in (".", "..") or "/" in raw
+            or os.sep in raw or (os.altsep and os.altsep in raw) or ":" in raw):
+        print(f"{COLOR_RED}错误: 非法的回收站文件名 '{trash_name}'。{COLOR_RESET}")
+        return False
     fname = os.path.basename(str(trash_name).rstrip("/\\"))
     if not fname.endswith(".info"):
         fname += ".info"
     src = os.path.join(trash_dir, fname)
-    if os.path.dirname(os.path.normpath(src)) != os.path.normpath(trash_dir):
-        print(f"{COLOR_RED}错误: 非法的回收站文件名 '{trash_name}'。{COLOR_RESET}")
-        return False
     if not os.path.isfile(src):
         print(f"{COLOR_RED}错误: 回收站里没有 '{fname}'。{COLOR_RESET}")
         list_trash()
         return False
-    dst = os.path.join(PROFILES_DIR, fname)
-    if os.path.exists(dst):
-        print(f"{COLOR_RED}错误: 备份库里已存在 '{fname}'，请先处理同名冲突。{COLOR_RESET}")
-        return False
-    # 同 uid 去重：恢复出同 uid 的第二份副本会让 checkin 对同一账号签两次
+    # 内容校验 fail closed：坏 JSON / 缺 uid 的条目绝不能搬进备份库
     try:
         with open(src, "r", encoding="utf-8") as f:
-            uid = str((json.load(f).get("account", {}) or {}).get("uid") or "").strip()
-        existing = {p["uid"]: name for name, p in get_profiles().items() if p.get("uid")}
-        if uid and uid in existing:
-            print(f"{COLOR_RED}错误: 该账号已在备份库中（别名 '{existing[uid]}'），无需恢复；{COLOR_RESET}")
-            print(f"{COLOR_RED}  如需覆盖请先删除 '{existing[uid]}'。{COLOR_RESET}")
-            return False
-    except Exception:
-        pass
+            data = json.load(f)
+    except Exception as e:
+        print(f"{COLOR_RED}错误: '{fname}' 无法解析（{e}），已保留在回收站。{COLOR_RESET}")
+        return False
+    acc = data.get("account") if isinstance(data, dict) and isinstance(data.get("account"), dict) else {}
+    uid = str((acc or {}).get("uid") or "").strip()
+    if not uid:
+        print(f"{COLOR_RED}错误: '{fname}' 缺少账号 uid，已保留在回收站。{COLOR_RESET}")
+        return False
+
+    # 同 uid 去重：恢复出同 uid 的第二份副本会让 checkin 对同一账号签两次
+    existing = {p["uid"]: name for name, p in get_profiles().items() if p.get("uid")}
+    if uid in existing:
+        print(f"{COLOR_RED}错误: 该账号已在备份库中（别名 '{existing[uid]}'），无需恢复；{COLOR_RESET}")
+        print(f"{COLOR_RED}  如需覆盖请先删除 '{existing[uid]}'。{COLOR_RESET}")
+        return False
+
+    # 还原原始别名：<别名>.<YYYYmmdd-HHMMSS-ffffff>[_N].info → <别名>
+    stem = fname[:-5]
+    m = re.match(r"^(?P<alias>.+)\.\d{8}-\d{6}-\d{6}(?:_\d+)?$", stem)
+    original_alias = m.group("alias") if m else stem
+    original_alias = re.sub(r"[^\w\-]", "_", original_alias).strip("_") or "account_restored"
+    dst_alias = original_alias
+    seq = 1
+    while os.path.exists(os.path.join(PROFILES_DIR, f"{dst_alias}.info")):
+        dst_alias = f"{original_alias}_{seq}"
+        seq += 1
+    dst = os.path.join(PROFILES_DIR, f"{dst_alias}.info")
+
     try:
         os.replace(src, dst)
     except OSError as e:
         print(f"{COLOR_RED}恢复失败: {e}{COLOR_RESET}")
         return False
-    alias = fname[:-5]
-    print(f"{COLOR_GREEN}✔ 已恢复为账号别名 '{alias}'，用 wb-list 确认。如需短别名，直接重命名 .info 文件。{COLOR_RESET}")
+    if dst_alias == original_alias:
+        print(f"{COLOR_GREEN}✔ 已恢复为账号别名 '{dst_alias}'，用 wb-list 确认。{COLOR_RESET}")
+    else:
+        print(f"{COLOR_GREEN}✔ 已恢复为账号别名 '{dst_alias}'（原别名 '{original_alias}' 已被占用，自动加序号）。{COLOR_RESET}")
     return True
 
 def empty_trash(force=False):
@@ -3161,7 +3192,11 @@ def remove_main(args):
             print(f"{COLOR_RED}错误: --restore 需要提供回收站文件名。{COLOR_RESET}")
             list_trash()
             sys.exit(1)
-        sys.exit(0 if restore_profile(args[idx + 1]) else 1)
+        value = args[idx + 1]
+        if value.startswith("-"):
+            print(f"{COLOR_RED}错误: --restore 需要回收站文件名，而不是选项 '{value}'。{COLOR_RESET}")
+            sys.exit(1)
+        sys.exit(0 if restore_profile(value) else 1)
 
     clean_args = [a for a in args if not a.startswith("-")]
     if len(clean_args) > 1:
@@ -3186,7 +3221,8 @@ def remove_profile(target_name, assume_yes=False, force=False):
     - force=True：放宽活跃账号保护，不再要求二次确认（对应 --force）
     """
     profiles = get_profiles()
-    matched_name, target = resolve_profile_target(profiles, target_name, allow_uid_prefix=False, quiet=True)
+    # quiet=False：歧义时由解析器直接列出候选，而不是只回落到全量别名列表
+    matched_name, target = resolve_profile_target(profiles, target_name, allow_uid_prefix=False, quiet=False)
     if not target:
         print(f"{COLOR_RED}错误: 未找到唯一匹配 '{target_name}' 的账号凭证（不存在或存在歧义）。{COLOR_RESET}")
         print(f"可用账号列表: {', '.join(profiles.keys()) if profiles else '（空）'}")

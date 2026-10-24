@@ -395,5 +395,15 @@ class TestInstallerLayouts(unittest.TestCase):
         self.assertEqual(self._sidecar_files(clone), before)
 
 
+class TestAliasConsistency(unittest.TestCase):
+    """三处别名清单必须都注册 wb-remove（评审指出缺一致性测试兜底）"""
+
+    def test_remove_alias_registered_in_all_installers(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for name in ("install.py", "install.sh", "uninstall.py"):
+            with open(os.path.join(root, name), "r", encoding="utf-8") as f:
+                self.assertIn("wb-remove", f.read(), f"{name} 未注册 wb-remove")
+
+
 if __name__ == "__main__":
     unittest.main()

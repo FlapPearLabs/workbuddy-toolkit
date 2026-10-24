@@ -32,10 +32,10 @@ MUTATIONS = [
     ),
     dict(
         name="--restore 路径穿越",
-        old=r'fname = os.path.basename(str(trash_name).rstrip("/\\"))',
-        new=r'fname = str(trash_name).rstrip("/\\")',
+        old='if (not raw or raw in (".", "..") or "/" in raw',
+        new='if False and (not raw or raw in (".", "..") or "/" in raw',
         test=CLS + "test_restore_rejects_path_traversal",
-        why="不剥路径成分时，恢复会越出 .trash 查找/搬动外部文件",
+        why="不校验路径成分时，恢复会越出 .trash 查找/搬动外部文件",
     ),
     dict(
         name="模式 flag 互斥",
@@ -46,21 +46,23 @@ MUTATIONS = [
     ),
     dict(
         name="墓碑判断顺序",
-        old='if active_uid and not already_saved and active_uid in get_trashed_uids():',
-        new='if active_uid and active_uid in get_trashed_uids():',
+        old=['if active_uid and not already_saved:\n            try:\n                trashed = get_trashed_uids(strict=True)',
+             'if active_uid and not already_saved and trashed is not None and active_uid in trashed:'],
+        new=['if active_uid:\n            try:\n                trashed = get_trashed_uids(strict=True)',
+             'if active_uid and trashed is not None and active_uid in trashed:'],
         test=CLS + "test_tombstone_does_not_shadow_resaved_account",
         why="先判墓碑会让重新 save 的账号每天刷一条假的'跳过自动入库'",
     ),
     dict(
         name="墓碑机制本身",
-        old='if active_uid and not already_saved and active_uid in get_trashed_uids():',
+        old='if active_uid and not already_saved and trashed is not None and active_uid in trashed:',
         new='if False:  # mutated',
         test=CLS + "test_remove_active_account_warns_and_tombstones",
         why="没有墓碑时，已删账号次日签到会以昵称别名被重新收录",
     ),
     dict(
         name="同 uid 恢复去重",
-        old='if uid and uid in existing:',
+        old='if uid in existing:',
         new='if False:  # mutated',
         test=CLS + "test_restore_rejects_duplicate_uid",
         why="不去重时恢复出第二份副本，checkin 会对同一账号签两次",
@@ -80,11 +82,36 @@ MUTATIONS = [
              "test_active_switch_during_confirm_does_not_overwrite_backup",
         why="不校验 uid 会把切号后的 B 凭据写进 A 的备份，A 的原始字节永久丢失",
     ),
+    dict(
+        name="删除互斥锁(Windows)",
+        old='msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)',
+        new='pass  # mutated',
+        test="tests.test_trash_lock.TestTrashLock.test_lock_serializes_two_processes",
+        why="去掉字节锁后两个进程会同时进入临界区，回收站互斥失效",
+        platform="win32",
+    ),
+    dict(
+        name="删除互斥锁(POSIX)",
+        old='fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)',
+        new='pass  # mutated',
+        test="tests.test_trash_lock.TestTrashLock.test_lock_serializes_two_processes",
+        why="去掉 flock 后两个进程会同时进入临界区，回收站互斥失效",
+        platform=("linux", "darwin"),
+    ),
 ]
 
 
+def _applies(m):
+    p = m.get("platform")
+    if p is None:
+        return True
+    if isinstance(p, str):
+        return sys.platform == p
+    return sys.platform in p
+
+
 def run_test(test_id, wb_path=None):
-    env = dict(os.environ, WB_NO_NOTIFY="1", PYTHONIOENCODING="utf-8")
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
     if wb_path:
         env["WB_BIN"] = wb_path
     return subprocess.run(
@@ -97,28 +124,39 @@ def main():
     with open(SOURCE, "r", encoding="utf-8") as f:
         source = f.read()
 
+    # 只跑当前平台适用的变异（Windows 字节锁 / POSIX flock 各一条）
+    muts = [m for m in MUTATIONS if _applies(m)]
+
     # 先确认每个被变异用例在未变异时都是绿的，否则"变异后报错"会被误判为 CAUGHT
-    for m in MUTATIONS:
+    for m in muts:
         baseline = run_test(m["test"])
         if baseline.returncode != 0:
             print("[FAIL] 基线未通过：%s" % m["test"])
             print((baseline.stdout + baseline.stderr)[-800:])
             return 1
-    print("基线 %d/%d OK\n" % (len(MUTATIONS), len(MUTATIONS)))
+    print("基线 %d/%d OK\n" % (len(muts), len(muts)))
 
     tmpdir = tempfile.mkdtemp(prefix="wb_mutation_")
     mutant = os.path.join(tmpdir, "workbuddy")
     rows, escaped = [], []
 
-    for m in MUTATIONS:
-        count = source.count(m["old"])
-        if count != 1:
-            rows.append((m["name"], "SKIP", "变异点出现 %d 次，无法唯一定位" % count))
+    for m in muts:
+        olds = m["old"] if isinstance(m["old"], (list, tuple)) else [m["old"]]
+        news = m["new"] if isinstance(m["new"], (list, tuple)) else [m["new"]]
+        body, bad = source, None
+        for old, new in zip(olds, news):
+            count = body.count(old)
+            if count != 1:
+                bad = "变异点出现 %d 次，无法唯一定位" % count
+                break
+            body = body.replace(old, new, 1)
+        if bad:
+            rows.append((m["name"], "SKIP", bad))
             escaped.append(m["name"])
             continue
 
         with open(mutant, "w", encoding="utf-8") as f:
-            f.write(source.replace(m["old"], m["new"], 1))
+            f.write(body)
 
         r = run_test(m["test"], wb_path=mutant)
         out = r.stdout + r.stderr

@@ -158,6 +158,9 @@ wb-list       查看已保存账号
 wb-status     查看当前账号与凭据状态
 wb-switch     切换账号
 wb-remove     删除账号（移入本地回收站，可恢复）
+wb-remove --list-trash       查看回收站
+wb-remove --restore <文件名> 恢复单个账号
+wb-remove --empty-trash      清空回收站（不可恢复）
 wb-audit      检查账号健康度
 ```
 
