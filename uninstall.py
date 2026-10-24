@@ -44,6 +44,7 @@ CLI_NAMES = [
     "workbuddy", "workbuddy-log-guard",
     "wb-help", "workbuddy-help", "wb-login", "workbuddy-login", "wb-audit", "workbuddy-audit",
     "wb-list", "workbuddy-list", "wb-status", "workbuddy-status", "wb-switch", "workbuddy-switch",
+    "wb-remove", "workbuddy-remove",
     "wb-checkin", "workbuddy-checkin", "wb-chat", "workbuddy-chat", "wb-doctor", "workbuddy-doctor",
     "wb-models", "workbuddy-models", "wb-usage", "workbuddy-usage", "wb-router", "workbuddy-router",
     "wb-sandbox", "workbuddy-sandbox", "wb-tool", "workbuddy-tool",
