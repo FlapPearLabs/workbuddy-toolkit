@@ -436,5 +436,77 @@ class TestInstallerLayouts(unittest.TestCase):
         self.assertEqual(self._sidecar_files(clone), before)
 
 
+class TestAliasConsistency(unittest.TestCase):
+    """三处别名清单必须逐项一致（只 assertIn "wb-remove" 抓不住其他别名漂移）。
+
+    数据源：install.py 的 WINDOWS_SUBCOMMAND_SHIMS（15 个子命令 × 2 种形式）。
+    install.sh 的软链 for 循环与 uninstall.py 的 CLI_NAMES 都要与之对齐。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import ast
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        def _load(name):
+            with open(os.path.join(root, name), "r", encoding="utf-8") as f:
+                return f.read()
+
+        # install.py：AST 解析 WINDOWS_SUBCOMMAND_SHIMS，不 import（避免执行模块级副作用）
+        shims = None
+        for node in ast.walk(ast.parse(_load("install.py"))):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "WINDOWS_SUBCOMMAND_SHIMS"
+                for t in node.targets
+            ):
+                shims = {
+                    k.value: [e.value for e in v.elts]
+                    for k, v in zip(node.value.keys, node.value.values)
+                }
+                break
+        assert shims is not None, "install.py 里找不到 WINDOWS_SUBCOMMAND_SHIMS"
+        cls.subcommands = set(shims)
+        cls.shim_aliases = {n for names in shims.values() for n in names}
+
+        # install.sh：提取 `for alias in ... do` 的清单（跨行）
+        m = re.search(r"for\s+alias\s+in\s+(.*?)\s*;\s*do", _load("install.sh"), re.S)
+        assert m, "install.sh 里找不到别名 for 循环"
+        cls.sh_aliases = {t for t in m.group(1).split() if t != "\\"}  # 丢弃续行符
+
+        # uninstall.py：AST 解析 CLI_NAMES
+        names = None
+        for node in ast.walk(ast.parse(_load("uninstall.py"))):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "CLI_NAMES" for t in node.targets
+            ):
+                names = [e.value for e in node.value.elts]
+                break
+        assert names is not None, "uninstall.py 里找不到 CLI_NAMES"
+        cls.uninstall_names = set(names)
+
+    def test_install_sh_matches_shims(self):
+        self.assertEqual(
+            self.sh_aliases, self.shim_aliases,
+            "install.sh 软链清单与 install.py 的 WINDOWS_SUBCOMMAND_SHIMS 不一致："
+            f"sh 缺 {sorted(self.shim_aliases - self.sh_aliases)}，"
+            f"sh 多 {sorted(self.sh_aliases - self.shim_aliases)}",
+        )
+
+    def test_uninstall_matches_shims(self):
+        # uninstall 额外清理两个主程序名
+        expected = self.shim_aliases | {"workbuddy", "workbuddy-log-guard"}
+        self.assertEqual(
+            self.uninstall_names, expected,
+            "uninstall.py 的 CLI_NAMES 与别名数据源不一致："
+            f"缺 {sorted(expected - self.uninstall_names)}，"
+            f"多 {sorted(self.uninstall_names - expected)}",
+        )
+
+    def test_every_subcommand_has_both_forms(self):
+        for cmd in self.subcommands:
+            self.assertIn(f"wb-{cmd}", self.shim_aliases, f"子命令 {cmd} 缺 wb- 形式")
+            self.assertIn(f"workbuddy-{cmd}", self.shim_aliases, f"子命令 {cmd} 缺全拼形式")
+
+
 if __name__ == "__main__":
     unittest.main()

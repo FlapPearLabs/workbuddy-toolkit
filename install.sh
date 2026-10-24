@@ -92,14 +92,15 @@ if [ -f "$SCRIPT_DIR/bin/workbuddy-log-guard" ]; then
     chmod +x "$INSTALL_BIN/workbuddy-log-guard"
 fi
 
-for alias in wb-help workbuddy-help wb-login workbuddy-login wb-audit workbuddy-audit \
+# 别名清单需与 install.py 的 WINDOWS_SUBCOMMAND_SHIMS、uninstall.py 的 CLI_NAMES 保持一致
+for alias in wb-help workbuddy-help wb-login workbuddy-login wb-remove workbuddy-remove wb-audit workbuddy-audit \
              wb-list workbuddy-list wb-status workbuddy-status wb-switch workbuddy-switch \
              wb-checkin workbuddy-checkin wb-chat workbuddy-chat wb-doctor workbuddy-doctor \
              wb-models workbuddy-models wb-usage workbuddy-usage wb-router workbuddy-router \
              wb-sandbox workbuddy-sandbox wb-tool workbuddy-tool; do
     ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/$alias"
 done
-echo "   ✔ 已安装: workbuddy, workbuddy-log-guard, wb-tool, wb-help, wb-login, wb-audit, wb-list, wb-status, wb-switch, wb-checkin, wb-chat, wb-doctor, wb-models, wb-usage, wb-router, wb-sandbox"
+echo "   ✔ 已安装: workbuddy, workbuddy-log-guard, wb-tool, wb-help, wb-login, wb-remove, wb-audit, wb-list, wb-status, wb-switch, wb-checkin, wb-chat, wb-doctor, wb-models, wb-usage, wb-router, wb-sandbox"
 
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
     echo "   [提示] $HOME/.local/bin 似乎不在您的环境变量 PATH 中。"

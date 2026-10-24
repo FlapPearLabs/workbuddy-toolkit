@@ -691,18 +691,22 @@ class TestWorkBuddyCore(unittest.TestCase):
                 "auth": {"accessToken": "valid_token", "expiresAt": 1900000000000}
             }, f)
 
-        ok = workbuddy.run_audit(force=False)
-        self.assertTrue(ok)
+        with patch.object(workbuddy, "notify_desktop") as mock_notify:
+            ok = workbuddy.run_audit(force=False)
+            self.assertTrue(ok)
+            mock_notify.assert_not_called()   # 健康时不打扰
 
-        dead_path = os.path.join(workbuddy.PROFILES_DIR, "aud_dead.info")
-        with open(dead_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "account": {"uid": "uid_aud_2", "nickname": "AudDead"},
-                "auth": {"accessToken": "dead_token", "expiresAt": 1000, "refreshExpiresAt": 1000}
-            }, f)
+            dead_path = os.path.join(workbuddy.PROFILES_DIR, "aud_dead.info")
+            with open(dead_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "account": {"uid": "uid_aud_2", "nickname": "AudDead"},
+                    "auth": {"accessToken": "dead_token", "expiresAt": 1000, "refreshExpiresAt": 1000}
+                }, f)
 
-        ok2 = workbuddy.run_audit(force=False)
-        self.assertFalse(ok2)
+            ok2 = workbuddy.run_audit(force=False)
+            self.assertFalse(ok2)
+            # 失效时必须告警——但用 mock 验证，不再真的弹系统通知
+            mock_notify.assert_called_once()
 
     def test_t23_switch_to_profile_expired_protection(self):
         """T23: switch_to_profile guards against switching to expired profile"""

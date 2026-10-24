@@ -156,6 +156,12 @@ ACCOUNT_MENU_ITEMS = [
         "action": "account_list",
     },
     {
+        "id": "5",
+        "name": "删除账号",
+        "desc": "将账号移入本地回收站，客户端登录不受影响",
+        "action": "account_remove",
+    },
+    {
         "id": "0",
         "name": "返回上级",
         "desc": "返回工具箱主菜单",
@@ -406,6 +412,9 @@ class InteractiveToolController:
                 show_status = self.context.get("show_status")
                 if show_status:
                     show_status(as_json=False)
+            elif action_key == "account_remove":
+                self.action_history.append("删除账号")
+                self._handle_account_remove()
             elif action_key == "do_checkin":
                 self.action_history.append("每日签到")
                 run_checkin = self.context.get("run_checkin")
@@ -495,6 +504,44 @@ class InteractiveToolController:
             print(f"{COLOR_RED}请输入正确的数字。{COLOR_RESET}")
         except (KeyboardInterrupt, EOFError):
             pass
+
+    def _handle_account_remove(self):
+        """交互式删除账号：移入本地回收站，可手工移回恢复"""
+        get_profiles = self.context.get("get_profiles")
+        remove_profile = self.context.get("remove_profile")
+        get_active_account = self.context.get("get_active_account")
+
+        profiles = get_profiles() if get_profiles else {}
+        if not profiles:
+            print(f"{COLOR_RED}本地没有已保存的账号凭证，无需删除。{COLOR_RESET}")
+            return
+
+        active_data = get_active_account() if get_active_account else None
+        active_uid = active_data.get("account", {}).get("uid") if active_data else None
+
+        keys = list(profiles.keys())
+        print(f"\n{COLOR_BOLD}请选择要删除的账号 (将移入本地回收站，客户端当前登录不受影响):{COLOR_RESET}")
+        for idx, name in enumerate(keys, 1):
+            p = profiles[name]
+            is_cur = (p.get("uid") == active_uid)
+            cur_mark = f" {COLOR_YELLOW}(当前使用中){COLOR_RESET}" if is_cur else ""
+            print(f"  [{idx}] {name:<12} (昵称: {p.get('nickname')}){cur_mark}")
+        print("  [0] 返回上级")
+
+        try:
+            choice = input(f"{COLOR_BOLD}请输入账号序号 [1-{len(keys)}]: {COLOR_RESET}").strip()
+            if choice in ("0", "q", "exit", ""):
+                return
+            idx = int(choice)
+            if 1 <= idx <= len(keys):
+                if remove_profile:
+                    remove_profile(keys[idx - 1])
+            else:
+                print(f"{COLOR_RED}无效的序号: {choice}{COLOR_RESET}")
+        except ValueError:
+            print(f"{COLOR_RED}请输入正确的数字序号。{COLOR_RESET}")
+        except (KeyboardInterrupt, EOFError):
+            print("\n已取消。")
 
     def _handle_account_login(self):
         """扫码录入新账号"""

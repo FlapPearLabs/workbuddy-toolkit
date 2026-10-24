@@ -93,6 +93,7 @@ class TestInteractiveToolStateMachine(unittest.TestCase):
             "get_active_account": MagicMock(return_value={"account": {"uid": "u1", "nickname": "测试账号"}}),
             "get_profiles": MagicMock(return_value={"test_alias": {"uid": "u1", "nickname": "测试账号"}}),
             "switch_to_profile": MagicMock(return_value=True),
+            "remove_profile": MagicMock(return_value=True),
             "run_login": MagicMock(),
             "run_audit": MagicMock(return_value=True),
             "run_checkin": MagicMock(),

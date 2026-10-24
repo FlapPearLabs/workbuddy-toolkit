@@ -2024,7 +2024,8 @@ def show_status(as_json=False):
             "platform": sys.platform,
             "active_account": active_dict,
             "profiles": profiles_list,
-            "total_profiles": len(profiles_list)
+            "total_profiles": len(profiles_list),
+            "trash_count": len(_trash_files())
         }
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
@@ -2110,6 +2111,9 @@ def show_status(as_json=False):
         else:
             exp_label = "有效期至: 未知"
         print(f" {tag} • {COLOR_BOLD}{name:<12}{COLOR_RESET} 昵称: {p.get('nickname', name)} (UID: {masked_uid}) [{p_fmt}] {h_badge} {exp_label}")
+    trash_n = len(_trash_files())
+    if trash_n:
+        print(f"\n回收站: {trash_n} 项 (查看: workbuddy remove --list-trash / 恢复: workbuddy remove --restore <文件名>)")
     print()
 
 def _linux_app_pids(app_path=None):
@@ -2606,7 +2610,20 @@ def run_checkin(target_name=None, with_chat=True):
     # 自动发现：如果当前客户端登录了一个尚未保存到 profiles 的新账号，自动识别并保存入库
     if active_data:
         active_uid = active_data.get("account", {}).get("uid") if isinstance(active_data, dict) and isinstance(active_data.get("account"), dict) else None
-        if active_uid and not any(p["uid"] == active_uid for p in profiles.values()):
+        active_uid = str(active_uid or "").strip() or None
+        already_saved = active_uid and any(p["uid"] == active_uid for p in profiles.values())
+        # 墓碑检查放在"是否已在库"之后：用户删号后重新 login 并 save 了新副本时，
+        # 不该每天刷一条"跳过自动入库"的假消息——那不是跳过，是本来就没有要入库
+        trashed = None
+        if active_uid and not already_saved:
+            try:
+                trashed = get_trashed_uids(strict=True)
+            except OSError as e:
+                # fail closed：读不出墓碑时宁可不入库，也不能把已删账号复活
+                print(f"{COLOR_YELLOW}▲ 警告: {e}；本次跳过自动入库，避免已删账号被重新收录。{COLOR_RESET}")
+        if active_uid and not already_saved and trashed is not None and active_uid in trashed:
+            print("（当前登录账号的 Profile 已被删除，跳过自动入库）")
+        elif active_uid and not already_saved and trashed is not None:
             nickname = get_display_nickname(active_data.get("account", {}) if isinstance(active_data, dict) else {}, default_name=str(active_uid)[:8])
             clean_name = re.sub(r"[^\w\-]", "_", str(nickname)).strip("_") or str(active_uid)[:8]
             cand = clean_name
@@ -2802,18 +2819,55 @@ def interactive_menu():
             status_text = f" {COLOR_CYAN}[已续期]{COLOR_RESET}"
         print(f" {prefix} {COLOR_BOLD}{idx}){COLOR_RESET} {name:<12} [昵称: {p['nickname']}]{status_text}{cur_text}")
 
-    print(f"\n   {COLOR_BOLD}q){COLOR_RESET} 退出 (Cancel)")
+    print(f"\n   {COLOR_BOLD}d){COLOR_RESET} 删除账号 (移入回收站)")
+    print(f"   {COLOR_BOLD}q){COLOR_RESET} 退出 (Cancel)")
     print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}")
 
     try:
-        choice = input(f"{COLOR_BOLD}请输入序号 [1-{len(keys)}] 进行切换: {COLOR_RESET}").strip()
+        choice = input(f"{COLOR_BOLD}请输入序号 [1-{len(keys)}] 切换, d 删除, q 退出: {COLOR_RESET}").strip()
         if not choice or choice.lower() == "q":
             print("已取消。")
             return
+        if choice.lower() == "d":
+            interactive_remove_flow()
+            # 删完回到菜单继续操作，与 wb-tool 的行为对齐
+            return interactive_menu()
         idx = int(choice)
         if 1 <= idx <= len(keys):
             target_name = keys[idx - 1]
             switch_to_profile(target_name, auto_restart=True)
+        else:
+            print(f"{COLOR_RED}无效的序号: {choice}{COLOR_RESET}")
+    except ValueError:
+        print(f"{COLOR_RED}请输入正确的数字序号。{COLOR_RESET}")
+    except (KeyboardInterrupt, EOFError):
+        print("\n已取消。")
+
+def interactive_remove_flow():
+    """interactive_menu 的删除子流程：列出账号 → 选序号 → remove_profile 复核确认。"""
+    profiles = get_profiles()
+    if not profiles:
+        print(f"{COLOR_RED}没有可删除的账号。{COLOR_RESET}")
+        return
+    active_data = get_active_account()
+    active_uid = active_data.get("account", {}).get("uid") if active_data else None
+
+    keys = list(profiles.keys())
+    print(f"\n{COLOR_BOLD}请选择要删除的账号 (将移入回收站，客户端当前登录不受影响):{COLOR_RESET}")
+    for idx, name in enumerate(keys, 1):
+        p = profiles[name]
+        is_cur = bool(active_uid and p.get("uid") and p["uid"] == active_uid)
+        cur_mark = f" {COLOR_YELLOW}(当前使用中){COLOR_RESET}" if is_cur else ""
+        print(f"  [{idx}] {name:<12} (昵称: {p['nickname']}){cur_mark}")
+    print("  [0] 返回")
+
+    try:
+        choice = input(f"{COLOR_BOLD}请输入账号序号 [1-{len(keys)}]: {COLOR_RESET}").strip()
+        if choice in ("0", "q", "exit", ""):
+            return
+        idx = int(choice)
+        if 1 <= idx <= len(keys):
+            remove_profile(keys[idx - 1])
         else:
             print(f"{COLOR_RED}无效的序号: {choice}{COLOR_RESET}")
     except ValueError:
@@ -2839,6 +2893,462 @@ def save_current(name, force=False):
     else:
         print(f"{COLOR_GREEN}✔ 当前登录态已成功保存为 Profile: '{final_name}' (昵称: {nickname}, UID: {uid}){COLOR_RESET}")
     print(f"{COLOR_GREEN}  凭证已按原生格式保存（保持加密格式，解密仅在内存中执行）。{COLOR_RESET}")
+
+def get_trash_dir():
+    """已删除 Profile 的回收站目录：auth_profiles/.trash/。"""
+    return os.path.join(PROFILES_DIR, ".trash")
+
+def _ensure_trash_dir():
+    """创建回收站目录，并在 POSIX 上收紧到 0700——里面放的是凭据副本。"""
+    trash_dir = get_trash_dir()
+    os.makedirs(trash_dir, mode=0o700, exist_ok=True)
+    if sys.platform != "win32":
+        try:
+            os.chmod(trash_dir, 0o700)   # 已存在的目录也要收紧
+        except OSError:
+            pass
+    return trash_dir
+
+class _TrashLock:
+    """回收站写操作的跨进程互斥锁（Windows: msvcrt 字节锁 / POSIX: flock）。
+
+    没有它时，两个进程同时对同一别名 os.replace 会在 Windows 上"双成功"：
+    文件只落在其中一方，输家却打印成功并给出不存在的恢复路径。锁只覆盖
+    "确认之后"的写段，不覆盖交互确认，避免用户思考时把别的进程卡住。
+    """
+    def __init__(self, timeout=10.0):
+        self.path = os.path.join(get_trash_dir(), ".ops.lock")
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        # 杀软/实时扫描会对"刚创建的文件"短暂拒绝打开（PermissionError，
+        # Windows 上很常见），对打开锁文件做有界重试；真实 ACL 问题在
+        # 超时后照常抛出，不吞错。
+        deadline = time.time() + 2.0
+        while True:
+            try:
+                _ensure_trash_dir()
+                self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+                if os.fstat(self.fd).st_size == 0:
+                    os.write(self.fd, b"\0")          # Windows 字节锁需要文件至少 1 字节
+                    os.lseek(self.fd, 0, os.SEEK_SET)
+                break
+            except PermissionError:
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.05)
+        lock_deadline = time.time() + self.timeout
+        while True:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    os.lseek(self.fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.time() >= lock_deadline:
+                    os.close(self.fd)
+                    self.fd = None
+                    raise TimeoutError("等待删除锁超时（另一个删除/清空操作正在进行）")
+                time.sleep(0.02)
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    os.lseek(self.fd, 0, os.SEEK_SET)
+                    msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(self.fd)
+            self.fd = None
+
+def _trash_files():
+    """回收站里的凭据文件名（sorted）；目录不存在或不可读时返回空列表。
+
+    status 是排障命令，.trash 读取失败不该让它崩栈。
+    """
+    trash_dir = get_trash_dir()
+    try:
+        return sorted(n for n in os.listdir(trash_dir) if n.endswith(".info"))
+    except OSError:
+        return []
+
+def get_trashed_uids(strict=False):
+    """回收站里所有凭据的 uid 集合，用作删除墓碑。
+
+    run_checkin 的自动发现据此跳过已删账号——否则用户删掉的账号会在
+    次日签到时以昵称别名被静默重新收录，别名还可能与既有账号撞车。
+
+    strict=True 时任一条目读取失败就抛 OSError（fail closed）：调用方宁可
+    跳过本次自动入库，也不能因为读不出墓碑把已删账号复活。
+    """
+    uids = set()
+    for fname in _trash_files():
+        try:
+            with open(os.path.join(get_trash_dir(), fname), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            uid = (data.get("account", {}) or {}).get("uid") if isinstance(data, dict) else None
+            if uid:
+                uids.add(str(uid).strip())
+        except Exception as e:
+            if strict:
+                raise OSError(f"回收站条目 '{fname}' 读取失败: {e}")
+    return uids
+
+def list_trash():
+    """列出回收站里的账号凭据。"""
+    items = _trash_files()
+    if not items:
+        print("回收站为空。")
+        return
+    print(f"\n回收站 ({len(items)} 项) — 恢复: workbuddy remove --restore <文件名>")
+    for n in items:
+        try:
+            with open(os.path.join(get_trash_dir(), n), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            acc = data.get("account", {}) or {}
+            print(f"  {n}  (昵称: {get_display_nickname(acc, default_name=n)})")
+        except Exception:
+            print(f"  {n}  (无法解析)")
+
+def restore_profile(trash_name):
+    """把回收站里的凭据移回 profiles 备份库。
+
+    自动还原删除前的别名（`<别名>.<时间戳>[_N].info` → `<别名>.info`）；
+    原别名已被其他账号占用时自动追加 `_1/_2`，不覆盖任何既有凭据。
+    """
+    try:
+        with _TrashLock():
+            return _restore_profile_locked(trash_name)
+    except OSError as e:
+        # 含 TimeoutError；.trash 或锁文件形态异常时优雅失败，不向用户抛栈
+        print(f"{COLOR_RED}恢复失败: {e}{COLOR_RESET}")
+        return False
+
+def _restore_profile_locked(trash_name):
+    """restore_profile 的锁内实现：入参/内容校验 + 还原别名 + 原子搬回。
+
+    校验全部 fail closed：带路径成分的入参、读不出的条目、缺 uid、同 uid
+    已存在，都拒绝恢复并原样留在回收站——绝不把坏条目搬进备份库造出
+    "文件在、所有命令都看不见"的隐形账号。
+    """
+    trash_dir = get_trash_dir()
+    raw = str(trash_name).strip()
+    # 只接受纯文件名：带任何路径成分都直接拒绝（不是静默 basename 后继续）
+    if (not raw or raw in (".", "..") or "/" in raw
+            or os.sep in raw or (os.altsep and os.altsep in raw) or ":" in raw):
+        print(f"{COLOR_RED}错误: 非法的回收站文件名 '{trash_name}'。{COLOR_RESET}")
+        return False
+    # 校验用 strip 后的入参（容忍命令行粘贴带入的首尾空白），后续查找也必须
+    # 用同一份，否则 " alpha.info " 会被拼接成不存在的 " alpha.info .info"
+    fname = os.path.basename(raw)
+    if not fname.endswith(".info"):
+        fname += ".info"
+    src = os.path.join(trash_dir, fname)
+    if not os.path.isfile(src):
+        print(f"{COLOR_RED}错误: 回收站里没有 '{fname}'。{COLOR_RESET}")
+        list_trash()
+        return False
+    # 内容校验 fail closed：坏 JSON / 缺 uid 的条目绝不能搬进备份库
+    try:
+        with open(src, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"{COLOR_RED}错误: '{fname}' 无法解析（{e}），已保留在回收站。{COLOR_RESET}")
+        return False
+    acc = data.get("account") if isinstance(data, dict) and isinstance(data.get("account"), dict) else {}
+    uid = str((acc or {}).get("uid") or "").strip()
+    if not uid:
+        print(f"{COLOR_RED}错误: '{fname}' 缺少账号 uid，已保留在回收站。{COLOR_RESET}")
+        return False
+
+    # 同 uid 去重：恢复出同 uid 的第二份副本会让 checkin 对同一账号签两次
+    existing = {p["uid"]: name for name, p in get_profiles().items() if p.get("uid")}
+    if uid in existing:
+        print(f"{COLOR_RED}错误: 该账号已在备份库中（别名 '{existing[uid]}'），无需恢复；{COLOR_RESET}")
+        print(f"{COLOR_RED}  如需覆盖请先删除 '{existing[uid]}'。{COLOR_RESET}")
+        return False
+
+    # 还原原始别名：<别名>.<YYYYmmdd-HHMMSS-ffffff>[_N].info → <别名>
+    stem = fname[:-5]
+    m = re.match(r"^(?P<alias>.+)\.\d{8}-\d{6}-\d{6}(?:_\d+)?$", stem)
+    original_alias = m.group("alias") if m else stem
+    original_alias = re.sub(r"[^\w\-]", "_", original_alias).strip("_") or "account_restored"
+    dst_alias = original_alias
+    seq = 1
+    while os.path.exists(os.path.join(PROFILES_DIR, f"{dst_alias}.info")):
+        dst_alias = f"{original_alias}_{seq}"
+        seq += 1
+    dst = os.path.join(PROFILES_DIR, f"{dst_alias}.info")
+
+    try:
+        os.replace(src, dst)
+    except OSError as e:
+        print(f"{COLOR_RED}恢复失败: {e}{COLOR_RESET}")
+        return False
+    if dst_alias == original_alias:
+        print(f"{COLOR_GREEN}✔ 已恢复为账号别名 '{dst_alias}'，用 wb-list 确认。{COLOR_RESET}")
+    else:
+        print(f"{COLOR_GREEN}✔ 已恢复为账号别名 '{dst_alias}'（原别名 '{original_alias}' 已被占用，自动加序号）。{COLOR_RESET}")
+    return True
+
+def empty_trash(force=False):
+    """清空回收站——此操作不可恢复，凭据将被彻底销毁。
+
+    注意：清空回收站会同时解除删除墓碑——若被删账号仍处于客户端登录态，
+    下次签到的自动发现会把它重新收录。
+    """
+    items = sorted(_trash_files())
+    if not items:
+        print("回收站为空。")
+        return True
+    print(f"即将清空回收站 ({len(items)} 项) —— 此操作不可恢复:")
+    for n in items:
+        print(f"  - {n}")
+    if get_trashed_uids():
+        print(f"{COLOR_YELLOW}▲ 提示: 清空后墓碑随之解除——仍处于登录态的已删账号，下次签到会被重新收录。{COLOR_RESET}")
+    if not force:
+        try:
+            ans = input(f"{COLOR_YELLOW}确认彻底销毁这些凭据? [y/N]: {COLOR_RESET}").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n已取消。")
+            return False
+        if ans not in ("y", "yes"):
+            print("已取消。")
+            return False
+    try:
+        with _TrashLock():
+            # 锁内重新列举：确认期间另一个进程可能已清空或新增条目
+            items = sorted(_trash_files())
+            if not items:
+                print("回收站已被其他进程清空。")
+                return True
+            failed = []
+            for n in items:
+                try:
+                    os.remove(os.path.join(get_trash_dir(), n))
+                except OSError as e:
+                    failed.append(f"{n}: {e}")
+    except OSError as e:
+        # 含 TimeoutError；回收站/锁文件异常时优雅失败
+        print(f"{COLOR_RED}清空失败: {e}{COLOR_RESET}")
+        return False
+    if failed:
+        print(f"{COLOR_RED}清空失败 {len(failed)} 项（其余已删除）:{COLOR_RESET}")
+        for line in failed:
+            print(f"  - {line}")
+        return False
+    print(f"{COLOR_GREEN}✔ 回收站已清空 ({len(items)} 项)。{COLOR_RESET}")
+    return True
+
+def remove_main(args):
+    """`workbuddy remove ...` 与 wb-remove 软链的统一入口。"""
+    if any(a in ("-h", "--help", "help") for a in args):
+        print("用法: workbuddy remove <账号别名> [-y] [--force]\n"
+              "      workbuddy remove --list-trash\n"
+              "      workbuddy remove --restore <回收站文件名>\n"
+              "      workbuddy remove --empty-trash [-y]\n"
+              "  -y/--yes   跳过普通确认；删除当前登录账号的备份仍需二次确认\n"
+              "  --force,-f 放宽活跃账号保护（不再二次确认），不用于跳过普通确认")
+        return
+    mode_flags = [f for f in ("--list-trash", "--empty-trash", "--restore") if f in args]
+    if len(mode_flags) > 1:
+        # 互斥：--restore 和 --empty-trash 同时出现时，按顺序执行会静默销毁用户想恢复的文件
+        print(f"{COLOR_RED}错误: {' 与 '.join(mode_flags)} 不能同时使用。{COLOR_RESET}")
+        sys.exit(1)
+    known_flags = {"--force", "-f", "-y", "--yes"} | set(mode_flags)
+    unknown = [a for a in args if a.startswith("-") and a not in known_flags and a != "--restore"]
+    if unknown:
+        # 破坏性命令必须拒绝未知选项：--dry-run 这类"看起来无害"的 flag
+        # 若被静默吞掉，用户以为在预演，实际执行的是真删除
+        print(f"{COLOR_RED}错误: 未知选项 {', '.join(unknown)}（支持 -y/--yes、--force/-f、--list-trash、--restore <名>、--empty-trash）{COLOR_RESET}")
+        sys.exit(1)
+    # 两类选项语义分离：-y 只跳过普通确认；--force 放宽活跃账号保护。
+    # 混用会让同一个 flag 在 save/remove 之间含义相反（评审 #24 第 2、5 条）。
+    assume_yes = any(a in ("-y", "--yes") for a in args)
+    relax_protection = any(a in ("--force", "-f") for a in args)
+
+    if mode_flags and relax_protection:
+        # --force 的语义只有"放宽活跃账号保护"，对回收站模式无意义；
+        # 静默接受会让用户以为它生效了（对抗审查 P2）
+        print(f"{COLOR_RED}错误: --force/-f 只用于删除账号，不适用于 {' '.join(mode_flags)}。{COLOR_RESET}")
+        sys.exit(1)
+    if "--list-trash" in args or "--empty-trash" in args:
+        extra = [a for a in args if not a.startswith("-")]
+        if extra:
+            print(f"{COLOR_RED}错误: 该模式不接受位置参数: {', '.join(extra)}{COLOR_RESET}")
+            sys.exit(1)
+    if "--restore" in args:
+        ridx = args.index("--restore")
+        extra = [a for a in args[ridx + 2:] if not a.startswith("-")]
+        if extra:
+            print(f"{COLOR_RED}错误: 一次只能恢复一个文件，多余参数: {', '.join(extra)}{COLOR_RESET}")
+            sys.exit(1)
+
+    if "--list-trash" in args:
+        list_trash()
+        return
+    if "--empty-trash" in args:
+        sys.exit(0 if empty_trash(force=assume_yes) else 1)
+    if "--restore" in args:
+        idx = args.index("--restore")
+        if idx + 1 >= len(args):
+            print(f"{COLOR_RED}错误: --restore 需要提供回收站文件名。{COLOR_RESET}")
+            list_trash()
+            sys.exit(1)
+        value = args[idx + 1]
+        if value.startswith("-"):
+            print(f"{COLOR_RED}错误: --restore 需要回收站文件名，而不是选项 '{value}'。{COLOR_RESET}")
+            sys.exit(1)
+        sys.exit(0 if restore_profile(value) else 1)
+
+    clean_args = [a for a in args if not a.startswith("-")]
+    if len(clean_args) > 1:
+        print(f"{COLOR_RED}错误: 一次只能删除一个账号，收到 {len(clean_args)} 个: {', '.join(clean_args)}{COLOR_RESET}")
+        sys.exit(1)
+    if clean_args:
+        ok = remove_profile(clean_args[0], assume_yes=assume_yes, force=relax_protection)
+        sys.exit(0 if ok else 1)
+    print(f"{COLOR_RED}请提供要删除的账号别名，例如: workbuddy remove myaccount{COLOR_RESET}")
+    print(f"可用账号列表: {', '.join(get_profiles().keys()) or '（空）'}")
+    sys.exit(1)
+
+def remove_profile(target_name, assume_yes=False, force=False):
+    """将指定账号的 Profile 移入本地回收站（auth_profiles/.trash/）。
+
+    只动备份库里的一个 .info 文件：客户端当前登录（AUTH_FILE）不受影响，
+    checkin / audit / status 都是运行时遍历 profiles 目录，下次运行自然少一个账号，
+    无任何残留状态需要清理。回收站里的文件随时可手工移回 PROFILES_DIR 恢复。
+
+    参数语义（与 save --force 区分开）：
+    - assume_yes=True：跳过普通确认（对应 -y/--yes）
+    - force=True：放宽活跃账号保护，不再要求二次确认（对应 --force）
+    """
+    profiles = get_profiles()
+    # quiet=False：歧义时由解析器直接列出候选，而不是只回落到全量别名列表
+    matched_name, target = resolve_profile_target(profiles, target_name, allow_uid_prefix=False, quiet=False)
+    if not target:
+        print(f"{COLOR_RED}错误: 未找到唯一匹配 '{target_name}' 的账号凭证（不存在或存在歧义）。{COLOR_RESET}")
+        print(f"可用账号列表: {', '.join(profiles.keys()) if profiles else '（空）'}")
+        return False
+    target_name = matched_name
+
+    exp_text = format_timestamp(target["expiresAt"])
+    ref_text = format_timestamp(target["refreshExpiresAt"])
+    uid_disp = f"...{target['uid'][-8:]}" if target["uid"] else "未知"
+    print(f"\n即将删除账号: {COLOR_BOLD}{target_name}{COLOR_RESET} (昵称: {target['nickname']}, UID: {uid_disp})")
+    print(f"  Token 有效期: {exp_text}（刷新令牌至 {ref_text}）")
+
+    active_data = get_active_account()
+    active_uid = str(active_data.get("account", {}).get("uid") or "").strip() if active_data else None
+    is_active = bool(active_uid and active_uid == target["uid"])
+    if is_active:
+        # 警告在确认前展示；但写盘必须等确认之后——用户回答 n 时不能有任何副作用
+        print(f"{COLOR_YELLOW}▲ 注意: 这是当前正在登录使用的账号。删除备份不影响本次登录，{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}  但 checkin / audit / status 将不再管理它，且每日签到也不会自动重新收录；{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}  该账号的登录态在客户端切换/退出后需重新扫码 (workbuddy login)。{COLOR_RESET}")
+
+    # 确认策略：-y 只跳过普通确认。删除"当前登录账号的备份"属高危操作，
+    # 即便带了 -y 也要再问一次，只有显式 --force 才放宽（评审 #24 第 3 条）。
+    prompt = None
+    if is_active and not force:
+        prompt = f"{COLOR_YELLOW}这是当前登录账号，确认把它的备份移入回收站? [y/N]: {COLOR_RESET}"
+    elif not assume_yes:
+        prompt = f"{COLOR_YELLOW}确认移入回收站? [y/N]: {COLOR_RESET}"
+    if prompt:
+        try:
+            ans = input(prompt).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\n已取消。")
+            return False
+        if ans not in ("y", "yes"):
+            print("已取消。")
+            return False
+
+    try:
+        with _TrashLock():
+            # 锁内重新确认凭据还在、且仍是同一个账号：确认期间别人可能已删掉，
+            # 或用同一别名 save 了另一个账号——此时绝不能按旧路径删下去
+            current = get_profiles().get(target_name)
+            if not current or current.get("uid") != target.get("uid"):
+                print(f"{COLOR_RED}删除失败: 该账号凭据在确认期间发生了变化，已取消。{COLOR_RESET}")
+                return False
+            target = current
+
+            if is_active:
+                # 确认之后才归档，取消 = 零写入（评审行内 P2：原先写在确认前）。
+                # 且只写即将移走的那一份，不碰同 uid 的其他别名。
+                latest = get_active_account()
+                latest_uid = ""
+                if isinstance(latest, dict):
+                    latest_uid = str((latest.get("account") or {}).get("uid") or "").strip()
+                synced_ok = False
+                if latest and latest_uid == target["uid"]:
+                    try:
+                        atomic_write_json(target["path"], latest)
+                        synced_ok = True
+                    except Exception:
+                        synced_ok = False
+                elif latest:
+                    # 确认期间客户端切了号：绝不能把 B 的凭据写进 A 的备份，
+                    # 否则 A 的原始字节会被 B 覆盖后再移入回收站（对抗审查 P0）
+                    print(f"{COLOR_YELLOW}▲ 警告: 活跃账号在确认期间已切换，本次未归档新凭据。{COLOR_RESET}")
+                    print(f"{COLOR_YELLOW}  回收站里保存的是删除前的原始备份，恢复后或需重新扫码。{COLOR_RESET}")
+                if latest and not synced_ok and latest_uid == target["uid"]:
+                    print(f"{COLOR_YELLOW}▲ 警告: 未能把客户端最新凭据写回这份备份。{COLOR_RESET}")
+                    print(f"{COLOR_YELLOW}  回收站里保存的可能是上次保存的旧 token，恢复后或需重新扫码。{COLOR_RESET}")
+                elif not latest:
+                    print(f"{COLOR_YELLOW}▲ 警告: 活跃凭据在确认期间已不可读，未归档新凭据。{COLOR_RESET}")
+                    print(f"{COLOR_YELLOW}  回收站里保存的是删除前的原始备份，恢复后或需重新扫码。{COLOR_RESET}")
+
+            trash_dir = _ensure_trash_dir()
+            # 微秒级时间戳把碰撞概率压到可忽略；O_CREAT|O_EXCL 原子占位
+            # 让同名占位不可能互相覆盖，串行化由 _TrashLock 保证。
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            seq = 0
+            while True:
+                suffix = "" if seq == 0 else f"_{seq}"
+                trash_path = os.path.join(trash_dir, f"{target_name}.{stamp}{suffix}.info")
+                try:
+                    fd = os.open(trash_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                except FileExistsError:
+                    seq += 1
+                    if seq > 999:
+                        raise OSError(f"回收站文件名连续冲突，已放弃: {target_name}")
+                    continue
+                os.close(fd)
+                break
+            try:
+                # 同盘 rename：原子且瞬时，凭据文件全程不落第三方位置
+                os.replace(target["path"], trash_path)
+            except OSError:
+                # 占位成功但搬运失败：清掉空占位，别在回收站留垃圾
+                try:
+                    os.remove(trash_path)
+                except OSError:
+                    pass
+                raise
+            # 成功消息在锁内发出：避免刚释放锁就被 --empty-trash 删掉文件，
+            # 导致打印出的恢复路径已不存在（对抗审查 P1）
+            print(f"{COLOR_GREEN}✔ 账号 '{target_name}' 已移入回收站: {trash_path}{COLOR_RESET}")
+            print(f"  恢复: workbuddy remove --restore {os.path.basename(trash_path)}")
+            print(f"  彻底销毁: workbuddy remove --empty-trash")
+            return True
+    except TimeoutError as e:
+        print(f"{COLOR_RED}删除失败: {e}{COLOR_RESET}")
+        return False
+    except OSError as e:
+        print(f"{COLOR_RED}删除失败: {e}{COLOR_RESET}")
+        return False
 
 def get_workbuddy_client_version(runtime_path=None):
     """
@@ -4165,6 +4675,7 @@ def run_interactive_tool_cmd(args=None):
         "get_active_account": get_active_account,
         "get_profiles": get_profiles,
         "switch_to_profile": switch_to_profile,
+        "remove_profile": remove_profile,
         "run_login": run_login,
         "run_audit": run_audit,
         "run_checkin": run_checkin,
@@ -4202,7 +4713,8 @@ def print_help():
   workbuddy router [子命令]        容灾轮换路由网关管理 (别名: wb-router)
   workbuddy sandbox [子命令]       沙盒状态自愈与快照存储治理 (别名: wb-sandbox)
   workbuddy doctor                诊断凭据解密与运行环境 (别名: wb-doctor)
-  workbuddy save <别名> [--force]  保存当前活跃账号为 Profile
+  workbuddy save <别名> [--force]   保存当前活跃账号为 Profile
+  workbuddy remove <别名> [-y]     删除账号 / 回收站管理 (别名: wb-remove)
   workbuddy init / rollback       开启 / 撤销全域工作区打通
   workbuddy restart               重启 WorkBuddy 客户端
 
@@ -4263,6 +4775,12 @@ def main():
         clean_args = [a for a in args if a != "--no-chat"]
         target = clean_args[0] if clean_args else None
         run_checkin(target, with_chat=with_chat)
+        return
+    if "remove" in prog_name:
+        # wb-remove / workbuddy-remove 软链（macOS/Linux）：argv[0] 携带子命令语义，
+        # 等价于 `workbuddy remove ...`。缺了这条分发，wb-remove <别名> 会落进
+        # 兜底分支被解释成"快捷切号"——删除变成切号，方向完全相反。
+        remove_main(args)
         return
     if "switch" in prog_name:
         if args:
@@ -4359,6 +4877,9 @@ def main():
             save_current(clean_args[0], force=force)
         else:
             print(f"{COLOR_RED}请提供保存的名称，例如: workbuddy save myaccount [--force]{COLOR_RESET}")
+    elif cmd in ["remove", "rm", "del", "delete"]:
+        remove_main(args[1:])
+        return
     elif cmd in ["init", "patch"]:
         init_shared_workspace()
     elif cmd in ["rollback", "unpatch"]:
