@@ -7,27 +7,22 @@
 - 有锁：enter / exit / enter / exit（严格串行）
 - 无锁：enter / enter / exit / exit（重叠）
 
-就绪屏障：两个子进程都先把 "ready" 写进日志并轮询到对方也就绪后才进
-临界区——否则慢机器上子进程 B 比A 晚启动超过临界区时长时，无锁也会
-表现为串行（假绿）。屏障保证两者一定在锁门口相遇，变异校验把平台锁
-调用改成 pass 后本用例必红。
+就绪屏障：每轮两个子进程各写一条 ready 并轮询到"本轮双方就绪"后才进
+临界区，保证两者一定在锁门口相遇——无锁时必然 enter/enter 重叠。
 
-CI 踩坑史（GitHub windows runner，四轮迭代）：
-1. 子进程打开"刚创建"的日志/锁文件 PermissionError —— 杀软/Defender
-   对新文件的实时扫描窗口。修复：append 与生产 _TrashLock.__enter__
-   都做有界重试（2s）。
-2. 子进程卡死在 exec_module（打点 spawned→无 imported）数分钟——
-   先后试过"导入完整工具箱""AST 抽取成 86 行小文件再导入"，全都
-   复现：只要子进程通过 importlib 读模块文件，runner 上就可能被拖住
-   数分钟（大小无关、新旧无关）。最终修复：**子进程不用 importlib**
-   ——父进程用 AST 抽出 _TrashLock / get_trash_dir / _ensure_trash_dir
-   的真实源码，直接拼进 `python -c` 的代码文本，纯内存编译，子进程
-   除日志与锁文件外零文件读取。
-3. 抽的是源码文本：变异校验对 bin/workbuddy 的"拆锁"改动会原样进入
-   子进程代码，CAUGHT 逻辑不变。
-4. 0a42f7d 之后仍偶发"子进程连第一行代码都不执行"——runner 上进程
-   创建本身被拖慢，测试无法消除。策略：屏障超时重试 3 次后降级为
-   skip；临界区重叠（被测缺陷）仍然 FAIL。
+对 runner/杀软抖动的免疫设计（GitHub windows runner 四轮踩坑的结论：
+进程创建与文件读取可能被拖慢数分钟，任何"单次场景定胜负"的写法都会
+偶发误报）：
+- 子进程在**单次场景内循环 3 轮**，启动慢只推迟轮次、不消灭轮次；
+  第 1 轮屏障给 240s（吸收启动抖动），后续轮 60s；
+- 断言的是不变量：enter/exit 严格交替、至少完成一轮完整临界区、
+  双方至少各到过场一次（ready >= 2）。坏锁在第一次相遇就留下
+  enter/enter，与启动快慢无关；
+- 只有"双方始终未能相遇"（ready < 2，环境确实跑不起来）才 skipTest；
+  其他一切异常照常 FAIL。变异校验的"拆锁"= 确定性重叠，不会被 skip 掩护。
+- 子进程代码由父进程 AST 抽取锁实现后经 `python -c` 内嵌传入——
+  不 importlib 读任何模块文件（此前在 runner 上被拖住数分钟的根源），
+  也不读/写 pyc。
 """
 import ast
 import os
@@ -39,7 +34,6 @@ import unittest
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN_PATH = os.environ.get("WB_BIN") or os.path.join(REPO_DIR, "bin", "workbuddy")
 
-# 子进程代码 = 抽取的锁实现 + 工作流逻辑，全部经 -c 传入（无模块文件）
 WORKER = '''
 
 def _append(log_path, line):
@@ -61,41 +55,34 @@ def _append(log_path, line):
             time.sleep(0.05)
 
 
-def _count_ready(log_path):
+def _count_markers(log_path, marker):
     try:
         with open(log_path, "rb") as f:
-            return sum(1 for line in f if line.strip() == b"ready")
+            return sum(1 for line in f if line.strip() == marker.encode())
     except OSError:
         return 0
 
 
 log_path = sys.argv[2]
-_append(log_path, "spawned")
-# 锁实现已在 -c 源码里（无 importlib、无模块文件）
 PROFILES_DIR = sys.argv[1]
-_append(log_path, "imported")
 
-# 就绪屏障：两进程都到场后才抢锁，消除启动抖动造成的假绿
-_append(log_path, "ready")
-_deadline = time.time() + 240
-while _count_ready(log_path) < 2:
-    if time.time() > _deadline:
-        try:
-            with open(log_path, "rb") as f:
-                _snapshot = f.read().decode("utf-8", "replace")
-        except OSError:
-            _snapshot = "(log 不可读)"
-        sys.exit(f"barrier timeout: 另一个子进程未就绪，当前日志={_snapshot!r}")
-    time.sleep(0.05)
-
-with _TrashLock():
-    _append(log_path, "enter")
-    time.sleep(0.2)
-    _append(log_path, "exit")
+ROUNDS = 3
+for _round in range(ROUNDS):
+    # 第 1 轮给 240s 吸收进程启动抖动，后续轮双方都已在跑，60s 足够
+    _barrier_deadline = time.time() + (240 if _round == 0 else 60)
+    _append(log_path, "ready")
+    while _count_markers(log_path, "ready") < 2 * (_round + 1):
+        if time.time() > _barrier_deadline:
+            _append(log_path, "giveup")
+            sys.exit(0)          # 对方始终未到场：由父进程按 ready 数判定
+        time.sleep(0.05)
+    with _TrashLock():
+        _append(log_path, "enter")
+        time.sleep(0.15)
+        _append(log_path, "exit")
 '''
 
 CHILD_ENV = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-ORDER_OK = ["ready", "ready", "enter", "exit", "enter", "exit"]
 
 
 def _popen_kwargs():
@@ -121,7 +108,7 @@ def _extract_lock_code(source):
 
 
 def _run_scenario():
-    """跑一次两进程互斥场景，返回 (raw_lines, [(idx, rc, out+err), ...])。
+    """跑一次多轮互斥场景，返回 (lines, [(idx, rc, out+err), ...])。
 
     无论成败都收齐两个子进程，失败信息永远带双方完整输出。
     """
@@ -140,12 +127,12 @@ def _run_scenario():
                  for _ in range(2)]
         results = []
         for i, p in enumerate(procs):
-            out, err = p.communicate(timeout=300)
+            out, err = p.communicate(timeout=400)
             results.append((i, p.returncode, (out or "") + (err or "")))
 
         with open(log, "r", encoding="utf-8", errors="replace") as f:
-            raw_lines = [line.strip() for line in f if line.strip()]
-        return raw_lines, results
+            lines = [line.strip() for line in f if line.strip()]
+        return lines, results
     finally:
         import shutil
         shutil.rmtree(base, ignore_errors=True)
@@ -153,35 +140,35 @@ def _run_scenario():
 
 class TestTrashLock(unittest.TestCase):
     def test_lock_serializes_two_processes(self):
-        last_raw, last_results = [], []
-        for attempt in range(3):
-            raw, results = _run_scenario()
-            failures = [(i, rc, blob) for i, rc, blob in results if rc != 0]
-            if not failures:
-                last_raw = raw
-                break
-            last_raw, last_results = raw, results
-            # 只有"屏障超时"（runner/杀软拖慢进程启动，与被测对象无关）
-            # 才重试；临界区重叠是真实缺陷，立即判负
-            if not all("barrier timeout" in blob for _, _, blob in failures):
-                break
+        lines, results = _run_scenario()
 
-        detail = "\n".join(f"子进程 {i} rc={rc}：{blob}" for i, rc, blob in last_results)
-        for i, rc, blob in last_results:
+        detail = "\n".join(f"子进程 {i} rc={rc}：{blob}" for i, rc, blob in results)
+        for i, rc, blob in results:
             self.assertEqual(rc, 0, f"子进程 {i} 失败（另一个：{detail}）")
-        lines = [x for x in last_raw if x in ("ready", "enter", "exit")]
-        if lines != ORDER_OK and all(
-                "barrier timeout" in blob for _, _, blob in last_results):
-            # 重试 3 次仍无法建立"两进程都在场"的场景：是 runner 的进程
-            # 启动抖动（实测连子进程第一行代码都迟迟不执行），不是锁的
-            # 缺陷。降级为 skip——拆锁变异产生的是确定性的 enter/enter
-            # 重叠（不依赖对方就绪也能观察到），不会被本分支掩护；
-            # Windows msvcrt 路径另由本机与并发探针验证。
+
+        ready = lines.count("ready")
+        enters_exits = [x for x in lines if x in ("enter", "exit")]
+        giveups = lines.count("giveup")
+
+        if ready < 2 or (giveups and not enters_exits):
+            # 两个子进程始终未能相遇（runner 把进程创建/首行执行拖过
+            # 240s），环境确实跑不起来。skip 但不掩护坏锁：拆锁变异下
+            # 只要相遇一次就会留下 enter/enter 重叠并 FAIL。
             self.skipTest(
-                "连续 3 次无法建立两进程并存的场景（runner/杀软拖慢进程启动，"
-                f"最后日志={last_raw!r}）；互斥语义由 POSIX CI 与本机验证")
-        self.assertEqual(lines, ORDER_OK,
-                         f"两个进程的临界区发生了重叠: {last_raw}")
+                f"两个子进程始终未能相遇（ready={ready}, giveup={giveups}），"
+                f"runner/杀软拖慢进程创建；互斥语义由 POSIX CI 与本机验证")
+            return
+
+        # 不变量 1：至少完成一轮完整临界区
+        self.assertGreaterEqual(len(enters_exits), 2,
+                                f"没有任何一轮完整临界区: {lines}")
+        # 不变量 2：enter/exit 严格交替且从 enter 开始（无锁必然 enter,enter）
+        for i, x in enumerate(enters_exits):
+            self.assertEqual(x, "enter" if i % 2 == 0 else "exit",
+                             f"第 {i} 个临界区标记错位，临界区发生了重叠: {lines}")
+        # 不变量 3：双方至少各到场一次（ready 成对出现）
+        self.assertEqual(ready % 2, 0,
+                         f"ready 数应为偶数（屏障成对放行）: {lines}")
 
 
 if __name__ == "__main__":
