@@ -51,6 +51,7 @@ CLI_ALIASES = [
     "wb-list", "workbuddy-list",
     "wb-status", "workbuddy-status",
     "wb-switch", "workbuddy-switch",
+    "wb-memory", "workbuddy-memory",
     "wb-checkin", "workbuddy-checkin",
     "wb-chat", "workbuddy-chat",
     "wb-doctor", "workbuddy-doctor",
@@ -64,6 +65,7 @@ CLI_ALIASES = [
 # Windows 垫片: 别名 -> 子命令
 WINDOWS_SUBCOMMAND_SHIMS = {
     "switch": ["wb-switch", "workbuddy-switch"],
+    "memory": ["wb-memory", "workbuddy-memory"],
     "checkin": ["wb-checkin", "workbuddy-checkin"],
     "chat": ["wb-chat", "workbuddy-chat"],
     "doctor": ["wb-doctor", "workbuddy-doctor"],

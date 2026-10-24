@@ -2328,6 +2328,9 @@ def switch_to_profile(target_name, auto_restart=True, check_health=True):
 
     print(f"{COLOR_GREEN}✔ 凭证已成功切换至: {target_name} ({target['nickname']}) (免扫码生效){COLOR_RESET}")
 
+    # 必须落在重启之前：客户端只在会话启动时读一次 MEMORY.md
+    _sync_memory_on_switch(target)
+
     if auto_restart:
         restart_workbuddy()
     else:
@@ -4180,6 +4183,377 @@ def run_interactive_tool_cmd(args=None):
     code = interactive_tool.run_interactive_tool(ctx, args=args)
     sys.exit(code)
 
+def get_memory_root():
+    """账号档案与共享记忆库的根目录（测试可 patch）。"""
+    return os.path.expanduser("~/.workbuddy")
+
+MEMORY_HUB_FILE = os.path.expanduser("~/.workbuddy/cache/memory_hub.json")
+
+def _memory_module():
+    sidecar_dir = find_sidecar_dir()
+    if sidecar_dir not in sys.path:
+        sys.path.insert(0, sidecar_dir)
+    import memory_share
+    return memory_share
+
+def _memory_accounts():
+    """把已保存的 Profile 转成记忆库需要的账号描述。"""
+    accounts = []
+    for alias, prof in sorted(get_profiles().items()):
+        uid = str(prof.get("uid") or "").strip()
+        if not uid:
+            continue
+        acc = (prof.get("data") or {}).get("account") or {}
+        accounts.append({
+            "alias": alias,
+            "uid": uid,
+            "enterprise_id": acc.get("enterpriseId") or acc.get("enterprise_id"),
+        })
+    return accounts
+
+def load_memory_hub_config():
+    cfg = {"enabled": False}
+    try:
+        with open(MEMORY_HUB_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            cfg["enabled"] = bool(raw.get("enabled"))
+    except (OSError, ValueError):
+        pass
+    return cfg
+
+def save_memory_hub_config(cfg):
+    atomic_write_json(MEMORY_HUB_FILE, cfg)
+
+def _sync_memory_on_switch(target):
+    """切号后、重启前：汇总全部账号记忆，再把共享段落渲染进目标账号。
+
+    只做"追加共享段落"，账号原文保持不变；失败不阻断切号。
+    """
+    try:
+        if not load_memory_hub_config().get("enabled"):
+            return
+        ms = _memory_module()
+        root = get_memory_root()
+        accounts = _memory_accounts()
+        stats = ms.collect(accounts, root=root)
+        acc = None
+        for item in accounts:
+            if item["uid"] == str(target.get("uid") or ""):
+                acc = item
+                break
+        if not acc:
+            return
+        res = ms.apply_account(acc, root=root)
+        if res.get("action") == "unchanged":
+            print(f"  [记忆] 已是最新（共享 {res.get('shared', 0)} 条）")
+        elif res.get("action") in ("skipped_encoding", "write_failed"):
+            print(f"{COLOR_YELLOW}  [记忆] 已跳过: {res.get('reason') or res.get('action')}{COLOR_RESET}")
+        elif res.get("ok"):
+            extra = "，新增自有 {} 条".format(res["added"]) if res.get("added") else ""
+            trunc = "，{} 条因超长未展开".format(res["truncated"]) if res.get("truncated") else ""
+            print(f"  [记忆] 共享 {res.get('shared', 0)} 条{extra}{trunc}"
+                  f"（库内 {stats.get('entries', 0)} 条，合并 {stats.get('merged', 0)} 组相似）")
+        else:
+            print(f"{COLOR_YELLOW}  [记忆] 目标账号尚无 MEMORY.md，已跳过{COLOR_RESET}")
+    except Exception as e:
+        print(f"{COLOR_YELLOW}  [记忆] 汇总失败（已忽略，不影响切号）: {e}{COLOR_RESET}")
+
+MEMORY_USAGE = ("用法: workbuddy memory [collect | compact [--shard-min N] | apply [账号] [--budget N] "
+                "| rebalance [账号] [--apply] | forget <关键词> [--apply] | conflicts | status "
+                "| restore <账号> | on | off] [--json]")
+
+def run_memory_cmd(args_list):
+    """`workbuddy memory` 子命令入口。退出码: 0 成功，1 失败，2 参数缺失。"""
+    if any(a in ("-h", "--help", "help") for a in args_list):
+        print(MEMORY_USAGE)
+        print("  collect        汇总所有账号 MEMORY.md，去重并保留质量更优的版本")
+        print("  compact        给超长/偏好类条目建分片，只在窗口里留一行索引")
+        print("                 --shard-min N 超过 N 字的条目才建分片（默认 120）")
+        print("  apply [账号]   把共享记忆渲染进指定账号（省略则全部）；原文只追加不改写")
+        print("                 --budget N 限制共享段落占用字数（默认 800，给原文留位置）")
+        print("  rebalance      把 MEMORY.md 的准则/画像分流到 SOUL/USER（10k 通道），默认只出计划")
+        print("                 --apply 执行；--target N 指定 MEMORY 目标字数（默认 3200）")
+        print("  forget <关键词> 把匹配条目移出共享库并留墓碑（默认只预览，--apply 执行）")
+        print("  conflicts      列出互相否定的条目（只注入优先级更高的一条）")
+        print("  status         查看库规模、各账号自有/共享条数与字数")
+        print("  restore <账号> 用基线快照还原该账号 MEMORY.md（还原前自动备份）")
+        print("  on / off       开启 / 关闭切号时自动汇总渲染")
+        print("  --json         以 JSON 输出，便于脚本消费")
+        print("  说明: 账号原文保存在 originals/<uid>/MEMORY.md，共享内容只追加在其后")
+        return 0
+
+    as_json = any(a in ("--json", "-j") for a in args_list)
+    clean = [a for a in args_list if a not in ("--json", "-j")]
+
+    # 选项与位置参数分开解析：`apply --budget 500 alpha` 里，alpha 才是账号
+    opts, positionals = {}, []
+    valued = ("--budget", "--target", "--max-level", "--shard-min")
+    i = 0
+    while i < len(clean):
+        arg = clean[i]
+        if arg in valued and i + 1 < len(clean):
+            opts[arg[2:]] = clean[i + 1]
+            i += 2
+            continue
+        matched = next((v for v in valued if arg.startswith(v + "=")), None)
+        if matched:
+            opts[matched[2:]] = arg.split("=", 1)[1]
+        elif arg.startswith("--"):
+            opts[arg[2:]] = True
+        else:
+            positionals.append(arg)
+        i += 1
+
+    action = (positionals[0].lower() if positionals else "status")
+    target = positionals[1] if len(positionals) > 1 else None
+
+    def _int_opt(name, default):
+        try:
+            return int(opts.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    ms = _memory_module()
+    root = get_memory_root()
+    accounts = _memory_accounts()
+
+    if action in ("on", "enable"):
+        save_memory_hub_config({"enabled": True})
+        stats = ms.collect(accounts, root=root)
+        if as_json:
+            print(json.dumps(stats, ensure_ascii=False, indent=2))
+        else:
+            print(f"{COLOR_GREEN}✔ 已开启跨账号记忆汇总{COLOR_RESET}")
+            print(f"  库内 {stats['entries']} 条（来自 {stats['raw_entries']} 条原始记忆，"
+                  f"合并 {stats['merged']} 组相似）")
+            print("  切号时自动汇总并渲染；也可手动执行 workbuddy memory apply")
+        return 0
+
+    if action in ("off", "disable"):
+        save_memory_hub_config({"enabled": False})
+        (print(json.dumps({"enabled": False}, ensure_ascii=False)) if as_json
+         else print(f"{COLOR_GREEN}✔ 已关闭自动汇总。已渲染的共享段落保持不变，"
+                    f"可用 workbuddy memory restore <账号> 还原。{COLOR_RESET}"))
+        return 0
+
+    if action in ("rebalance", "triage"):
+        apply_flag = bool(opts.get("apply"))
+        target_size = _int_opt("target", 3200)
+        who = positionals[1:]
+        if who:
+            _, prof = resolve_profile_target(get_profiles(), who[0], allow_uid_prefix=True, quiet=True)
+            if not prof:
+                print(f"{COLOR_RED}未找到唯一匹配 '{who[0]}' 的账号{COLOR_RESET}")
+                return 1
+            selected = [a for a in accounts if a["uid"] == str(prof.get("uid") or "")]
+        else:
+            selected = accounts
+        results = [ms.rebalance_account(a, root=root, target=target_size, apply=apply_flag)
+                   for a in selected]
+        if as_json:
+            print(json.dumps(results, ensure_ascii=False, indent=2))
+        else:
+            for r in results:
+                if r.get("action") in ("no_memory_file", "skipped_encoding"):
+                    print(f"  {r['alias']}: 跳过（{r['action']}）")
+                    continue
+                p = r.get("projected") or {}
+                mode = (r.get("plan") or {}).get("mode")
+                print(f"  {r['alias']}: MEMORY {p.get('memory_before', 0)} → {p.get('memory_after', 0)} 字"
+                      f"（上限 {ms.INJECT_LIMIT}，{'按节迁移' if mode == 'section' else '按行迁移'}）")
+                for sec in (r.get("plan") or {}).get("sections") or []:
+                    print(f"    {'→ ' + ('搬走' if sec['moved'] else '留下'):<4} {sec['size']:>5} 字  "
+                          f"{sec['heading'][:46]}")
+                print(f"    搬出 SOUL {r['plan']['moved_soul']} 行"
+                      f"（{p.get('soul_before', 0)} → {p.get('soul_after', 0)} / 10000）")
+                print(f"    搬出 USER {r['plan']['moved_user']} 行"
+                      f"（{p.get('user_before', 0)} → {p.get('user_after', 0)} / 10000）")
+                if r.get("action") == "rebalanced":
+                    print(f"    {COLOR_GREEN}✔ 已写入，备份 {len(r.get('backups', []))} 份{COLOR_RESET}")
+                elif r.get("action") == "nothing_to_do":
+                    print("    无需调整")
+                else:
+                    print(f"    {COLOR_CYAN}以上为计划，未写入；加 --apply 执行（执行前自动备份）{COLOR_RESET}")
+        return 0
+
+    if action in ("compact", "shard"):
+        shard_min = _int_opt("shard-min", ms.SHARD_MIN_CHARS)
+        res = ms.compact(root=root, shard_min=shard_min)
+        if as_json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        else:
+            print(f"{COLOR_GREEN}✔ 索引完成{COLOR_RESET}")
+            print(f"  分片 {res['shards']} 个（新写 {res['written']} 个）| "
+                  f"索引 {res['indexed']} 条 | 未达阈值 {res['skipped']} 条")
+            print(f"  分片目录: {ms.shard_dir(root)}")
+            print(f"{COLOR_CYAN}  原文完整留在分片里，MEMORY.md 只注入一行索引{COLOR_RESET}")
+        return 0 if res.get("ok") else 1
+
+    if action in ("collect", "merge"):
+        stats = ms.collect(accounts, root=root)
+        if as_json:
+            print(json.dumps(stats, ensure_ascii=False, indent=2))
+        else:
+            print(f"{COLOR_GREEN}✔ 汇总完成{COLOR_RESET}")
+            print(f"  原始记忆 {stats['raw_entries']} 条 → 去重后 {stats['entries']} 条"
+                  f"（合并 {stats['merged']} 组相似，落选 {stats['superseded']} 条已留档）")
+            if stats.get("conflicts"):
+                print(f"  {COLOR_YELLOW}发现 {stats['conflicts']} 条互相否定的规则，"
+                      f"只注入优先级更高的一条（memory conflicts 查看）{COLOR_RESET}")
+            if stats.get("forgotten"):
+                print(f"  已跳过 {stats['forgotten']} 条被 forget 的条目（墓碑生效）")
+            for alias, count in stats["accounts"].items():
+                print(f"    {alias}: {count} 条")
+        return 0
+
+    if action == "apply":
+        if not accounts:
+            print(f"{COLOR_RED}没有可用的已保存账号{COLOR_RESET}")
+            return 1
+        budget = _int_opt("budget", ms.PUBLISH_BUDGET)
+        max_level = _int_opt("max-level", ms.PUBLISH_MAX_LEVEL)
+        if target:
+            alias, prof = resolve_profile_target(get_profiles(), target, allow_uid_prefix=True, quiet=True)
+            if not prof:
+                print(f"{COLOR_RED}未找到唯一匹配 '{target}' 的账号{COLOR_RESET}")
+                return 1
+            ms.collect(accounts, root=root)
+            acc = next((a for a in accounts if a["uid"] == str(prof.get("uid") or "")), None)
+            results = ([ms.apply_account(acc, root=root, budget=budget, max_level=max_level)]
+                       if acc else [])
+        else:
+            ms.collect(accounts, root=root)
+            results = ms.apply_all(accounts, root=root, budget=budget, max_level=max_level)
+        if as_json:
+            print(json.dumps(results, ensure_ascii=False, indent=2))
+        else:
+            for r in results:
+                if not r.get("ok"):
+                    print(f"  {r['alias']}: 跳过（{r['action']}）")
+                elif r["action"] == "unchanged":
+                    print(f"  {r['alias']}: 已是最新（共享 {r['shared']} 条"
+                          + (f"，索引 {r['indexed']} 条" if r.get("indexed") else "") + "）")
+                else:
+                    sk = r.get("skipped") or {}
+                    why = []
+                    if sk.get("level"):
+                        why.append(f"{sk['level']} 条属事实/推断，不跨账号")
+                    if sk.get("local_fact"):
+                        why.append(f"{sk['local_fact']} 条含本机路径/账号")
+                    if sk.get("fragment"):
+                        why.append(f"{sk['fragment']} 条是引用/表格碎片")
+                    if sk.get("conflict"):
+                        why.append(f"{sk['conflict']} 条被冲突压制")
+                    if sk.get("budget"):
+                        why.append(f"{sk['budget']} 条超出 {budget} 字预算")
+                    print(f"  {r['alias']}: 共享 {r['shared']} 条"
+                          + (f"，新增自有 {r['added']} 条" if r.get("added") else "")
+                          + (f"，索引 {r['indexed']} 条" if r.get("indexed") else "")
+                          + (f"，{r['truncated']} 条超长未展开" if r.get("truncated") else ""))
+                    if why:
+                        print(f"    {COLOR_CYAN}未发布: {'；'.join(why)}{COLOR_RESET}")
+            print(f"{COLOR_CYAN}  原文未改写；共享段落追加在文件末尾，可用 restore 还原{COLOR_RESET}")
+        return 0 if all(r.get("ok") for r in results) else 1
+
+    if action in ("forget", "drop"):
+        if not target:
+            print(f"{COLOR_RED}请给出要遗忘的关键词或条目 id，"
+                  f"例如: workbuddy memory forget \"旧路径\" --apply{COLOR_RESET}")
+            return 2
+        apply_flag = bool(opts.get("apply"))
+        res = ms.forget(target, root=root, apply=apply_flag)
+        if as_json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+            return 0 if res.get("ok") else 1
+        if not res.get("matched"):
+            print(f"没有匹配 '{target}' 的共享条目")
+            return 0
+        for item in res["matched"]:
+            print(f"  {item['id']}  {item['text']}")
+        if res.get("applied"):
+            print(f"{COLOR_GREEN}✔ 已移出共享库 {len(res['matched'])} 条，"
+                  f"墓碑 {res.get('tombstones', 0)} 条{COLOR_RESET}")
+            print(f"{COLOR_CYAN}  下次 apply 重建共享段落时不再出现；账号原文不动{COLOR_RESET}")
+        else:
+            print(f"{COLOR_CYAN}以上为匹配结果，未修改；加 --apply 执行{COLOR_RESET}")
+        return 0
+
+    if action in ("conflicts", "conflict"):
+        lib = ms.load_library(root)
+        rows = [e for e in ms.active_entries(lib) if e.get("conflicts")]
+        if as_json:
+            print(json.dumps({"count": len(rows), "entries": rows}, ensure_ascii=False, indent=2))
+            return 0
+        if not rows:
+            print(f"{COLOR_GREEN}✔ 没有互相否定的规则{COLOR_RESET}")
+            return 0
+        print(f"{COLOR_YELLOW}互相否定的规则（只注入前一条，另一条留档不注入）{COLOR_RESET}")
+        for e in rows:
+            print(f"  ✔ {e['text']}")
+            for c in e["conflicts"]:
+                print(f"    ✘ {c['text']}  （来源 {', '.join(c.get('sources') or []) or '?'}）")
+        print(f"{COLOR_CYAN}  确认哪条正确后，用 memory forget 把另一条永久移出{COLOR_RESET}")
+        return 0
+
+    if action in ("restore", "revert"):
+        if not target:
+            print(f"{COLOR_RED}请指定要还原的账号，例如: workbuddy memory restore acc_55211{COLOR_RESET}")
+            return 2
+        alias, prof = resolve_profile_target(get_profiles(), target, allow_uid_prefix=True, quiet=True)
+        if not prof:
+            print(f"{COLOR_RED}未找到唯一匹配 '{target}' 的账号{COLOR_RESET}")
+            return 1
+        acc = {"alias": alias, "uid": str(prof.get("uid") or ""),
+               "enterprise_id": (prof.get("data") or {}).get("account", {}).get("enterpriseId")}
+        res = ms.restore_account(acc, root=root)
+        if as_json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        elif res.get("ok"):
+            print(f"{COLOR_GREEN}✔ 已用快照还原 {alias}{COLOR_RESET}")
+            print(f"  还原前副本: {res.get('backup')}")
+        else:
+            print(f"{COLOR_RED}还原失败: {res.get('action')}{COLOR_RESET}")
+        return 0 if res.get("ok") else 1
+
+    # status
+    data = ms.status(accounts, root=root)
+    data["config"] = load_memory_hub_config()
+    if as_json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    enabled = "已开启" if data["config"].get("enabled") else "未开启（仅手动 apply）"
+    lib = data["library"]
+    print(f"{COLOR_BOLD}跨账号记忆汇总{COLOR_RESET}: {enabled}")
+    print(f"  共享库: {lib['entries']} 条  {lib['path']}")
+    print(f"  可发布: {lib['publishable']} 条 / {lib.get('publish_chars', 0)} 字"
+          f"（预算 {lib.get('budget', 0)} 字）"
+          + (f" | {COLOR_YELLOW}冲突 {lib['conflicts']}{COLOR_RESET}" if lib.get("conflicts") else "")
+          + (f" | 已遗忘 {lib['tombstones']}" if lib.get("tombstones") else ""))
+    if lib.get("updated_at"):
+        print(f"  最近汇总: {lib['updated_at']}")
+    for row in data["accounts"]:
+        if not row["exists"]:
+            print(f"  {row['alias']:<12} 无 MEMORY.md")
+            continue
+        flag = f"{COLOR_YELLOW}超 4000 字上限{COLOR_RESET}" if row["over_limit"] else "正常"
+        print(f"  {row['alias']:<12} 自有 {row['own_chars']:>5} 字 | 共享 {row['shared_entries']:>2} 条 | "
+              f"合计 {row['total_chars']:>5} 字 | {flag}")
+        if not row["over_limit"]:
+            print(f"  {'':<12} 可用余量 {row.get('headroom', 0)} 字")
+    return 0
+
+def _memory_cmd_safe(args_list):
+    """给 memory 子命令兜底：两个进程抢锁不该甩 traceback 给用户。"""
+    try:
+        return run_memory_cmd(args_list)
+    except Exception as e:  # noqa: BLE001 - 只吞锁冲突，其余照常抛
+        if type(e).__name__ == "MemoryLockTimeout":
+            print(f"{COLOR_YELLOW}记忆同步被另一个进程占用，请稍后重试{COLOR_RESET}")
+            return 1
+        raise
+
+
 def print_help():
     print(f"""
 {COLOR_BOLD}WorkBuddy CLI (v{VERSION}){COLOR_RESET}
@@ -4193,6 +4567,7 @@ def print_help():
   workbuddy help                  查看本帮助信息 (别名: wb-help, workbuddy-help)
   workbuddy login [别名] [--force] 独立免登扫码录入 (别名: wb-login)
   workbuddy switch [账号名]        免重新扫码切换账号 (别名: wb-switch)
+  workbuddy memory [子命令]        跨账号记忆汇总与共享读取 (别名: wb-memory)
   workbuddy list / status [--json] 查看账号列表与凭证状态 (别名: wb-list, wb-status)
   workbuddy audit [--daemon]      凭据健康审计与常驻巡检 (别名: wb-audit)
   workbuddy usage [选项]           积分消耗与流速统计 (别名: wb-usage)
@@ -4264,6 +4639,8 @@ def main():
         target = clean_args[0] if clean_args else None
         run_checkin(target, with_chat=with_chat)
         return
+    if "memory" in prog_name:
+        sys.exit(_memory_cmd_safe(args))
     if "switch" in prog_name:
         if args:
             switch_to_profile(args[0], auto_restart=True)
@@ -4334,6 +4711,8 @@ def main():
             switch_to_profile(args[1], auto_restart=True)
         else:
             interactive_menu()
+    elif cmd in ["memory", "mem"]:
+        sys.exit(_memory_cmd_safe(args[1:]))
     elif cmd in ["checkin", "check-in", "sign", "signin"]:
         with_chat = ("--no-chat" not in args)
         clean_args = [a for a in args[1:] if a != "--no-chat"]
