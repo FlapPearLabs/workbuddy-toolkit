@@ -2997,6 +2997,15 @@ def restore_profile(trash_name):
     文件名中的时间戳后缀会成为账号别名（如 alpha.20261024-120000），
     与 remove 时的提示一致；如需短别名，恢复后手工重命名 .info 文件即可。
     """
+    try:
+        with _TrashLock():
+            return _restore_profile_locked(trash_name)
+    except TimeoutError as e:
+        print(f"{COLOR_RED}恢复失败: {e}{COLOR_RESET}")
+        return False
+
+def _restore_profile_locked(trash_name):
+    """restore_profile 的锁内实现：查重 + 同 uid 校验 + 原子搬回。"""
     trash_dir = get_trash_dir()
     # 只从 .trash 取、只往库根放：文件名来自用户输入，必须剥掉任何路径成分，
     # 否则 `--restore ../alpha` 会把凭据搬出备份库且绕过所有确认
@@ -3059,12 +3068,22 @@ def empty_trash(force=False):
         if ans not in ("y", "yes"):
             print("已取消。")
             return False
-    failed = []
-    for n in items:
-        try:
-            os.remove(os.path.join(get_trash_dir(), n))
-        except OSError as e:
-            failed.append(f"{n}: {e}")
+    try:
+        with _TrashLock():
+            # 锁内重新列举：确认期间另一个进程可能已清空或新增条目
+            items = sorted(_trash_files())
+            if not items:
+                print("回收站已被其他进程清空。")
+                return True
+            failed = []
+            for n in items:
+                try:
+                    os.remove(os.path.join(get_trash_dir(), n))
+                except OSError as e:
+                    failed.append(f"{n}: {e}")
+    except TimeoutError as e:
+        print(f"{COLOR_RED}清空失败: {e}{COLOR_RESET}")
+        return False
     if failed:
         print(f"{COLOR_RED}清空失败 {len(failed)} 项（其余已删除）:{COLOR_RESET}")
         for line in failed:
@@ -3189,16 +3208,27 @@ def remove_profile(target_name, assume_yes=False, force=False):
                 # 确认之后才归档，取消 = 零写入（评审行内 P2：原先写在确认前）。
                 # 且只写即将移走的那一份，不碰同 uid 的其他别名。
                 latest = get_active_account()
+                latest_uid = ""
+                if isinstance(latest, dict):
+                    latest_uid = str((latest.get("account") or {}).get("uid") or "").strip()
                 synced_ok = False
-                if latest:
+                if latest and latest_uid == target["uid"]:
                     try:
                         atomic_write_json(target["path"], latest)
                         synced_ok = True
                     except Exception:
                         synced_ok = False
-                if not synced_ok:
+                elif latest:
+                    # 确认期间客户端切了号：绝不能把 B 的凭据写进 A 的备份，
+                    # 否则 A 的原始字节会被 B 覆盖后再移入回收站（对抗审查 P0）
+                    print(f"{COLOR_YELLOW}▲ 警告: 活跃账号在确认期间已切换，本次未归档新凭据。{COLOR_RESET}")
+                    print(f"{COLOR_YELLOW}  回收站里保存的是删除前的原始备份，恢复后或需重新扫码。{COLOR_RESET}")
+                if latest and not synced_ok and latest_uid == target["uid"]:
                     print(f"{COLOR_YELLOW}▲ 警告: 未能把客户端最新凭据写回这份备份。{COLOR_RESET}")
                     print(f"{COLOR_YELLOW}  回收站里保存的可能是上次保存的旧 token，恢复后或需重新扫码。{COLOR_RESET}")
+                elif not latest:
+                    print(f"{COLOR_YELLOW}▲ 警告: 活跃凭据在确认期间已不可读，未归档新凭据。{COLOR_RESET}")
+                    print(f"{COLOR_YELLOW}  回收站里保存的是删除前的原始备份，恢复后或需重新扫码。{COLOR_RESET}")
 
             trash_dir = get_trash_dir()
             os.makedirs(trash_dir, exist_ok=True)
@@ -3228,17 +3258,18 @@ def remove_profile(target_name, assume_yes=False, force=False):
                 except OSError:
                     pass
                 raise
+            # 成功消息在锁内发出：避免刚释放锁就被 --empty-trash 删掉文件，
+            # 导致打印出的恢复路径已不存在（对抗审查 P1）
+            print(f"{COLOR_GREEN}✔ 账号 '{target_name}' 已移入回收站: {trash_path}{COLOR_RESET}")
+            print(f"  恢复: workbuddy remove --restore {os.path.basename(trash_path)}")
+            print(f"  彻底销毁: workbuddy remove --empty-trash")
+            return True
     except TimeoutError as e:
         print(f"{COLOR_RED}删除失败: {e}{COLOR_RESET}")
         return False
     except OSError as e:
         print(f"{COLOR_RED}删除失败: {e}{COLOR_RESET}")
         return False
-
-    print(f"{COLOR_GREEN}✔ 账号 '{target_name}' 已移入回收站: {trash_path}{COLOR_RESET}")
-    print(f"  恢复: workbuddy remove --restore {os.path.basename(trash_path)}")
-    print(f"  彻底销毁: workbuddy remove --empty-trash")
-    return True
 
 def get_workbuddy_client_version(runtime_path=None):
     """

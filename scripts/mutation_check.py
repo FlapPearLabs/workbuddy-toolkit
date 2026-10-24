@@ -72,6 +72,14 @@ MUTATIONS = [
         test="tests.test_trash_collision.TestTrashCollision.test_collision_keeps_existing_bytes",
         why="去掉 O_EXCL 后同名占位会覆盖既有回收站文件，软删除静默失效",
     ),
+    dict(
+        name="活跃账号切号防护",
+        old='if latest and latest_uid == target["uid"]:',
+        new='if latest:  # mutated',
+        test="tests.test_remove_sync_guard.TestRemoveSyncGuard."
+             "test_active_switch_during_confirm_does_not_overwrite_backup",
+        why="不校验 uid 会把切号后的 B 凭据写进 A 的备份，A 的原始字节永久丢失",
+    ),
 ]
 
 
