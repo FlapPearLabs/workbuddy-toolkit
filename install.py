@@ -51,6 +51,7 @@ CLI_ALIASES = [
     "wb-list", "workbuddy-list",
     "wb-status", "workbuddy-status",
     "wb-switch", "workbuddy-switch",
+    "wb-rm", "workbuddy-rm",
     "wb-checkin", "workbuddy-checkin",
     "wb-chat", "workbuddy-chat",
     "wb-doctor", "workbuddy-doctor",
@@ -64,6 +65,7 @@ CLI_ALIASES = [
 # Windows 垫片: 别名 -> 子命令
 WINDOWS_SUBCOMMAND_SHIMS = {
     "switch": ["wb-switch", "workbuddy-switch"],
+    "rm": ["wb-rm", "workbuddy-rm"],
     "checkin": ["wb-checkin", "workbuddy-checkin"],
     "chat": ["wb-chat", "workbuddy-chat"],
     "doctor": ["wb-doctor", "workbuddy-doctor"],
@@ -341,7 +343,7 @@ def install_cli():
     if bin_dir not in path_env.split(os.pathsep):
         print(f"{COLOR_YELLOW}   [提示] {bin_dir} 暂不在当前 PATH 中，建议将其加入 ~/.bashrc 或 ~/.zshrc{COLOR_RESET}")
 
-    print(f"{COLOR_GREEN}1. ✔ CLI 工具已安装至: {bin_dir} (workbuddy, wb-help, wb-models, wb-router, wb-switch, wb-checkin){COLOR_RESET}")
+    print(f"{COLOR_GREEN}1. ✔ CLI 工具已安装至: {bin_dir} (workbuddy, wb-help, wb-models, wb-router, wb-switch, wb-rm, wb-checkin){COLOR_RESET}")
     return dest_bin, bin_dir
 
 
@@ -568,6 +570,7 @@ def main(argv=None):
     print(f"  • {COLOR_BOLD}workbuddy doctor{COLOR_RESET}      : 检查凭据与运行时兼容性")
     print(f"  • {COLOR_BOLD}wb-login{COLOR_RESET}              : 添加账号")
     print(f"  • {COLOR_BOLD}wb-switch{COLOR_RESET}             : 多账号切换菜单")
+    print(f"  • {COLOR_BOLD}wb-rm{COLOR_RESET}                : 删除账号 (默认进回收站, 可 --restore 恢复)")
     print(f"  • {COLOR_BOLD}wb-checkin{COLOR_RESET}            : 手动执行签到")
     print(f"  • {COLOR_BOLD}workbuddy init{COLOR_RESET}        : 开启多账号工作区共享 (可用 workbuddy rollback 恢复)")
     print(f"{COLOR_BOLD}{COLOR_GREEN}========================================================{COLOR_RESET}\n")

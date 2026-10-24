@@ -94,12 +94,13 @@ fi
 
 for alias in wb-help workbuddy-help wb-login workbuddy-login wb-audit workbuddy-audit \
              wb-list workbuddy-list wb-status workbuddy-status wb-switch workbuddy-switch \
+             wb-rm workbuddy-rm \
              wb-checkin workbuddy-checkin wb-chat workbuddy-chat wb-doctor workbuddy-doctor \
              wb-models workbuddy-models wb-usage workbuddy-usage wb-router workbuddy-router \
              wb-sandbox workbuddy-sandbox wb-tool workbuddy-tool; do
     ln -sf "$INSTALL_BIN/workbuddy" "$INSTALL_BIN/$alias"
 done
-echo "   ✔ 已安装: workbuddy, workbuddy-log-guard, wb-tool, wb-help, wb-login, wb-audit, wb-list, wb-status, wb-switch, wb-checkin, wb-chat, wb-doctor, wb-models, wb-usage, wb-router, wb-sandbox"
+echo "   ✔ 已安装: workbuddy, workbuddy-log-guard, wb-tool, wb-help, wb-login, wb-audit, wb-list, wb-status, wb-switch, wb-rm, wb-checkin, wb-chat, wb-doctor, wb-models, wb-usage, wb-router, wb-sandbox"
 
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
     echo "   [提示] $HOME/.local/bin 似乎不在您的环境变量 PATH 中。"
@@ -193,6 +194,7 @@ echo "下一步:"
 echo "  • workbuddy doctor      : 检查凭据与运行时兼容性"
 echo "  • wb-login              : 添加账号"
 echo "  • wb-switch             : 多账号切换菜单"
+echo "  • wb-rm                 : 删除账号 (默认进回收站, 可 --restore 恢复)"
 echo "  • wb-checkin            : 手动执行签到"
 echo "  • workbuddy init        : 开启多账号工作区共享 (可用 workbuddy rollback 恢复)"
 echo "========================================================"
