@@ -157,6 +157,7 @@ wb-login      添加 / 刷新账号配置
 wb-list       查看已保存账号
 wb-status     查看当前账号与凭据状态
 wb-switch     切换账号
+wb-remove     删除账号（可选清记忆）
 wb-audit      检查账号健康度
 ```
 
@@ -322,6 +323,7 @@ Toolkit 增加运行时兼容层，同时坚持一个边界：**需要解密能�
 | `wb-list` | 查看账号配置 |
 | `wb-status` | 查看当前状态 |
 | `wb-switch` | 切换账号 |
+| `wb-remove` | 删除账号（可选清理人格/记忆） |
 | `wb-audit` | 凭据健康巡检 |
 | `wb-checkin` | 每日签到 / 连续任务 |
 | `wb-usage` | 使用量与积分流速 |

@@ -51,6 +51,7 @@ CLI_ALIASES = [
     "wb-list", "workbuddy-list",
     "wb-status", "workbuddy-status",
     "wb-switch", "workbuddy-switch",
+    "wb-remove", "workbuddy-remove",
     "wb-checkin", "workbuddy-checkin",
     "wb-chat", "workbuddy-chat",
     "wb-doctor", "workbuddy-doctor",
@@ -64,6 +65,7 @@ CLI_ALIASES = [
 # Windows 垫片: 别名 -> 子命令
 WINDOWS_SUBCOMMAND_SHIMS = {
     "switch": ["wb-switch", "workbuddy-switch"],
+    "remove": ["wb-remove", "workbuddy-remove"],
     "checkin": ["wb-checkin", "workbuddy-checkin"],
     "chat": ["wb-chat", "workbuddy-chat"],
     "doctor": ["wb-doctor", "workbuddy-doctor"],
@@ -568,6 +570,7 @@ def main(argv=None):
     print(f"  • {COLOR_BOLD}workbuddy doctor{COLOR_RESET}      : 检查凭据与运行时兼容性")
     print(f"  • {COLOR_BOLD}wb-login{COLOR_RESET}              : 添加账号")
     print(f"  • {COLOR_BOLD}wb-switch{COLOR_RESET}             : 多账号切换菜单")
+    print(f"  • {COLOR_BOLD}wb-remove{COLOR_RESET}             : 删除本地已保存账号 (默认移入回收站)")
     print(f"  • {COLOR_BOLD}wb-checkin{COLOR_RESET}            : 手动执行签到")
     print(f"  • {COLOR_BOLD}workbuddy init{COLOR_RESET}        : 开启多账号工作区共享 (可用 workbuddy rollback 恢复)")
     print(f"{COLOR_BOLD}{COLOR_GREEN}========================================================{COLOR_RESET}\n")

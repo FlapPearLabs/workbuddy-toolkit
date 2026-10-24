@@ -8,6 +8,7 @@ WorkBuddy Toolkit provides zero-touch local automation for WorkBuddy & CodeBuddy
 ## Core Capabilities & CLI Commands
 - `workbuddy login [alias]` (`wb-login`): Terminal 1:1 ANSI QR-code independent login without opening the Electron UI.
 - `workbuddy switch [alias]` (`wb-switch`): Instant multi-account profile switching in <1s without WeChat re-scanning.
+- `workbuddy remove <alias>` (`wb-remove`): Delete a saved local profile; moves it to `~/.workbuddy/auth_profiles_trash/` unless `--purge`. Add `--purge-memory` to also archive the UID's persona/memory (`user-<uid>-*/`, `memory/<uid>_memory.md`); `--restore` brings back the paired pair, `--restore-memory <bundle>` restores an orphaned memory archive, and `--purge-trash <name>` clears a single corrupt/placeholder leftover. Deleting the active account writes a tombstone so `wb-checkin` does not auto-recreate it; `--force` is required, and non-interactive runs need `--yes`.
 - `workbuddy checkin` (`wb-checkin`): Automated silent daily check-in and low-cost/free model conversation keepalive.
 - `workbuddy status` / `list` (`wb-status` / `wb-list`): Account inventory, token expiry inspection, and JSON output for agents.
 - `workbuddy doctor` (`wb-doctor`): Inspect credential encryption (Suite 1 / $wbEncrypted), runtime compatibility, and Seatbelt rule health.

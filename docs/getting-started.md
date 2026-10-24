@@ -146,6 +146,7 @@ wb-login      添加账号
 wb-list       查看账号列表
 wb-status     查看当前状态
 wb-switch     切换账号
+wb-remove     删除账号（可选清记忆）
 wb-audit      检查账号健康度
 wb-checkin    签到与每日任务
 wb-usage      查看积分消耗与流速

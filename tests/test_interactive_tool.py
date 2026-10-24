@@ -163,5 +163,52 @@ class TestInteractiveToolStateMachine(unittest.TestCase):
                 ret = controller.run()
                 self.assertEqual(ret, 0)
 
+    def test_account_remove_flow(self):
+        """测试删除账号：选号 -> 二次确认（活跃账号再确认一次）-> 调用 remove_profile"""
+        self.mock_context["remove_profile"] = MagicMock(
+            return_value={"ok": True, "action": "trashed", "alias": "test_alias", "trash_path": "/tmp/trash/test_alias-x.info"}
+        )
+        controller = interactive_tool.InteractiveToolController(self.mock_context, pause_after_action=False)
+        # 2: 切换账号 -> 5: 删除账号 -> 1: 选中第一个 -> y: 确认 -> y: 活跃账号再确认
+        # -> n: 不清理人格/记忆 -> 0: 返回 -> 0: 退出
+        with patch("builtins.input", side_effect=["2", "5", "1", "y", "y", "n", "0", "0"]):
+            with patch("sys.stdout", new_callable=StringIO) as mock_out:
+                ret = controller.run()
+        self.assertEqual(ret, 0)
+        self.mock_context["remove_profile"].assert_called_once()
+        call = self.mock_context["remove_profile"].call_args
+        self.assertEqual(call.args[0], "test_alias")
+        self.assertTrue(call.kwargs.get("yes"))
+        self.assertTrue(call.kwargs.get("force"), "删除当前活跃账号应带上 force")
+        self.assertFalse(call.kwargs.get("purge_memory"), "默认不清理人格/记忆")
+        self.assertIn("已删除账号", mock_out.getvalue())
+
+    def test_account_remove_with_memory(self):
+        """删除时可以选择同时清理人格/记忆，并把 purge_memory 传给底层"""
+        self.mock_context["remove_profile"] = MagicMock(
+            return_value={"ok": True, "action": "trashed", "alias": "test_alias",
+                          "trash_path": "/tmp/trash/test_alias-x.info",
+                          "memory_action": "trashed", "memory_bundle": "/tmp/trash/memory/test_alias-x"}
+        )
+        controller = interactive_tool.InteractiveToolController(self.mock_context, pause_after_action=False)
+        with patch("builtins.input", side_effect=["2", "5", "1", "y", "y", "y", "0", "0"]):
+            with patch("sys.stdout", new_callable=StringIO) as mock_out:
+                ret = controller.run()
+        self.assertEqual(ret, 0)
+        call = self.mock_context["remove_profile"].call_args
+        self.assertTrue(call.kwargs.get("purge_memory"))
+        self.assertIn("人格/记忆已移入回收站", mock_out.getvalue())
+
+    def test_account_remove_cancelled(self):
+        """测试删除账号时回答 n 不调用删除引擎"""
+        self.mock_context["remove_profile"] = MagicMock(return_value={"ok": True})
+        controller = interactive_tool.InteractiveToolController(self.mock_context, pause_after_action=False)
+        with patch("builtins.input", side_effect=["2", "5", "1", "n", "0", "0"]):
+            with patch("sys.stdout", new_callable=StringIO) as mock_out:
+                ret = controller.run()
+        self.assertEqual(ret, 0)
+        self.mock_context["remove_profile"].assert_not_called()
+        self.assertIn("已取消删除", mock_out.getvalue())
+
 if __name__ == "__main__":
     unittest.main()

@@ -61,6 +61,8 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-status.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-status.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-switch.cmd")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-remove.cmd")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-remove.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-checkin.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-chat.cmd")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-doctor.cmd")))
@@ -83,6 +85,8 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-status")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-status")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-switch")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-remove")))
+            self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-remove")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-checkin")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-chat")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-doctor")))
@@ -92,12 +96,24 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-tool")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-tool")))
 
-        # 3. 运行卸载器（输入 n 回答不回滚数据库）
+        # 3. 造出回收站与"始终保留"的哨兵文件：
+        #    卸载器要清掉 auth_profiles_trash/（已删除凭证与记忆归档），但不能碰 auth_profiles/。
+        trash_dir = os.path.join(self.temp_home, ".workbuddy", "auth_profiles_trash")
+        profiles_dir = os.path.join(self.temp_home, ".workbuddy", "auth_profiles")
+        os.makedirs(trash_dir, exist_ok=True)
+        os.makedirs(profiles_dir, exist_ok=True)
+        with open(os.path.join(trash_dir, "demo-20260101-000000.info"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        keep_profile = os.path.join(profiles_dir, "keep.info")
+        with open(keep_profile, "w", encoding="utf-8") as f:
+            f.write("{}")
+
+        # 4. 运行卸载器（输入 n 回答不回滚数据库）
         unres = subprocess.run([sys.executable, uninstaller], input="n\n", cwd=REPO_DIR, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(unres.returncode, 0, f"uninstall.py 失败: {unres.stderr}\n{unres.stdout}")
         self.assertIn("卸载完成", unres.stdout)
 
-        # 4. 验证清理干净
+        # 5. 验证清理干净
         if sys.platform == "win32":
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-help.cmd")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-help.cmd")))
@@ -127,6 +143,11 @@ class TestInstallersE2E(unittest.TestCase):
         # 验证 ~/.workbuddy/toolkit 伴随组件目录已物理 100% 移除
         toolkit_path = os.path.join(self.temp_home, ".workbuddy", "toolkit")
         self.assertFalse(os.path.exists(toolkit_path))
+
+        # 卸载后不得在磁盘上留下已删除账号的凭据副本，但已保存账号必须原样保留
+        self.assertFalse(os.path.exists(trash_dir), "卸载后 auth_profiles_trash 目录必须被清理")
+        self.assertIn("已清理删除账号回收站", unres.stdout)
+        self.assertTrue(os.path.isfile(keep_profile), "卸载不得删除 ~/.workbuddy/auth_profiles/ 下的账号凭证")
 
     def _load_installer(self, name):
         spec = importlib.util.spec_from_file_location(name, os.path.join(REPO_DIR, "install.py"))
