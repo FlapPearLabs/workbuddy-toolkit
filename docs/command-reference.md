@@ -78,21 +78,33 @@ wb-switch
 ### 删除账号
 
 ```bash
-wb-remove <别名>              # 移入回收站，可还原
-wb-remove <别名> --purge      # 彻底删除，不留副本
-wb-remove <别名> --force      # 允许删除当前活跃账号的备份
-wb-remove <别名> --yes        # 非交互环境必须显式确认
+wb-remove <别名>                     # 移入回收站，可还原
+wb-remove <别名> --purge             # 彻底删除，不留副本
+wb-remove <别名> --force             # 允许删除当前活跃账号的备份 / 身份无法确认的条目
+wb-remove <别名> --yes               # 非交互环境必须显式确认
+
+wb-remove --list-trash               # 查看回收站内容（含昵称、UID、大小）
+wb-remove --restore <文件名>         # 从回收站恢复某个备份
+
+wb-remove --yes -- -weird            # `--` 之后的参数一律当作别名，用于 - 开头的账号名
 ```
 
 等价写法：`workbuddy remove`、`workbuddy delete`、`workbuddy rm`、`workbuddy del`、`workbuddy-remove`。
 注意 `remove` / `delete` / `rm` / `del` 过去会被当作账号名去匹配 Profile，现在优先按命令解析；
 若恰好有同名账号且未给目标，会提示改用 `wb-switch`。
 
+参数校验是严格的：**未知选项会直接报错，多个目标也会报错**，都不会执行任何删除。
+（早期版本会把不认识的选项静默丢弃，`remove alpha --dry-run` 会真的删掉 alpha。）
+
 删除的安全性设计：
 
-- **默认软删除**：文件移入 `auth_profiles/.trash/`，把文件搬回 `auth_profiles/` 即完成还原
+- **默认软删除**：文件移入 `auth_profiles/.trash/`，用 `--list-trash` 查看、`--restore` 还原
 - **默认拒绝删除当前活跃账号**：它是当前唯一可用的登录态备份，删掉只能重新扫码；确需删除要显式 `--force`
-- **交互式终端二次确认**；非交互环境（脚本、定时任务）必须带 `--yes`，避免误删
+- **身份无法确认时拒绝**：凭据文件损坏、`account` 为空或结构异常、目标条目读不出 UID —— 这些情况无法证明"不是活跃账号"，一律拒绝，需 `--force` 才放行
+- **交互式终端二次确认**；非交互环境（脚本、定时任务）必须带 `--yes`
+- **并发保护**：删除期间持有 `auth_profiles/.remove.lock`，拿不到锁直接失败，不会降级为无锁执行
+- **删除墓碑**：被删账号的 UID 记录在 `auth_profiles/.removed.json`，`wb-checkin` 的自动发现会跳过它，
+  否则"当前登录账号"会被自动重新入库、删除等于没删。用 `wb-login` 或 `wb-save` 重新保存该账号即解除标记
 - 删除最后一个账号时会额外提示「此后本地没有任何账号备份」
 - 失败时退出码为 `1`，便于脚本判断
 

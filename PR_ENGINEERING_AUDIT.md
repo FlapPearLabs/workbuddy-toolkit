@@ -459,6 +459,10 @@ _norm_uid(v)   = str(v or "").strip().casefold()
 这三行是缺陷 3、4、6 的修复落点，也是本 PR 的核心安全不变量：
 **只要无法证明"目标不是活跃账号"，就拒绝删除。**
 
+> ⚠️ 修正说明：该不变量在第 14 节所述的 v2 返工前**只对"活跃凭据不可读"成立**；
+> 当目标条目自身读不出 UID 时，v1 仅打印警告后继续删除，与上述表述不符。
+> 评审指出这一不一致后，v2 已让代码与表述对齐（改为默认拒绝，需 `--force` 放行）。
+
 ### 11.4 测试证据
 
 - 本次审计独立复验：10 项 PASS（见 9.1，脚本与输出在审计时现场生成，未入库）。
@@ -509,3 +513,109 @@ _norm_uid(v)   = str(v or "").strip().casefold()
 ---
 
 *报告生成时间：2026-10-24 15:0x（GMT+8）。所有时间与 SHA 均可通过 `git reflog` 与 PR 页面复核。*
+
+---
+
+## 14. 评审后的返工（v2）
+
+维护者在 PR 上提交了正式评审（`COMMENTED`，审查固定于 `c885318`），指出 3 个必须处理的缺陷。
+以下按"评审指出 → 本人复核 → 修复 → 验证"记录，**复核均为本次返工时现场实测，不是复述评审结论**。
+
+### 14.1 [P1] 未知选项被静默丢弃，预览意图变成真删除
+
+评审指出 `clean_args = [a for a in args if not a.startswith("-")]` 会丢弃所有未知选项。
+
+复核（修复前，实测）：
+
+```
+remove alpha --yes --dry-run   -> 返回 True，alpha 已被删除
+remove alpha beta --yes        -> 返回 True，beta 被忽略，只有 alpha 被删
+```
+
+修复：新增 `_parse_remove_args()` 严格解析 —— 未知选项报错、多目标报错、`--` 之后一律按操作数处理。
+
+验证（修复后，实测）：
+
+| 输入 | 修复前 | 修复后 |
+|---|---|---|
+| `remove alpha --yes --dry-run` | 删除成功 | 报错「未知选项: --dry-run」，**零删除** |
+| `remove alpha beta --yes` | 只删 alpha | 报错「一次只能删除一个账号」，**零删除** |
+| `remove --yes -- -weird` | 无法删除 | 正常删除 |
+
+新增 7 项 CLI 层测试（`TestRemoveCliArgs`），覆盖评审要求的"在 CLI 解析层补测"。
+
+### 14.2 [P2] 已删除的活跃账号会被签到自动收录回来
+
+评审指出 `run_checkin` 在目标查找与网络调用**之前**就自动入库，删除结果无法保持。
+
+复核：`bin/workbuddy` 内确有该逻辑（自动发现当前登录账号并写入 `auth_profiles`），
+因此删掉活跃账号的备份后，任何一次 `wb-checkin` 都会把它原样建回来，`--purge` 也一样。
+
+修复：
+- 删除时写入墓碑 `auth_profiles/.removed.json`（按 UID 记录）
+- `run_checkin` 的自动发现改为调用抽出的 `auto_import_active_profile()`，该函数先查墓碑，命中则跳过并提示
+- `wb-login` / `wb-save` 显式保存同一账号时调用 `clear_tombstone()` 解除标记
+- `--restore` 恢复备份时同样解除
+
+验证：新增 7 项 `TestRemoveTombstone`，其中 `test_auto_import_skips_tombstoned_uid` 直接复现评审描述的场景
+（活跃凭据存在 + 无 profile + 有墓碑 → 返回 None、不产生文件）。
+
+### 14.3 [P2] 获取不到锁时仍执行删除，互斥保证不成立
+
+评审指出 `_acquire_profiles_lock()` 超时返回 None 后函数仍继续删除，且锁覆盖了交互确认的等待时间。
+
+复核：两点均成立。原实现把 `_acquire_profiles_lock()` 放在函数入口，用户在 `[y/N]` 提示前停留超过 5 秒，
+另一调用就会超时降级。
+
+修复：
+- 锁移到"用户确认之后"，只覆盖"锁内重新核验 + 修改"临界区
+- 拿不到锁直接返回失败，并提示可在确认无其它进程时人工清理锁文件，不再降级
+- 锁文件写入 `pid` 与 `token`；释放时校验 token，避免替他人释放
+- 接管过期锁（默认 120 秒）额外要求**持有进程已不存在**（`_pid_is_alive`：Windows 用 `OpenProcess`，
+  POSIX 用 `signal 0`，无法判定时保守返回存活、不接管）
+- 锁内重新核验：目标仍存在、UID 未变，否则中止
+
+验证：新增 4 项 `TestRemoveLock`，其中"持锁进程存活则拒绝删除（等待 0.3 秒后返回错误）"与
+"锁年龄很旧但持有者存活时不接管"两条直接对应评审的复现步骤。
+
+### 14.4 评审未展开、复核后确认更严重的一项
+
+评审行内评论写的是"`{"account": null}`、数组等结构异常还需做类型校验"。
+
+复核：不是校验不足，是**直接抛异常崩溃**：
+
+```
+{"account": null}      -> AttributeError: 'NoneType' object has no attribute 'get'
+{"account": [1,2,3]}   -> AttributeError: 'list' object has no attribute 'get'
+```
+
+修复：新增 `_safe_uid()`，对非 dict、`account` 为 null/数组/字符串、`uid` 缺失或空白统一返回空串；
+删除流程改用该函数后，三种输入均变为"拒绝删除 + 明确提示"，不再崩溃。新增 5 项测试覆盖。
+
+### 14.5 评审指出、本人确认成立的表述问题
+
+评审指出审计报告声称"无法证明非活跃就一律拒绝"，但 v1 在目标条目缺 UID 时仅警告不拒绝。
+该批评成立，已在 11.3 节加修正说明，并在 v2 中把代码改为默认拒绝（`--force` 放行）。
+
+### 14.6 未处理的评审意见
+
+| 评审意见 | 处理 | 原因 |
+|---|---|---|
+| 无 `wb-tool` TUI 入口 | 未做 | 需要改动交互菜单，回归面较大，建议单独 PR |
+| `get_profiles()` 会隐藏损坏条目、导致无法清理 | 部分处理 | 现在身份无法确认时提示可用 `--force`，但没有提供"按文件名精确删除"的入口 |
+| `{"account": null}` 之外的深层结构校验 | 已处理 | 统一收敛到 `_safe_uid()` |
+| 回收站缺恢复命令 | 已处理 | 新增 `--list-trash` / `--restore` |
+
+### 14.7 返工后的测试状态
+
+```
+tests.test_remove_profile      65 项 OK   （v1 为 35 项）
+tests.test_toolkit            57 项 OK
+tests.test_installers         15 项 OK (skipped=2)
+scripts/leak_scan.py          通过
+```
+
+**CI 仍未运行**（`action_required`），跨平台结论依然未经证实。
+
+> 需要说明：本节由开发者在评审后自行编写并自我验证，**不是独立复核**。
+> 评审提出的缺陷是否真正修好，应以维护者复审为准。

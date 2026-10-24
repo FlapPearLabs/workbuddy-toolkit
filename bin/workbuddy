@@ -1900,6 +1900,9 @@ def run_login(alias=None, auto_switch=True, force=False):
     final_target_path = os.path.join(PROFILES_DIR, f"{final_alias}.info")
 
     atomic_write_json(final_target_path, profile_data)
+    # 用户显式重新登录这个账号 → 解除此前的删除标记，避免 wb-checkin 继续跳过它
+    if uid and clear_tombstone(uid):
+        print(f"{COLOR_CYAN}ℹ 已解除该账号的删除标记（此前被手动删除过），后续签到会正常纳入备份。{COLOR_RESET}")
 
     cache = get_audit_cache()
     if uid:
@@ -2598,29 +2601,47 @@ def notify_desktop(title, message):
             return False
     return False
 
+def auto_import_active_profile():
+    """把"当前已登录但尚未入库"的账号自动保存成 Profile。
+
+    返回新入库的别名；未入库（无活跃账号 / 已在库 / 带删除墓碑）时返回 None。
+    抽成独立函数的目的：让"删除墓碑跳过自动入库"这条规则可以被单元测试直接覆盖，
+    否则它只存在于 run_checkin 内部，测试无法稳定触达（会走网络）。
+    """
+    active_data = get_active_account()
+    if not active_data:
+        return None
+    acc = active_data.get("account") if isinstance(active_data, dict) else None
+    active_uid = acc.get("uid") if isinstance(acc, dict) else None
+    if not active_uid:
+        return None
+    profiles = get_profiles()
+    if any(p["uid"] == active_uid for p in profiles.values()):
+        return None
+    if is_tombstoned(active_uid):
+        # 用户手动删过这个账号，不能因为"客户端还登录着"就自动加回来
+        print(f"{COLOR_YELLOW}ℹ 当前账号已被手动删除并标记，跳过自动入库"
+              f"（如需恢复备份请运行 wb-login 或 wb-save）{COLOR_RESET}")
+        return None
+    nickname = get_display_nickname(acc if isinstance(acc, dict) else {},
+                                    default_name=str(active_uid)[:8])
+    clean_name = re.sub(r"[^\w\-]", "_", str(nickname)).strip("_") or str(active_uid)[:8]
+    cand = clean_name
+    idx = 1
+    while os.path.exists(os.path.join(PROFILES_DIR, f"{cand}.info")):
+        cand = f"{clean_name}_{idx}"
+        idx += 1
+    try:
+        atomic_write_json(os.path.join(PROFILES_DIR, f"{cand}.info"), active_data)
+    except Exception:
+        return None
+    print(f"{COLOR_GREEN}✔ 检测到新登录账号，已自动保存 Profile: '{cand}' (昵称: {nickname}){COLOR_RESET}")
+    return cand
+
 def run_checkin(target_name=None, with_chat=True):
     sync_active_token_to_profiles()
-    active_data = get_active_account()
+    auto_import_active_profile()
     profiles = get_profiles()
-
-    # 自动发现：如果当前客户端登录了一个尚未保存到 profiles 的新账号，自动识别并保存入库
-    if active_data:
-        active_uid = active_data.get("account", {}).get("uid") if isinstance(active_data, dict) and isinstance(active_data.get("account"), dict) else None
-        if active_uid and not any(p["uid"] == active_uid for p in profiles.values()):
-            nickname = get_display_nickname(active_data.get("account", {}) if isinstance(active_data, dict) else {}, default_name=str(active_uid)[:8])
-            clean_name = re.sub(r"[^\w\-]", "_", str(nickname)).strip("_") or str(active_uid)[:8]
-            cand = clean_name
-            idx = 1
-            while os.path.exists(os.path.join(PROFILES_DIR, f"{cand}.info")):
-                cand = f"{clean_name}_{idx}"
-                idx += 1
-            auto_path = os.path.join(PROFILES_DIR, f"{cand}.info")
-            try:
-                atomic_write_json(auto_path, active_data)
-                print(f"{COLOR_GREEN}✔ 检测到新登录账号，已自动保存 Profile: '{cand}' (昵称: {nickname}){COLOR_RESET}")
-                profiles = get_profiles()
-            except Exception:
-                pass
 
     if not profiles:
         print(f"{COLOR_RED}未在 ~/.workbuddy/auth_profiles 中发现任何保存的账号凭证。{COLOR_RESET}")
@@ -2834,6 +2855,9 @@ def save_current(name, force=False):
     final_name, is_inplace = resolve_profile_alias_conflict(name, uid, force=force)
     target_path = os.path.join(PROFILES_DIR, f"{final_name}.info")
     atomic_write_json(target_path, active_data)
+    # 用户显式 save 这个账号 → 解除此前的删除标记
+    if uid and clear_tombstone(uid):
+        print(f"{COLOR_CYAN}ℹ 已解除该账号的删除标记（此前被手动删除过）。{COLOR_RESET}")
     if is_inplace:
         print(f"{COLOR_GREEN}✔ 当前登录态已在位平滑更新至 Profile: '{final_name}' (昵称: {nickname}, UID: {uid}){COLOR_RESET}")
     else:
@@ -2841,62 +2865,320 @@ def save_current(name, force=False):
     print(f"{COLOR_GREEN}  凭证已按原生格式保存（保持加密格式，解密仅在内存中执行）。{COLOR_RESET}")
 
 def get_profiles_trash_dir():
-    """软删除回收站目录。放在 auth_profiles 内部且以点开头，get_profiles() 不会把它当账号读取。"""
+    """软删除回收站目录。以点开头，get_profiles() 只读顶层 *.info，不会把它当账号。"""
     return os.path.join(PROFILES_DIR, ".trash")
 
-def _acquire_profiles_lock(timeout=5.0, stale=30.0):
-    """对 auth_profiles 的删除操作做进程/线程互斥。
+def get_profiles_tombstone_file():
+    """删除墓碑文件。
 
-    没有互斥时，多个调用会各自持有过期的 profiles 快照并发写入回收站，
-    出现"多个调用都报告成功、回收站却只剩一份"的错乱结果。
-    锁文件用 O_CREAT|O_EXCL 原子创建；超过 stale 秒视为上次异常退出的僵尸锁，直接接管。
+    run_checkin 有一段"当前登录账号不在 profiles 里就自动入库"的发现逻辑，
+    会把手动删掉的活跃账号重新建回来。墓碑按 UID 记录"这是用户主动删的"，
+    让自动入库跳过它；用户在 wb-login / wb-save 里显式加回来时再解除。
     """
-    import time
+    return os.path.join(PROFILES_DIR, ".removed.json")
+
+def _norm_uid(value):
+    """UID 归一化：去首尾空白并忽略大小写，避免 ' UID-X ' 这类写法绕过身份比较。"""
+    return str(value or "").strip().casefold()
+
+def _safe_uid(data):
+    """从凭据/账号 JSON 里安全取 UID。
+
+    结构异常（account 为 null、数组、字符串，或整个文件不是对象）一律返回空串。
+    早期版本直接 .get() 会抛 AttributeError 崩溃。
+    """
+    if not isinstance(data, dict):
+        return ""
+    acc = data.get("account")
+    if not isinstance(acc, dict):
+        return ""
+    val = acc.get("uid")
+    if val is None or (isinstance(val, str) and not val.strip()):
+        val = acc.get("userId")
+    if val is None:
+        return ""
+    return _norm_uid(val)
+
+def _load_tombstones():
+    try:
+        with open(get_profiles_tombstone_file(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    entries = data.get("entries")
+    return entries if isinstance(entries, dict) else {}
+
+def _store_tombstones(entries):
+    atomic_write_json(get_profiles_tombstone_file(), {"version": 1, "entries": entries})
+
+def add_tombstone(uid, alias="", purged=False):
+    """记录一条删除墓碑。UID 缺失时无法按身份拦截，返回 False。"""
+    key = _norm_uid(uid)
+    if not key:
+        return False
+    entries = _load_tombstones()
+    entries[key] = {"alias": str(alias or ""), "removedAt": int(time.time()), "purged": bool(purged)}
+    try:
+        _store_tombstones(entries)
+        return True
+    except Exception:
+        return False
+
+def clear_tombstone(uid):
+    """解除墓碑：用户在 wb-login / wb-save 里主动把该账号加回来时调用。"""
+    key = _norm_uid(uid)
+    if not key:
+        return False
+    entries = _load_tombstones()
+    if key not in entries:
+        return False
+    entries.pop(key, None)
+    try:
+        _store_tombstones(entries)
+        return True
+    except Exception:
+        return False
+
+def is_tombstoned(uid):
+    key = _norm_uid(uid)
+    return bool(key) and key in _load_tombstones()
+
+def _pid_is_alive(pid):
+    """判断 PID 是否仍存活。无法判定时返回 True —— 宁可不接管，也不误踢活着的进程。"""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return True
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED：进程在但无权查询
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return True
+
+def _acquire_profiles_lock(timeout=8.0, stale=120.0):
+    """获取删除互斥锁，返回 (token, error)。
+
+    与早期版本的三个差别（评审意见）：
+    1. 只在"核验＋修改"的临界区持锁，不覆盖用户确认的等待时间
+    2. 拿不到锁直接失败，绝不降级为"无锁继续删"
+    3. 接管过期锁除了看年龄，还要确认持有进程已不存在，避免误踢运行慢但活着的进程
+    """
     lock_path = os.path.join(PROFILES_DIR, ".remove.lock")
-    deadline = time.time() + timeout
+    token = "%d-%d" % (os.getpid(), int(time.time() * 1000))
+    deadline = time.time() + max(0.0, float(timeout))
     while True:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
+            holder, age = None, None
             try:
-                if time.time() - os.path.getmtime(lock_path) > stale:
-                    os.remove(lock_path)
-                    continue
+                age = time.time() - os.path.getmtime(lock_path)
             except OSError:
-                pass
+                age = None
+            try:
+                with open(lock_path, "r", encoding="utf-8") as f:
+                    info = json.load(f)
+                if isinstance(info, dict):
+                    holder = info.get("pid")
+            except (OSError, ValueError):
+                holder = None
+            if age is not None and age > stale and (holder is None or not _pid_is_alive(holder)):
+                try:
+                    os.remove(lock_path)
+                except OSError:
+                    pass
+                continue
             if time.time() >= deadline:
-                return None
+                if holder:
+                    return None, "另一个删除进程正在运行（PID %s，锁已存在 %d 秒）" % (holder, int(age or 0))
+                return None, "另一个删除进程正在运行（锁已存在 %d 秒）" % int(age or 0)
             time.sleep(0.05)
             continue
-        except OSError:
-            # 目录不可写等情况下不阻塞删除，退化为无锁执行
-            return None
-        os.close(fd)
-        return lock_path
-
-def remove_profile(query, assume_yes=False, force=False, purge=False):
-    """删除已保存的账号 Profile（加锁版本，见 _remove_profile_locked）。"""
-    if not os.path.isdir(PROFILES_DIR):
-        os.makedirs(PROFILES_DIR, exist_ok=True)
-    lock_path = _acquire_profiles_lock()
-    try:
-        return _remove_profile_locked(query, assume_yes=assume_yes, force=force, purge=purge)
-    finally:
-        if lock_path:
+        except OSError as e:
+            return None, "无法创建锁文件 %s: %s" % (lock_path, e)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"pid": os.getpid(), "token": token, "startedAt": int(time.time())}, f)
+        except Exception as e:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
             try:
                 os.remove(lock_path)
             except OSError:
                 pass
+            return None, "无法写入锁文件: %s" % e
+        return token, None
 
-def _remove_profile_locked(query, assume_yes=False, force=False, purge=False):
+def _release_profiles_lock(token):
+    """只释放自己持有的锁：token 不符说明已被他人接管，不能误删别人的锁。"""
+    if not token:
+        return
+    lock_path = os.path.join(PROFILES_DIR, ".remove.lock")
+    try:
+        with open(lock_path, "r", encoding="utf-8") as f:
+            info = json.load(f)
+        if not isinstance(info, dict) or info.get("token") != token:
+            return
+    except (OSError, ValueError):
+        return
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+
+def _trash_entries():
+    d = get_profiles_trash_dir()
+    if not os.path.isdir(d):
+        return []
+    return sorted(f for f in os.listdir(d) if f.endswith(".info"))
+
+def list_trash():
+    """列出回收站内容。回收站里的文件名带时间戳，没有列表就无法挑出要恢复的那个。"""
+    entries = _trash_entries()
+    if not entries:
+        print(f"{COLOR_YELLOW}回收站为空: {get_profiles_trash_dir()}{COLOR_RESET}")
+        return True
+    print(f"{COLOR_BOLD}回收站内容（{len(entries)} 项）{COLOR_RESET}")
+    print(f"  目录: {get_profiles_trash_dir()}\n")
+    for f in entries:
+        p = os.path.join(get_profiles_trash_dir(), f)
+        nick, uid, note = "-", "-", ""
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict) and isinstance(data.get("account"), dict):
+                acc = data["account"]
+                nick = str(acc.get("nickname") or "-")
+                uid = str(acc.get("uid") or "-")[:8]
+        except Exception:
+            note = "（内容不可解析）"
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            size = 0
+        print("  %-44s %8d B  昵称=%s UID=%s %s" % (f, size, nick, uid, note))
+    print(f"\n恢复: {COLOR_CYAN}workbuddy remove --restore <文件名>{COLOR_RESET}")
+    return True
+
+def restore_from_trash(name):
+    """把回收站里的备份搬回 auth_profiles/，并解除该 UID 的删除墓碑。"""
+    raw = str(name or "").strip()
+    if not raw:
+        print(f"{COLOR_RED}请提供回收站文件名，先运行: workbuddy remove --list-trash{COLOR_RESET}")
+        return False
+    base = os.path.basename(raw)
+    if base != raw or not base.endswith(".info"):
+        print(f"{COLOR_RED}只接受回收站内的 .info 文件名（用 --list-trash 查看）: {raw}{COLOR_RESET}")
+        return False
+    src = os.path.join(get_profiles_trash_dir(), base)
+    if not os.path.isfile(src):
+        print(f"{COLOR_RED}回收站中没有该文件: {base}{COLOR_RESET}")
+        return False
+    alias = re.sub(r"\.\d{8}-\d{6}(-\d+)?\.info$", "", base)
+    if not alias or alias == base:
+        alias = base[:-5]
+    dest = os.path.join(PROFILES_DIR, alias + ".info")
+    if os.path.exists(dest):
+        print(f"{COLOR_RED}目标账号已存在: {alias}.info，请先处理同名账号{COLOR_RESET}")
+        return False
+    try:
+        os.replace(src, dest)
+    except OSError:
+        try:
+            shutil.move(src, dest)
+        except Exception as e:
+            print(f"{COLOR_RED}恢复失败: {e}{COLOR_RESET}")
+            return False
+    uid = ""
+    try:
+        with open(dest, "r", encoding="utf-8") as f:
+            uid = _safe_uid(json.load(f))
+    except Exception:
+        pass
+    cleared = clear_tombstone(uid) if uid else False
+    print(f"{COLOR_GREEN}✔ 已从回收站恢复账号: '{alias}'{COLOR_RESET}")
+    if cleared:
+        print(f"{COLOR_CYAN}  已同时解除删除标记，wb-checkin 不会再跳过它{COLOR_RESET}")
+    return True
+
+def _execute_remove(path, matched_name, nick, purge):
+    """真正执行删除（必须已在锁内调用）。返回 (ok, 输出行列表)。"""
+    if purge:
+        os.remove(path)
+        return True, [f"{COLOR_GREEN}✔ 已彻底删除账号 Profile: '{matched_name}' (昵称: {nick}){COLOR_RESET}"]
+    trash_dir = get_profiles_trash_dir()
+    os.makedirs(trash_dir, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = f"{matched_name}.{stamp}"
+    # 用 O_CREAT|O_EXCL 原子占位选名：先 exists 再 move 存在 TOCTOU，
+    # 多调用同秒删除同一别名会选中同一目标路径并互相覆盖回收站副本。
+    dest = None
+    for idx in range(1000):
+        cand = os.path.join(trash_dir, "%s%s.info" % (base, "" if idx == 0 else "-%d" % idx))
+        try:
+            fd = os.open(cand, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        dest = cand
+        break
+    if dest is None:
+        return False, [f"{COLOR_RED}删除失败: 回收站内同名副本过多，请先清理 {trash_dir}{COLOR_RESET}"]
+    try:
+        os.replace(path, dest)
+    except OSError:
+        try:
+            shutil.move(path, dest)
+        except BaseException:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            raise
+    return True, [
+        f"{COLOR_GREEN}✔ 已删除账号 Profile: '{matched_name}' (昵称: {nick}){COLOR_RESET}",
+        f"{COLOR_CYAN}  已移入回收站: {dest}{COLOR_RESET}",
+        f"{COLOR_CYAN}  恢复: workbuddy remove --restore {os.path.basename(dest)}{COLOR_RESET}",
+    ]
+
+def remove_profile(query, assume_yes=False, force=False, purge=False):
     """删除已保存的账号 Profile。
 
-    安全边界：
-    1. 默认软删除：文件移入 auth_profiles/.trash/，随时可手工还原；只有 --purge 才真正删除
-    2. 默认拒绝删除"当前活跃账号"：它是当前唯一可用的登录态备份，删了就只能重新扫码；
-       确实要删必须显式 --force
-    3. 交互式终端做二次确认；非交互环境必须带 --yes，避免脚本或定时任务误删
-    4. 删除最后一个 Profile 时额外提示：此后本地没有任何账号备份
+    执行顺序：解析 → 前置校验 → 用户确认 → 加锁 → 锁内重新核验 → 修改 → 写墓碑 → 解锁。
+
+    两条关键约束（针对评审意见修正）：
+    1. 锁只覆盖"核验＋修改"临界区，不覆盖交互确认的等待时间；
+       早期版本在函数入口就加锁，用户在提示前多停几秒就会让其它调用超时或接管。
+    2. 拿不到锁直接失败，不降级为无锁执行；否则互斥语义形同虚设。
     """
     profiles = get_profiles()
     if not profiles:
@@ -2910,20 +3192,12 @@ def _remove_profile_locked(query, assume_yes=False, force=False, purge=False):
         return False
 
     nick = profile.get("nickname") or matched_name
-    uid = str(profile.get("uid") or "")
-    path = profile.get("path")
-
-    def _norm_uid(value):
-        """UID 归一化：去首尾空白并忽略大小写，避免 ' UID-X ' 这类写法绕过活跃账号判定。"""
-        return str(value or "").strip().casefold()
-
-    active = get_active_account()
-    active_acc = active.get("account", {}) if isinstance(active, dict) else {}
-    active_uid = _norm_uid(active_acc.get("uid") or active_acc.get("userId"))
-    # 凭据文件在、却拿不到 UID 时（解析失败 / 结构异常 / account 为空），
-    # 判定"当前活跃账号是谁"失去依据，必须按不可确认处理。
+    uid = _norm_uid(profile.get("uid"))
+    active_uid = _safe_uid(get_active_account())
+    # 凭据文件存在却拿不到 UID（解析失败 / account 为 null 或数组 / 尚未登录完成）时，
+    # 无法判定"谁是活跃账号"，一律按最坏假设处理。
     active_unknown = os.path.exists(AUTH_FILE) and not active_uid
-    is_active = bool(_norm_uid(uid) and active_uid and _norm_uid(uid) == active_uid)
+    is_active = bool(uid and active_uid and uid == active_uid)
 
     if is_active and not force:
         print(f"{COLOR_RED}拒绝删除: '{matched_name}' 正是当前活跃账号。{COLOR_RESET}")
@@ -2932,22 +3206,24 @@ def _remove_profile_locked(query, assume_yes=False, force=False, purge=False):
         print(f"{COLOR_YELLOW}  确认要连当前登录态一起删，请显式加 --force{COLOR_RESET}")
         return False
 
-    # 活跃凭据文件存在却解析不出来时，无法证明"目标不是活跃账号"。
-    # 此时静默放行会误删唯一的登录态备份，因此按最坏假设处理，除非用户显式 --force。
     if active_unknown and not force:
         print(f"{COLOR_RED}拒绝删除: 当前登录凭据存在，但读不到账号 UID。{COLOR_RESET}")
-        print(f"{COLOR_YELLOW}  文件可能是损坏的、结构异常的，或登录尚未完成；此时无法确认"
+        print(f"{COLOR_YELLOW}  文件可能损坏、结构异常，或登录尚未完成；此时无法确认"
               f"'{matched_name}' 是否为活跃账号，按最坏情况处理以避免误删。{COLOR_RESET}")
         print(f"{COLOR_YELLOW}  可先运行 wb-status 查看状态；确认无风险后加 --force 重试。{COLOR_RESET}")
+        return False
+
+    if not uid and not force:
+        # 与上面同一条不变量：无法证明它不是活跃账号，就不删。
+        print(f"{COLOR_RED}拒绝删除: '{matched_name}' 的凭据里读不出 UID，无法确认它的身份。{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}  这通常是文件结构损坏。确认它只是一个坏掉的备份后，加 --force 删除。{COLOR_RESET}")
         return False
 
     remaining = len(profiles) - 1
     if remaining == 0:
         print(f"{COLOR_YELLOW}▲ 这是最后一个已保存账号，删除后本地将没有任何账号备份。{COLOR_RESET}")
-    if not _norm_uid(uid) and active_uid:
-        # 文件结构损坏导致读不出 UID：无法确认它是不是活跃账号。
-        # 这里不硬拦（否则坏文件永远清不掉），但必须让用户知道判断依据缺失。
-        print(f"{COLOR_YELLOW}▲ 该账号缺少 UID 字段，无法确认是否为活跃账号，请自行确认后再决定是否继续。{COLOR_RESET}")
+    if is_active:
+        print(f"{COLOR_YELLOW}▲ 该账号当前正登录中，--force 删除后客户端仍在线，但本地不再有可回滚的备份。{COLOR_RESET}")
 
     action_desc = "彻底删除" if purge else "移入回收站"
     if not assume_yes:
@@ -2969,75 +3245,130 @@ def _remove_profile_locked(query, assume_yes=False, force=False, purge=False):
             print(f"{COLOR_YELLOW}已取消，未做任何修改。{COLOR_RESET}")
             return False
 
+    token, lock_err = _acquire_profiles_lock()
+    if lock_err:
+        print(f"{COLOR_RED}拒绝执行: {lock_err}{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}  锁用于避免并发删除互相覆盖回收站副本，因此不降级为无锁执行。{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}  请稍后重试；若确认没有其它删除进程，可人工删除锁文件: "
+              f"{os.path.join(PROFILES_DIR, '.remove.lock')}{COLOR_RESET}")
+        return False
+
     try:
-        if purge:
-            os.remove(path)
-            print(f"{COLOR_GREEN}✔ 已彻底删除账号 Profile: '{matched_name}' (昵称: {nick}){COLOR_RESET}")
-        else:
-            trash_dir = get_profiles_trash_dir()
-            os.makedirs(trash_dir, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            base = f"{matched_name}.{stamp}"
-            # 用 O_CREAT|O_EXCL 原子占位选名。先 os.path.exists() 再 move 存在 TOCTOU：
-            # 多进程/多线程在同一秒删除同一别名时会选中同一目标路径，互相覆盖回收站副本。
-            dest = None
-            for idx in range(1000):
-                cand = os.path.join(trash_dir, "%s%s.info" % (base, "" if idx == 0 else "-%d" % idx))
-                try:
-                    fd = os.open(cand, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                except FileExistsError:
-                    continue
-                os.close(fd)
-                dest = cand
-                break
-            if dest is None:
-                print(f"{COLOR_RED}删除失败: 回收站内同名副本过多，请先清理 {trash_dir}{COLOR_RESET}")
-                return False
-            try:
-                os.replace(path, dest)
-            except OSError:
-                # 跨卷等场景回落到 shutil.move；失败时清掉刚创建的空占位，避免留下垃圾文件
-                try:
-                    shutil.move(path, dest)
-                except BaseException:
-                    try:
-                        os.remove(dest)
-                    except OSError:
-                        pass
-                    raise
-            print(f"{COLOR_GREEN}✔ 已删除账号 Profile: '{matched_name}' (昵称: {nick}){COLOR_RESET}")
-            print(f"{COLOR_CYAN}  已移入回收站: {dest}{COLOR_RESET}")
-            print(f"{COLOR_CYAN}  需要恢复时把该文件移回 {PROFILES_DIR} 即可{COLOR_RESET}")
-    except FileNotFoundError:
-        print(f"{COLOR_RED}删除失败: 目标账号文件已不存在（可能已被其他进程删除）。{COLOR_RESET}")
-        return False
-    except Exception as e:
-        print(f"{COLOR_RED}删除失败: {e}{COLOR_RESET}")
-        return False
+        # 锁内重新核验：确认等待期间目标没有被别的进程删掉或替换成另一个账号
+        current = get_profiles()
+        if matched_name not in current:
+            print(f"{COLOR_RED}删除失败: '{matched_name}' 在等待期间已不存在（可能被其它进程删除）。{COLOR_RESET}")
+            return False
+        if _norm_uid(current[matched_name].get("uid")) != uid:
+            print(f"{COLOR_RED}删除失败: '{matched_name}' 在等待期间被替换成另一个账号，请重新确认。{COLOR_RESET}")
+            return False
+        try:
+            ok, lines = _execute_remove(current[matched_name]["path"], matched_name, nick, purge)
+        except FileNotFoundError:
+            print(f"{COLOR_RED}删除失败: 目标账号文件已不存在（可能已被其它进程删除）。{COLOR_RESET}")
+            return False
+        except Exception as e:
+            print(f"{COLOR_RED}删除失败: {e}{COLOR_RESET}")
+            return False
+        for line in lines:
+            print(line)
+        if not ok:
+            return False
+        if uid:
+            if add_tombstone(uid, matched_name, purged=purge):
+                print(f"{COLOR_CYAN}  已记录删除标记，wb-checkin 不会把它自动加回备份"
+                      f"（wb-login / wb-save 可解除）{COLOR_RESET}")
+            else:
+                print(f"{COLOR_YELLOW}▲ 未能写入删除标记，wb-checkin 仍可能把该账号自动加回备份。{COLOR_RESET}")
+    finally:
+        _release_profiles_lock(token)
 
     if is_active:
         print(f"{COLOR_YELLOW}▲ 已删除当前活跃账号的备份。客户端登录态不受影响，但本地没有回滚副本了。{COLOR_RESET}")
     print(f"{COLOR_CYAN}  剩余已保存账号: {remaining} 个（wb-list 查看）{COLOR_RESET}")
     return True
 
+_REMOVE_BOOL_FLAGS = {
+    "--yes": "assume_yes", "-y": "assume_yes",
+    "--force": "force", "-f": "force",
+    "--purge": "purge",
+    "--list-trash": "list_trash",
+}
+
+def _parse_remove_args(args):
+    """严格解析 remove 参数，返回 (opts, targets, error)。
+
+    旧实现用 `[a for a in args if not a.startswith("-")]` 过滤，导致两个安全问题：
+      `remove alpha --dry-run` 会把 --dry-run 静默丢弃并真的删掉 alpha；
+      `remove alpha beta` 会忽略 beta 只删 alpha。
+    现在：未知选项直接报错、目标多于一个直接报错、`--` 之后一律按目标处理
+    （这样才能删除以连字符开头的别名）。
+    """
+    opts = {"assume_yes": False, "force": False, "purge": False,
+            "list_trash": False, "restore": None, "help": False}
+    targets = []
+    only_targets = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if only_targets:
+            targets.append(a)
+        elif a == "--":
+            only_targets = True
+        elif a in ("-h", "--help"):
+            opts["help"] = True
+        elif a in _REMOVE_BOOL_FLAGS:
+            opts[_REMOVE_BOOL_FLAGS[a]] = True
+        elif a == "--restore":
+            if i + 1 >= len(args):
+                return opts, targets, "--restore 需要一个回收站文件名"
+            opts["restore"] = args[i + 1]
+            i += 1
+        elif a.startswith("-") and a != "-":
+            return opts, targets, "未知选项: %s" % a
+        else:
+            targets.append(a)
+        i += 1
+    return opts, targets, None
+
 def run_remove_cmd(args, invoked=None):
     """remove 子命令的参数解析与分发。
 
     invoked 是用户实际敲的命令词（remove / delete / rm / wb-remove ...）。
     remove/delete/rm 过去会被当成"账号名快捷切换"去匹配 Profile，加上本命令后
-    这些词优先解释为删除；若恰好存在同名账号，这里给出明确出口，避免老习惯失灵。
+    这些词优先解释为删除；若恰好存在同名账号，这里给出明确出口。
     """
-    if any(a in ("-h", "--help", "help") for a in args):
+    opts, targets, err = _parse_remove_args(args)
+
+    if opts["help"]:
         print("用法: workbuddy remove <账号别名> [--yes] [--force] [--purge]")
-        print("  --yes    非交互环境必须显式确认")
-        print("  --force  允许删除当前活跃账号的备份")
-        print("  --purge  彻底删除，不保留回收站副本")
+        print("      workbuddy remove --list-trash")
+        print("      workbuddy remove --restore <回收站文件名>")
+        print("  --yes         非交互环境必须显式确认")
+        print("  --force       允许删除当前活跃账号的备份，或身份无法确认的条目")
+        print("  --purge       彻底删除，不保留回收站副本")
+        print("  --list-trash  列出回收站内容")
+        print("  --restore     从回收站恢复一个备份")
+        print("  --            之后的参数一律按账号别名处理（用于 - 开头的别名）")
         return True
-    assume_yes = any(a in ("--yes", "-y") for a in args)
-    force = any(a in ("--force", "-f") for a in args)
-    purge = "--purge" in args
-    clean_args = [a for a in args if not a.startswith("-")]
-    if not clean_args:
+
+    if err:
+        print(f"{COLOR_RED}参数错误: {err}{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}  未执行任何删除。用法: workbuddy remove <账号别名> [--yes] [--force] [--purge]{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}  完整选项见: workbuddy remove -h{COLOR_RESET}")
+        return False
+
+    if (opts["list_trash"] or opts["restore"] is not None) and targets:
+        print(f"{COLOR_RED}参数错误: --list-trash / --restore 不接受账号目标{COLOR_RESET}")
+        return False
+
+    if opts["list_trash"]:
+        return list_trash()
+
+    if opts["restore"] is not None:
+        return restore_from_trash(opts["restore"])
+
+    if not targets:
         print(f"{COLOR_RED}请提供要删除的账号别名，例如: workbuddy remove oldaccount{COLOR_RESET}")
         print(f"{COLOR_YELLOW}  查看已保存账号: wb-list{COLOR_RESET}")
         if invoked:
@@ -3048,7 +3379,14 @@ def run_remove_cmd(args, invoked=None):
             except Exception:
                 pass
         return False
-    return remove_profile(clean_args[0], assume_yes=assume_yes, force=force, purge=purge)
+
+    if len(targets) > 1:
+        print(f"{COLOR_RED}参数错误: 一次只能删除一个账号，收到 {len(targets)} 个: {', '.join(targets)}{COLOR_RESET}")
+        print(f"{COLOR_YELLOW}  请逐个执行，避免一次误删多个。未执行任何删除。{COLOR_RESET}")
+        return False
+
+    return remove_profile(targets[0], assume_yes=opts["assume_yes"],
+                          force=opts["force"], purge=opts["purge"])
 
 def get_workbuddy_client_version(runtime_path=None):
     """
@@ -4414,6 +4752,7 @@ def print_help():
   workbuddy doctor                诊断凭据解密与运行环境 (别名: wb-doctor)
   workbuddy save <别名> [--force]  保存当前活跃账号为 Profile
   workbuddy remove <别名>          删除已保存账号 (默认移入回收站, 别名: wb-remove)
+  workbuddy remove --list-trash   查看回收站内容; --restore <文件名> 可恢复
   workbuddy init / rollback       开启 / 撤销全域工作区打通
   workbuddy restart               重启 WorkBuddy 客户端
 

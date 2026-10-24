@@ -20,6 +20,7 @@ import os
 import sys
 import json
 import stat
+import time
 import shutil
 import tempfile
 import unittest
@@ -580,6 +581,396 @@ class TestRemoveCliDispatch(unittest.TestCase):
             code, _ = self._main_exit_code(["workbuddy", word, "old", "--yes"])
             self.assertEqual(code, 0, "%s 子命令失败" % word)
             self.assertFalse(os.path.exists(os.path.join(workbuddy.PROFILES_DIR, "old.info")))
+
+
+class _RemoveV2Base(unittest.TestCase):
+    """v2 系列用例的公共夹具（隔离目录 + 假凭据）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.orig_profiles_dir = workbuddy.PROFILES_DIR
+        self.orig_auth_file = workbuddy.AUTH_FILE
+        self.orig_stdin = sys.stdin
+        workbuddy.PROFILES_DIR = os.path.join(self.tmp, "auth_profiles")
+        workbuddy.AUTH_FILE = os.path.join(self.tmp, "auth", "workbuddy-desktop.info")
+        os.makedirs(workbuddy.PROFILES_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(workbuddy.AUTH_FILE), exist_ok=True)
+
+    def tearDown(self):
+        workbuddy.PROFILES_DIR = self.orig_profiles_dir
+        workbuddy.AUTH_FILE = self.orig_auth_file
+        sys.stdin = self.orig_stdin
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # --- helpers ---
+    def prof(self, alias, uid=None, nick=None):
+        data = {"account": {"nickname": nick or alias}, "auth": {}}
+        if uid is not None:
+            data["account"]["uid"] = uid
+        with open(os.path.join(workbuddy.PROFILES_DIR, alias + ".info"), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    def raw_auth(self, content):
+        with open(workbuddy.AUTH_FILE, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def active(self, uid, nick="当前"):
+        with open(workbuddy.AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump({"account": {"uid": uid, "nickname": nick}}, f, ensure_ascii=False)
+
+    def exists(self, alias):
+        return os.path.exists(os.path.join(workbuddy.PROFILES_DIR, alias + ".info"))
+
+    def leftovers(self):
+        return sorted(f[:-5] for f in os.listdir(workbuddy.PROFILES_DIR) if f.endswith(".info"))
+
+    def call(self, args, invoked=None):
+        with redirect_stdout(io.StringIO()) as buf:
+            ok = workbuddy.run_remove_cmd(args, invoked=invoked)
+        return ok, buf.getvalue()
+
+    def run_remove(self, *a, **kw):
+        with redirect_stdout(io.StringIO()) as buf:
+            ok = workbuddy.remove_profile(*a, **kw)
+        return ok, buf.getvalue()
+
+    def trash_files(self):
+        d = workbuddy.get_profiles_trash_dir()
+        if not os.path.isdir(d):
+            return []
+        return sorted(os.listdir(d))
+
+
+class TestRemoveCliArgs(_RemoveV2Base):
+    """CLI 参数层：未知选项、多目标、-- 分隔符。
+
+    评审实测发现旧实现会把未知选项静默丢弃（`remove alpha --dry-run` 直接删了 alpha），
+    这些用例锁住修复后的严格行为。
+    """
+
+    def test_unknown_option_rejected_and_nothing_deleted(self):
+        self.prof("alpha", "uid-a")
+        self.prof("beta", "uid-b")
+        self.active("uid-zzz")
+
+        ok, out = self.call(["alpha", "--yes", "--dry-run"])
+
+        self.assertFalse(ok, out)
+        self.assertIn("未知选项", out)
+        self.assertEqual(self.leftovers(), ["alpha", "beta"], "未知选项绝不能触发删除")
+
+    def test_multiple_targets_rejected(self):
+        self.prof("alpha", "uid-a")
+        self.prof("beta", "uid-b")
+        self.active("uid-zzz")
+
+        ok, out = self.call(["alpha", "beta", "--yes"])
+
+        self.assertFalse(ok, out)
+        self.assertIn("一次只能删除一个账号", out)
+        self.assertEqual(self.leftovers(), ["alpha", "beta"])
+
+    def test_dash_separator_allows_hyphen_alias(self):
+        self.prof("-weird", "uid-w")
+        self.prof("keep", "uid-k")
+        self.active("uid-k")
+
+        ok, out = self.call(["--yes", "--", "-weird"])
+
+        self.assertTrue(ok, out)
+        self.assertEqual(self.leftovers(), ["keep"])
+
+    def test_flags_after_separator_are_treated_as_targets(self):
+        """POSIX 语义：`--` 之后一律是操作数，`--yes` 也不例外，应报"多目标"而不是被当开关。"""
+        self.prof("alpha", "uid-a")
+        self.active("uid-zzz")
+
+        ok, out = self.call(["--", "alpha", "--yes"])
+
+        self.assertFalse(ok, out)
+        self.assertIn("一次只能删除一个账号", out)
+        self.assertTrue(self.exists("alpha"))
+
+    def test_restore_without_filename_is_rejected(self):
+        ok, out = self.call(["--restore"])
+        self.assertFalse(ok)
+        self.assertIn("需要一个回收站文件名", out)
+
+    def test_list_trash_rejects_targets(self):
+        self.prof("alpha", "uid-a")
+        ok, out = self.call(["--list-trash", "alpha"])
+        self.assertFalse(ok)
+        self.assertIn("不接受账号目标", out)
+
+    def test_help_lists_new_options(self):
+        ok, out = self.call(["-h"])
+        self.assertTrue(ok)
+        for token in ("--list-trash", "--restore", "--purge", "--"):
+            self.assertIn(token, out)
+
+
+class TestRemoveIdentitySafety(_RemoveV2Base):
+    """身份判定与结构异常：任何异常结构都不能崩溃，且不能放行删除。"""
+
+    def test_account_null_does_not_crash(self):
+        self.prof("alpha", "uid-a")
+        self.prof("keep", "uid-k")
+        self.raw_auth('{"account": null}')
+
+        ok, out = self.run_remove("alpha", assume_yes=True)
+
+        self.assertFalse(ok, out)
+        self.assertIn("读不到账号 UID", out)
+        self.assertTrue(self.exists("alpha"))
+
+    def test_account_list_does_not_crash(self):
+        self.prof("alpha", "uid-a")
+        self.prof("keep", "uid-k")
+        self.raw_auth('{"account": [1, 2, 3]}')
+
+        ok, out = self.run_remove("alpha", assume_yes=True)
+
+        self.assertFalse(ok, out)
+        self.assertTrue(self.exists("alpha"))
+
+    def test_account_string_does_not_crash(self):
+        self.prof("alpha", "uid-a")
+        self.prof("keep", "uid-k")
+        self.raw_auth('{"account": "whoami"}')
+
+        ok, _ = self.run_remove("alpha", assume_yes=True)
+        self.assertFalse(ok)
+        self.assertTrue(self.exists("alpha"))
+
+    def test_top_level_list_does_not_crash(self):
+        self.prof("alpha", "uid-a")
+        self.prof("keep", "uid-k")
+        self.raw_auth('[1, 2, 3]')
+
+        ok, _ = self.run_remove("alpha", assume_yes=True)
+        self.assertFalse(ok)
+        self.assertTrue(self.exists("alpha"))
+
+    def test_profile_without_uid_refused_by_default(self):
+        """审计报告声称的不变量：无法证明目标不是活跃账号，就不删。
+
+        早期实现这里只是打印警告然后照删，与报告的表述不一致。
+        """
+        self.prof("broken")           # 无 uid
+        self.prof("keep", "uid-k")
+        self.active("uid-k")
+
+        ok, out = self.run_remove("broken", assume_yes=True)
+
+        self.assertFalse(ok, out)
+        self.assertIn("读不出 UID", out)
+        self.assertTrue(self.exists("broken"))
+
+    def test_profile_without_uid_deleted_with_force(self):
+        self.prof("broken")
+        self.prof("keep", "uid-k")
+        self.active("uid-k")
+
+        ok, out = self.run_remove("broken", assume_yes=True, force=True)
+        self.assertTrue(ok, out)
+        self.assertFalse(self.exists("broken"))
+
+    def test_safe_uid_handles_weird_shapes(self):
+        for data in (None, [], "str", 42, {"account": None}, {"account": []}, {}):
+            self.assertEqual(workbuddy._safe_uid(data), "", "异常结构应返回空串: %r" % (data,))
+        self.assertEqual(workbuddy._safe_uid({"account": {"uid": " UID-X "}}), "uid-x")
+        self.assertEqual(workbuddy._safe_uid({"account": {"userId": "U-2"}}), "u-2")
+
+
+class TestRemoveLock(_RemoveV2Base):
+    """锁语义：拿不到锁必须失败，接管过期锁要确认持有者已退出。"""
+
+    def _hold_lock(self, pid, token="holder", age_seconds=0):
+        lock = os.path.join(workbuddy.PROFILES_DIR, ".remove.lock")
+        with open(lock, "w", encoding="utf-8") as f:
+            json.dump({"pid": pid, "token": token, "startedAt": 0}, f)
+        if age_seconds:
+            old = time.time() - age_seconds
+            os.utime(lock, (old, old))
+        return lock
+
+    def test_lock_held_by_live_process_blocks_deletion(self):
+        self.prof("alpha", "uid-a")
+        self.prof("keep", "uid-k")
+        self.active("uid-k")
+        self._hold_lock(os.getpid())          # 自己这个进程必然存活
+
+        real = workbuddy._acquire_profiles_lock
+        with patch.object(workbuddy, "_acquire_profiles_lock",
+                          side_effect=lambda *a, **k: real(timeout=0.3)):
+            ok, out = self.run_remove("alpha", assume_yes=True)
+
+        self.assertFalse(ok, out)
+        self.assertIn("另一个删除进程正在运行", out)
+        self.assertTrue(self.exists("alpha"), "锁不可用时绝不能删除")
+
+    def test_stale_lock_with_dead_pid_is_taken_over(self):
+        self.prof("alpha", "uid-a")
+        self.prof("keep", "uid-k")
+        self.active("uid-k")
+        self._hold_lock(999999, token="dead-process", age_seconds=3600)
+
+        real = workbuddy._acquire_profiles_lock
+        with patch.object(workbuddy, "_acquire_profiles_lock",
+                          side_effect=lambda *a, **k: real(timeout=1.0)):
+            ok, out = self.run_remove("alpha", assume_yes=True)
+
+        self.assertTrue(ok, out)
+        self.assertFalse(self.exists("alpha"))
+
+    def test_fresh_lock_of_live_process_is_not_stolen_even_if_old(self):
+        """年龄很大但持有进程还活着 → 不能接管（防止误踢运行慢的进程）。"""
+        lock = self._hold_lock(os.getpid(), token="slow-but-alive", age_seconds=3600)
+        token, err = workbuddy._acquire_profiles_lock(timeout=0.3)
+        self.assertIsNone(token)
+        self.assertIn("正在运行", err)
+        self.assertTrue(os.path.exists(lock))
+
+    def test_release_does_not_remove_other_owners_lock(self):
+        lock = os.path.join(workbuddy.PROFILES_DIR, ".remove.lock")
+        token, err = workbuddy._acquire_profiles_lock(timeout=0.2)
+        self.assertIsNone(err)
+        with open(lock, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "token": "someone-else"}, f)
+
+        workbuddy._release_profiles_lock(token)
+
+        self.assertTrue(os.path.exists(lock), "锁已被他人接管时不能替他人释放")
+
+
+class TestRemoveTombstone(_RemoveV2Base):
+    """删除墓碑：删掉的账号不能被 wb-checkin 的自动发现重新加回来。"""
+
+    def test_delete_writes_tombstone(self):
+        self.prof("live", "uid-live")
+        self.prof("keep", "uid-k")
+        self.active("uid-live")
+
+        ok, out = self.run_remove("live", assume_yes=True, force=True)
+
+        self.assertTrue(ok, out)
+        self.assertTrue(workbuddy.is_tombstoned("uid-live"))
+        self.assertIn("删除标记", out)
+
+    def test_purge_also_writes_tombstone(self):
+        self.prof("live", "uid-live")
+        self.prof("keep", "uid-k")
+        self.active("uid-live")
+
+        ok, _ = self.run_remove("live", assume_yes=True, force=True, purge=True)
+        self.assertTrue(ok)
+        self.assertTrue(workbuddy.is_tombstoned("uid-live"), "purge 之后同样不能被自动加回")
+
+    def test_auto_import_skips_tombstoned_uid(self):
+        """评审实测：删掉活跃账号后跑 checkin，会被自动建回来。这条用例锁住修复。"""
+        self.active("uid-gone", "已删除的号")
+        workbuddy.add_tombstone("uid-gone", "gone")
+
+        with redirect_stdout(io.StringIO()) as buf:
+            created = workbuddy.auto_import_active_profile()
+
+        self.assertIsNone(created, "带墓碑的账号不应被自动入库")
+        self.assertEqual(self.leftovers(), [])
+        self.assertIn("跳过自动入库", buf.getvalue())
+
+    def test_auto_import_still_works_without_tombstone(self):
+        self.active("uid-new", "新号")
+
+        with redirect_stdout(io.StringIO()):
+            created = workbuddy.auto_import_active_profile()
+
+        self.assertIsNotNone(created)
+        self.assertEqual(self.leftovers(), [created])
+
+    def test_auto_import_skips_already_saved(self):
+        self.prof("saved", "uid-new")
+        self.active("uid-new")
+
+        with redirect_stdout(io.StringIO()):
+            created = workbuddy.auto_import_active_profile()
+        self.assertIsNone(created)
+        self.assertEqual(self.leftovers(), ["saved"])
+
+    def test_save_current_clears_tombstone(self):
+        self.active("uid-live", "live")
+        workbuddy.add_tombstone("uid-live", "live")
+
+        with redirect_stdout(io.StringIO()):
+            workbuddy.save_current("live")
+
+        self.assertFalse(workbuddy.is_tombstoned("uid-live"),
+                         "用户显式 save 后应解除墓碑")
+
+    def test_restore_clears_tombstone(self):
+        self.prof("live", "uid-live")
+        self.prof("keep", "uid-k")
+        self.active("uid-live")
+        self.run_remove("live", assume_yes=True, force=True)
+        self.assertTrue(workbuddy.is_tombstoned("uid-live"))
+
+        name = [f for f in self.trash_files() if f.startswith("live.")][0]
+        ok, out = self.call(["--restore", name])
+
+        self.assertTrue(ok, out)
+        self.assertFalse(workbuddy.is_tombstoned("uid-live"))
+
+
+class TestRemoveTrashCommands(_RemoveV2Base):
+    """回收站列表与恢复：否则用户面对一堆带时间戳的文件无法把账号还原回来。"""
+
+    def test_list_trash_when_empty(self):
+        ok, out = self.call(["--list-trash"])
+        self.assertTrue(ok)
+        self.assertIn("回收站为空", out)
+
+    def test_list_trash_shows_entries(self):
+        self.prof("trashme", "uid-t", "回收站里的号")
+        self.prof("keep", "uid-k")
+        self.active("uid-k")
+        self.run_remove("trashme", assume_yes=True)
+
+        ok, out = self.call(["--list-trash"])
+
+        self.assertTrue(ok, out)
+        self.assertIn("回收站里的号", out)
+        self.assertIn("trashme.", out)
+
+    def test_restore_roundtrip(self):
+        self.prof("trashme", "uid-t")
+        self.prof("keep", "uid-k")
+        self.active("uid-k")
+        self.run_remove("trashme", assume_yes=True)
+        name = self.trash_files()[0]
+
+        ok, out = self.call(["--restore", name])
+
+        self.assertTrue(ok, out)
+        self.assertEqual(self.leftovers(), ["keep", "trashme"])
+        self.assertEqual(self.trash_files(), [])
+
+    def test_restore_rejects_path_traversal(self):
+        self.prof("keep", "uid-k")
+        ok, out = self.call(["--restore", "../../etc/passwd"])
+        self.assertFalse(ok, out)
+        self.assertIn("只接受回收站内的", out)
+
+    def test_restore_refuses_when_alias_exists(self):
+        self.prof("dup", "uid-d")
+        self.prof("keep", "uid-k")
+        self.active("uid-k")
+        self.run_remove("dup", assume_yes=True)
+        self.prof("dup", "uid-d2")          # 同名账号又被创建出来
+
+        name = [f for f in self.trash_files() if f.startswith("dup.")][0]
+        ok, out = self.call(["--restore", name])
+
+        self.assertFalse(ok, out)
+        self.assertIn("目标账号已存在", out)
 
 
 if __name__ == "__main__":
