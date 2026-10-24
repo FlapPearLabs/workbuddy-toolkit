@@ -6,6 +6,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -99,7 +100,10 @@ class TestProfileRemove(unittest.TestCase):
             return f.read()
 
     def _trash_names(self):
-        return sorted(os.listdir(self.trash)) if os.path.isdir(self.trash) else []
+        # 只看凭据文件：.trash 里还有跨进程锁 .ops.lock，不是回收站条目
+        if not os.path.isdir(self.trash):
+            return []
+        return sorted(n for n in os.listdir(self.trash) if n.endswith(".info"))
 
     # ------------------------------------------------------------------
 
@@ -323,20 +327,32 @@ class TestProfileRemove(unittest.TestCase):
         self.assertEqual(open(auth_file, "rb").read(), auth_before, "wb-remove 触发了切号！")
 
     def test_concurrent_remove_same_alias(self):
-        """评审第 4 条：并发删同一别名时，恰好一个成功、回收站恰好一份"""
+        """并发删同一别名：恰好一个成功，且成功方打印的恢复路径必须真实存在。
+
+        Windows 上两个进程对同一源同时 os.replace 可能都返回成功，但文件
+        只落在其中一方；若不做校验，失败方也会打印成功并给出不存在的恢复
+        文件名（对抗审查 P1）。
+        """
         self._make("alpha", "uid-a")
         procs = [
             subprocess.Popen([sys.executable, WB, "remove", "alpha", "-y"], env=self.env,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             for _ in range(2)
         ]
-        codes = sorted(p.wait(timeout=60) for p in procs)
+        outs = []
         for p in procs:
-            p.stdout.close()
-            p.stderr.close()
+            out, _err = p.communicate(timeout=60)
+            outs.append(out)
+        codes = sorted(p.returncode for p in procs)
         self.assertEqual(codes, [0, 1], f"并发删除退出码异常: {codes}")
         self.assertEqual(len(self._trash_names()), 1, self._trash_names())
         self.assertFalse(os.path.exists(os.path.join(self.prof, "alpha.info")))
+
+        winners = [o for o in outs if "已移入回收站" in o]
+        self.assertEqual(len(winners), 1, f"两个进程都声称成功: {outs}")
+        m = re.search(r"已移入回收站:\s*(.+?)\s*$", winners[0], re.M)
+        self.assertTrue(m, winners[0])
+        self.assertTrue(os.path.isfile(m.group(1).strip()), f"恢复路径不存在: {m.group(1)}")
 
     def test_remove_mode_flags_mutually_exclusive(self):
         """--restore 与 --empty-trash 同用会静默销毁想恢复的文件，必须拒绝"""
