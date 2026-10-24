@@ -114,9 +114,11 @@ def run_test(test_id, wb_path=None):
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     if wb_path:
         env["WB_BIN"] = wb_path
+    # 600s：test_trash_lock 的屏障在子进程被安全软件拖慢时会等到 240s 并重试一次，
+    # 180s 会把"慢启动重试"误杀成超时（变异的重叠效应是确定性的，重试不会漏报）
     return subprocess.run(
         [sys.executable, "-m", "unittest", test_id, "-v"],
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=180,
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=600,
     )
 
 
