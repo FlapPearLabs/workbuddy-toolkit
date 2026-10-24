@@ -442,6 +442,62 @@ class TestProfileRemove(unittest.TestCase):
         trash_file = os.path.join(self.trash, self._trash_names()[0])
         self.assertIn("NEW", self._read_bytes(trash_file).decode("utf-8"))
 
+    # ---------------- P2：参数严格性与回收站形态异常 ----------------
+
+    def test_force_rejected_with_trash_modes(self):
+        """--force 只表示放宽活跃账号保护，对回收站模式无意义，必须拒绝而非静默忽略"""
+        self._make("alpha", "uid-a")
+        self._run("remove", "alpha", "-y")
+        stamped = self._trash_names()[0]
+        r = self._run("remove", "--restore", stamped, "--force")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("不适用于", r.stdout)
+        self.assertIn(stamped, self._trash_names())
+        r2 = self._run("remove", "--empty-trash", "--force")
+        self.assertEqual(r2.returncode, 1)
+        self.assertEqual(len(self._trash_names()), 1, "回收站被误清空")
+
+    def test_mode_flags_reject_positional(self):
+        """--list-trash / --empty-trash 带位置参数时不得静默忽略"""
+        self._make("alpha", "uid-a")
+        r = self._run("remove", "--list-trash", "alpha")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("不接受位置参数", r.stdout)
+        r2 = self._run("remove", "--empty-trash", "alpha", "-y")
+        self.assertEqual(r2.returncode, 1)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "alpha.info")))
+
+    def test_restore_rejects_extra_positional(self):
+        self._make("alpha", "uid-a")
+        self._run("remove", "alpha", "-y")
+        stamped = self._trash_names()[0]
+        r = self._run("remove", "--restore", stamped, "beta")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("一次只能恢复一个文件", r.stdout)
+        self.assertIn(stamped, self._trash_names())
+
+    def test_status_json_has_trash_count(self):
+        self._make("alpha", "uid-a")
+        self._run("remove", "alpha", "-y")
+        r = self._run("status", "--json")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(json.loads(r.stdout)["trash_count"], 1)
+
+    def test_restore_handles_broken_trash_gracefully(self):
+        """.trash 被换成普通文件时，锁目录创建失败也要优雅报错，不抛栈"""
+        with open(self.trash, "w", encoding="utf-8") as f:
+            f.write("not a dir")
+        r = self._run("remove", "--restore", "anything")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("恢复失败", r.stdout)
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX 权限位")
+    def test_trash_dir_is_0700(self):
+        self._make("alpha", "uid-a")
+        self.assertEqual(self._run("remove", "alpha", "-y").returncode, 0)
+        self.assertEqual(os.stat(self.trash).st_mode & 0o777, 0o700)
+
     # ---------------- 隔离与跨平台证据（评审标注"无法核验"的三项） ----------------
 
     def test_isolation_guard_rejects_real_paths(self):

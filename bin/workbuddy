@@ -2024,7 +2024,8 @@ def show_status(as_json=False):
             "platform": sys.platform,
             "active_account": active_dict,
             "profiles": profiles_list,
-            "total_profiles": len(profiles_list)
+            "total_profiles": len(profiles_list),
+            "trash_count": len(_trash_files())
         }
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
@@ -2895,6 +2896,17 @@ def get_trash_dir():
     """已删除 Profile 的回收站目录：auth_profiles/.trash/。"""
     return os.path.join(PROFILES_DIR, ".trash")
 
+def _ensure_trash_dir():
+    """创建回收站目录，并在 POSIX 上收紧到 0700——里面放的是凭据副本。"""
+    trash_dir = get_trash_dir()
+    os.makedirs(trash_dir, mode=0o700, exist_ok=True)
+    if sys.platform != "win32":
+        try:
+            os.chmod(trash_dir, 0o700)   # 已存在的目录也要收紧
+        except OSError:
+            pass
+    return trash_dir
+
 class _TrashLock:
     """回收站写操作的跨进程互斥锁（Windows: msvcrt 字节锁 / POSIX: flock）。
 
@@ -2908,7 +2920,7 @@ class _TrashLock:
         self.fd = None
 
     def __enter__(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        _ensure_trash_dir()
         self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         if os.fstat(self.fd).st_size == 0:
             os.write(self.fd, b"\0")          # Windows 字节锁需要文件至少 1 字节
@@ -3000,7 +3012,8 @@ def restore_profile(trash_name):
     try:
         with _TrashLock():
             return _restore_profile_locked(trash_name)
-    except TimeoutError as e:
+    except OSError as e:
+        # 含 TimeoutError；.trash 或锁文件形态异常时优雅失败，不向用户抛栈
         print(f"{COLOR_RED}恢复失败: {e}{COLOR_RESET}")
         return False
 
@@ -3081,7 +3094,8 @@ def empty_trash(force=False):
                     os.remove(os.path.join(get_trash_dir(), n))
                 except OSError as e:
                     failed.append(f"{n}: {e}")
-    except TimeoutError as e:
+    except OSError as e:
+        # 含 TimeoutError；回收站/锁文件异常时优雅失败
         print(f"{COLOR_RED}清空失败: {e}{COLOR_RESET}")
         return False
     if failed:
@@ -3100,7 +3114,7 @@ def remove_main(args):
               "      workbuddy remove --restore <回收站文件名>\n"
               "      workbuddy remove --empty-trash [-y]\n"
               "  -y/--yes   跳过普通确认；删除当前登录账号的备份仍需二次确认\n"
-              "  --force    放宽活跃账号保护（不再二次确认），不用于跳过普通确认")
+              "  --force,-f 放宽活跃账号保护（不再二次确认），不用于跳过普通确认")
         return
     mode_flags = [f for f in ("--list-trash", "--empty-trash", "--restore") if f in args]
     if len(mode_flags) > 1:
@@ -3118,6 +3132,23 @@ def remove_main(args):
     # 混用会让同一个 flag 在 save/remove 之间含义相反（评审 #24 第 2、5 条）。
     assume_yes = any(a in ("-y", "--yes") for a in args)
     relax_protection = any(a in ("--force", "-f") for a in args)
+
+    if mode_flags and relax_protection:
+        # --force 的语义只有"放宽活跃账号保护"，对回收站模式无意义；
+        # 静默接受会让用户以为它生效了（对抗审查 P2）
+        print(f"{COLOR_RED}错误: --force/-f 只用于删除账号，不适用于 {' '.join(mode_flags)}。{COLOR_RESET}")
+        sys.exit(1)
+    if "--list-trash" in args or "--empty-trash" in args:
+        extra = [a for a in args if not a.startswith("-")]
+        if extra:
+            print(f"{COLOR_RED}错误: 该模式不接受位置参数: {', '.join(extra)}{COLOR_RESET}")
+            sys.exit(1)
+    if "--restore" in args:
+        ridx = args.index("--restore")
+        extra = [a for a in args[ridx + 2:] if not a.startswith("-")]
+        if extra:
+            print(f"{COLOR_RED}错误: 一次只能恢复一个文件，多余参数: {', '.join(extra)}{COLOR_RESET}")
+            sys.exit(1)
 
     if "--list-trash" in args:
         list_trash()
@@ -3230,8 +3261,7 @@ def remove_profile(target_name, assume_yes=False, force=False):
                     print(f"{COLOR_YELLOW}▲ 警告: 活跃凭据在确认期间已不可读，未归档新凭据。{COLOR_RESET}")
                     print(f"{COLOR_YELLOW}  回收站里保存的是删除前的原始备份，恢复后或需重新扫码。{COLOR_RESET}")
 
-            trash_dir = get_trash_dir()
-            os.makedirs(trash_dir, exist_ok=True)
+            trash_dir = _ensure_trash_dir()
             # 微秒级时间戳把碰撞概率压到可忽略；O_CREAT|O_EXCL 原子占位
             # 让同名占位不可能互相覆盖，串行化由 _TrashLock 保证。
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")

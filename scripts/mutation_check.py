@@ -97,13 +97,14 @@ def main():
     with open(SOURCE, "r", encoding="utf-8") as f:
         source = f.read()
 
-    # 先确认未变异时用例是绿的，否则后面的"红"没有意义
-    baseline = run_test(MUTATIONS[0]["test"])
-    if baseline.returncode != 0:
-        print("[FAIL] 基线未通过，变异校验无意义：")
-        print((baseline.stdout + baseline.stderr)[-800:])
-        return 1
-    print("基线 OK：%s\n" % MUTATIONS[0]["test"].rsplit(".", 1)[-1])
+    # 先确认每个被变异用例在未变异时都是绿的，否则"变异后报错"会被误判为 CAUGHT
+    for m in MUTATIONS:
+        baseline = run_test(m["test"])
+        if baseline.returncode != 0:
+            print("[FAIL] 基线未通过：%s" % m["test"])
+            print((baseline.stdout + baseline.stderr)[-800:])
+            return 1
+    print("基线 %d/%d OK\n" % (len(MUTATIONS), len(MUTATIONS)))
 
     tmpdir = tempfile.mkdtemp(prefix="wb_mutation_")
     mutant = os.path.join(tmpdir, "workbuddy")
