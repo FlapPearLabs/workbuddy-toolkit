@@ -44,23 +44,6 @@ COLOR_RED = "\033[91m" if _USE_COLOR else ""
 COLOR_BOLD = "\033[1m" if _USE_COLOR else ""
 COLOR_RESET = "\033[0m" if _USE_COLOR else ""
 
-CLI_ALIASES = [
-    "wb-help", "workbuddy-help",
-    "wb-login", "workbuddy-login",
-    "wb-audit", "workbuddy-audit",
-    "wb-list", "workbuddy-list",
-    "wb-status", "workbuddy-status",
-    "wb-switch", "workbuddy-switch",
-    "wb-checkin", "workbuddy-checkin",
-    "wb-chat", "workbuddy-chat",
-    "wb-doctor", "workbuddy-doctor",
-    "wb-models", "workbuddy-models",
-    "wb-usage", "workbuddy-usage",
-    "wb-router", "workbuddy-router",
-    "wb-sandbox", "workbuddy-sandbox",
-    "wb-tool", "workbuddy-tool",
-]
-
 # Windows 垫片: 别名 -> 子命令
 WINDOWS_SUBCOMMAND_SHIMS = {
     "switch": ["wb-switch", "workbuddy-switch"],
@@ -68,6 +51,7 @@ WINDOWS_SUBCOMMAND_SHIMS = {
     "chat": ["wb-chat", "workbuddy-chat"],
     "doctor": ["wb-doctor", "workbuddy-doctor"],
     "login": ["wb-login", "workbuddy-login"],
+    "remove": ["wb-remove", "workbuddy-remove"],
     "audit": ["wb-audit", "workbuddy-audit"],
     "list": ["wb-list", "workbuddy-list"],
     "status": ["wb-status", "workbuddy-status"],
@@ -78,6 +62,11 @@ WINDOWS_SUBCOMMAND_SHIMS = {
     "usage": ["wb-usage", "workbuddy-usage"],
     "tool": ["wb-tool", "workbuddy-tool"],
 }
+
+# POSIX symlink 别名与 Windows 垫片共用同一份数据源，避免两处手写漂移
+# （曾因只改一处导致 macOS/Linux 上 help 宣传的别名不存在）。
+# 注意：install.sh 与 uninstall.py 是独立入口，新增子命令时仍需手工同步。
+CLI_ALIASES = sorted({n for names in WINDOWS_SUBCOMMAND_SHIMS.values() for n in names})
 
 OPTIONAL_FEATURES = [
     ("init_workspace", "--init-workspace", "开启多账号工作区/历史会话共享 (修改 WorkBuddy 数据库，可用 workbuddy rollback 恢复)"),
