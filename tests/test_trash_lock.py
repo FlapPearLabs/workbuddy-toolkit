@@ -12,16 +12,21 @@
 表现为串行（假绿）。屏障保证两者一定在锁门口相遇，变异校验把平台锁
 调用改成 pass 后本用例必红。
 
-CI 诊断（windows 3.9/3.12 曾两次出现"一方 480s 未就绪"）：
-- 子进程在 spawned / imported / ready 三个关口打点，卡死位置可见；
-- 父进程先收齐两个子进程的结果再断言，失败信息带双方完整输出；
-- 子进程 stdin=DEVNULL（不继承父进程的管道），Windows 上加
-  CREATE_NO_WINDOW（无头会话里控制台分配可能挂起）；
-- 仅"屏障超时"（启动问题）允许整个场景重试一次；临界区重叠（真实
-  缺陷）绝不重试——拆锁变异仍然必红（重叠是确定性的）。
+CI 踩坑史（GitHub windows runner，三次推送三个不同版本对）：
+1. 子进程打开"刚创建"的日志/锁文件 PermissionError —— 杀软/Defender
+   对新文件的实时扫描窗口。修复：append 与生产 _TrashLock.__enter__
+   都做有界重试（2s）。
+2. 子进程卡死在 exec_module（打点 spawned→无 imported）数分钟 ——
+   完整导入 5000 行工具箱（sqlite3/urllib/ctypes …）在 runner 上被
+   文件扫描拖住。修复：**不再导入整个模块**——用 AST 从 bin/workbuddy
+   抽出 _TrashLock / get_trash_dir / _ensure_trash_dir 的真实源码拼成
+   几十行的小文件给子进程导入。抽的是当前源码文本，变异校验对
+   bin/workbuddy 的"拆锁"改动会原样进入小文件，必红逻辑不变。
+3. 一律不读/不写 .pyc（子进程 PYTHONDONTWRITEBYTECODE=1，父进程也不
+   预编译）——新鲜 pyc 是扫描窗口的最大来源。
 """
+import ast
 import os
-import py_compile
 import subprocess
 import sys
 import tempfile
@@ -30,8 +35,38 @@ import unittest
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN_PATH = os.environ.get("WB_BIN") or os.path.join(REPO_DIR, "bin", "workbuddy")
 
+# 从 bin/workbuddy 抽出的真实锁实现 + 其依赖（见模块 docstring 第 2 条）
+LOCK_MODULE_TEMPLATE = '''"""由 tests/test_trash_lock.py 从 bin/workbuddy 抽取的锁实现，勿手改。"""
+import os
+import sys
+import time
+
+PROFILES_DIR = None  # 由子进程注入
+
+
+{code}
+'''
+
+
+def _extract_lock_module(source):
+    """从工具箱源码里抽出 _TrashLock 与它的两个依赖函数的源码文本。"""
+    wanted = {"_TrashLock", "get_trash_dir", "_ensure_trash_dir"}
+    parts = []
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in wanted:
+            seg = ast.get_source_segment(source, node)
+            if seg:
+                parts.append(seg)
+    missing = wanted - {n.name for n in ast.parse(source).body
+                        if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    if missing:
+        raise RuntimeError(f"bin/workbuddy 里找不到: {sorted(missing)}")
+    # 用占位符替换而非 str.format：抽取的源码里可能出现花括号
+    return LOCK_MODULE_TEMPLATE.replace("{code}", "\n\n\n".join(parts))
+
+
 CHILD = r'''
-import importlib.machinery, importlib.util, os, sys, time
+import importlib.util, os, sys, time
 
 O_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
 
@@ -54,10 +89,9 @@ def append(log_path, line):
 
 log_path = sys.argv[3]
 append(log_path, "spawned")
-loader = importlib.machinery.SourceFileLoader("wb_lock", sys.argv[1])
-spec = importlib.util.spec_from_loader("wb_lock", loader)
+spec = importlib.util.spec_from_file_location("wb_lock_under_test", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
-loader.exec_module(m)
+spec.loader.exec_module(m)
 append(log_path, "imported")
 m.PROFILES_DIR = sys.argv[2]
 
@@ -110,7 +144,16 @@ def _run_scenario():
         os.makedirs(profiles, exist_ok=True)
         log = os.path.join(base, "lock.log")
 
-        procs = [subprocess.Popen([sys.executable, "-c", CHILD, BIN_PATH, profiles, log],
+        # 从当前源码（可能是变异副本）抽出锁实现，写进场景目录。
+        # 小文件 + 不写 pyc，子进程导入只有毫秒级，绕开 runner 的
+        # 新文件扫描对大模块导入的拖累。
+        lock_mod = os.path.join(base, "wb_lock_under_test.py")
+        with open(BIN_PATH, "r", encoding="utf-8") as f:
+            extracted = _extract_lock_module(f.read())
+        with open(lock_mod, "w", encoding="utf-8", newline="\n") as f:
+            f.write(extracted)
+
+        procs = [subprocess.Popen([sys.executable, "-c", CHILD, lock_mod, profiles, log],
                                   **_popen_kwargs())
                  for _ in range(2)]
         results = []
@@ -127,12 +170,6 @@ def _run_scenario():
 
 
 class TestTrashLock(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        # 预编译主脚本：两个子进程不再各自首次编译/写同一份 pyc
-        if not os.environ.get("WB_BIN"):
-            py_compile.compile(BIN_PATH, doraise=True)
-
     def test_lock_serializes_two_processes(self):
         last_raw, last_results = [], []
         for attempt in range(2):
@@ -141,7 +178,7 @@ class TestTrashLock(unittest.TestCase):
             if not failures:
                 last_raw = raw
                 break
-            # 只有"屏障超时"（启动问题，与被测对象无关）才值得重试；
+            # 只有"屏障超时"（启动/环境问题，与被测对象无关）才值得重试；
             # 其他失败或顺序重叠是真实缺陷，直接判负
             retryable = all("barrier timeout" in blob for _, _, blob in failures)
             last_raw, last_results = raw, results
