@@ -874,9 +874,11 @@ def is_workbuddy_running():
             res = subprocess.run(["pgrep", "-f", "WorkBuddy.app/Contents/MacOS"],
                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             return bool(res.stdout.strip())
-        res = subprocess.run(["pgrep", "-f", "CodeBuddy"],
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        return bool(res.stdout.strip())
+        # 复用 _linux_app_pids：按 /proc/<pid>/exe 精确匹配可执行文件。
+        # 不用 pgrep -f：它会做整条命令行模糊匹配，把 `python3 .../workbuddy
+        # logout` 这类 Toolkit 自身进程也判成"客户端在运行"，导致本命令
+        # 在自己身上误报、永远走不进执行分支。
+        return bool(_linux_app_pids())
     except Exception:
         return None
 

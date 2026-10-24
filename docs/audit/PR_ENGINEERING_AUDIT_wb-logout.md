@@ -116,14 +116,15 @@ PR 并非一次达成，前后经历三次失败：
 | **P2** | 进程探测返回 `None` 时被当作"未运行"；删除凭据失败仍返回成功（退出码恒 0） | **已修复**（见 8.4 第二轮） |
 | P1 | `-f` / `--force` 被当作 `--yes` 别名，可跳过预览直接删除；与上游 #25 的 `--force` 语义冲突 | **已修复**（见 8.4 第一轮） |
 | P2 | `_logout_cache_targets()` 用未校验的 uid 拼接路径，理论上可越界 | **已修复**（见 8.4 第一轮） |
-| P2 | Linux 分支 `pgrep -f "CodeBuddy"` 为推测，未在 Linux 验证 | 未验证 |
+| P2 | Linux 分支原用 `pgrep -f "CodeBuddy"` 做命令行模糊匹配——既未在 Linux 验证，又会误命中 Toolkit 自身进程 | **已修复**：改用上游 `_linux_app_pids()`（`/proc/<pid>/exe` 精确匹配，且排除 CLI 自身） |
 | P3 | 文档缺失（README / command-reference / feature-reference 均未提 logout） | **已补**（见 8.4 第二轮） |
 | P3 | 审计报告置于仓库根目录，与同批其他 PR 同名互斥 | **已修复**（移至 `docs/audit/`） |
 
 ### 2.4 测试状态
-- 新增测试 **16/16** 通过（`tests.test_logout`）：初审 9 项 → 第一轮补 2 项 → 第二轮补 5 项。
-- 两轮新增用例均做**先红后绿**验证：回退到修复前版本时失败，恢复后通过（见 8.4）。
+- 新增测试 **25/25** 通过（`tests.test_logout`）：初审 9 项 → 第一轮补 2 项 → 第二轮补 5 项 → 第三轮补 9 项（1 项 Linux 接线 + 8 项对抗/并发）。
+- 三轮新增用例均做**先红后绿**验证：回退到修复前版本时失败，恢复后通过（见 8.4）。
 - 上游全量 219 项：1 项报错，单独重跑该项通过，判定为中文 Windows 编码环境问题，与本次改动无关。
+- 相关三组测试（`test_logout` / `test_toolkit` / `test_installers`）**97 项通过**，skipped=2。
 - 真实环境冒烟：预览 / `--yes` 被中止 / `--help` 三种情形退出码分别为 `0` / `1` / `0`，且凭据未被修改。
 
 ### 2.5 当前已知局限
@@ -531,6 +532,29 @@ OK
 
 **这个教训说明**：`git diff --stat` 的异常放大是发现换行符污染的可靠信号；若未检查直接提交，会把整份文件标记为改动，review 成本暴增。
 
+### 8.4.2 第三轮修复（三项遗留收口）
+
+| 问题 | 处理方式 |
+|---|---|
+| **Linux 进程探测未实测** | 本机无 Linux 环境，WSL 被安全策略禁用（`wsl.exe` 在程序黑名单），无法本地实测。改为**复用上游 `_linux_app_pids()`**：按 `/proc/<pid>/exe` 精确匹配可执行文件并排除 Toolkit 自身进程。原实现 `pgrep -f "CodeBuddy"` 不仅未验证，还会把 `python3 .../workbuddy logout` 这类命令行误判成"客户端在运行"——即在本命令自己身上永远触发中止。 |
+| **无对抗性测试** | 新增 `TestLogoutAdversarial`，6 项破坏性前置条件：非法二进制凭据 / 0 字节凭据 / 损坏的 account-snapshot / 超长 uid / 备份根被普通文件占位 / 标记路径被目录占位。 |
+| **多线程并发未测** | 新增 2 项：5 线程同时登出（不得抛未捕获异常、最终状态一致）、连续三次登出（三份副本都必须保留）。 |
+
+测试 16 → 25。先红后绿（本轮两处）：
+
+```
+Linux 回退 pgrep      -> test_17 : FAILED(预期)
+备份回退秒级时间戳    -> test_13 : FAILED(预期)
+备份回退秒级时间戳    -> test_a8 : FAILED(预期)
+=== 已恢复，换行符干净 ===
+恢复后: Ran 25 tests in 0.925s
+恢复后: OK
+```
+
+本轮红绿脚本改用二进制读写（`open(p,"rb")` / `open(p,"wb")`），并在恢复后断言 `b"\r\n" not in data`，避免重演上一轮的 CRLF 污染。
+
+**Linux 剩余风险（如实记录）**：`_linux_app_pids()` 是上游既有实现。本 PR 只验证了 **`is_workbuddy_running()` 的 Linux 分支确实调用它**（`test_17` 断言被调用一次、返回值被正确转换），**没有验证它在真实 Linux 上能否找到客户端进程**。这一条仍属"未在真实环境验证"。
+
 ---
 
 ## 9. 测试和验收矩阵
@@ -545,6 +569,9 @@ OK
 | T1d | 新增测试（第二轮） | `python -m unittest tests.test_logout` | `Ran 16 tests … OK` | 增加 logout→switch 联动、备份唯一、未知进程状态、删除失败退出码 | 会话输出 |
 | T1e | P1 先红后绿 | `switch` 清理循环回退为只清 `logout-marker`，重跑 test_12 | `FAILED (failures=1)` | 证明 test_12 能捕获 P1 | 会话输出 |
 | T1f | 真实 CLI 退出码 | 预览 / `--yes`（客户端运行中）/ `--help` | `exit 0` / `1` / `0` | `main()` 的返回值转换生效，凭据未被修改 | 会话输出 |
+| T1g | 新增测试（第三轮） | `python -m unittest tests.test_logout` | `Ran 25 tests … OK` | 增加 Linux 分支接线、6 项对抗、2 项并发 | 会话输出 |
+| T1h | 本轮先红后绿 | Linux 回退 pgrep、备份回退时间戳 | 3 项均 `FAILED` | 证明新用例能捕获对应缺陷 | 会话输出 |
+| T1i | 三组回归 | `test_logout` + `test_toolkit` + `test_installers` | `Ran 97 tests … OK (skipped=2)` | 确认未破坏既有功能 | 会话输出 |
 | T2 | 上游全量回归 | `python -m unittest discover -s tests -t .` | `Ran 219 tests`，1 error，skipped=14 | 全仓 | 会话输出 |
 | T3 | 失败项单独重跑 | 同 T2 指定单测 | `Ran 1 test … OK` | log_guard | 会话输出 |
 | T4 | 真实环境冒烟 | `python bin/workbuddy logout`（预览） | 正确识别命令、定位真实凭据、进程占用告警、零修改 | 端到端路径 | 会话输出 |
@@ -556,14 +583,13 @@ OK
 |---|---|---|
 | 删除真实活跃账号（执行态） | **未验证** | 有意不执行，避免破坏本机登录态 |
 | 客户端已在运行时强制 `--allow-running` 的真实效果 | **未验证** | 仅代码路径存在，无端到端证据 |
-| Linux / macOS 行为 | **未验证** | 仅 Windows 环境 |
+| Linux / macOS 真实行为 | **未验证** | 仅 Windows 环境；WSL 被安全策略禁用。Linux 分支已改为复用上游 `_linux_app_pids()`，本 PR 只测了"确实调用它"，未测"在真实 Linux 上能否找到进程" |
 | uid 路径穿越（缺陷 B） | **已补测** | `test_11_uid_traversal_ignored_in_deep`，先红后绿见 8.4 |
 | `-f` / `--force` 别名（缺陷 A） | **已补测** | `test_10_force_is_not_accepted_as_confirm`，先红后绿见 8.4 |
-| 备份失败路径（磁盘满 / 权限） | **未覆盖** | 无对应测试 |
-| 并发调用登出 | **未覆盖** | 上游 #25 做了 5 线程并发测试，此处没有 |
+| 备份失败路径（磁盘满 / 权限） | **已补测** | `test_a5`：备份根被同名普通文件占位时中止，且不删凭据、不写标记 |
+| 并发调用登出（多线程同时执行） | **已补测** | `test_a7`：5 线程同时登出，断言无未捕获异常、最终状态一致 |
 | 与 `wb-switch` 联合的凭据同步 | **已补测** | `test_12` 覆盖 logout → switch → 标记清理链路 |
-| 并发调用登出（多线程同时执行） | **未覆盖** | 备份目录已改为唯一命名，但未做真并发测试；上游 #25 做了 5 线程并发用例 |
-| 文档/帮助文本一致性 | **未验证** | 未改 README 与 docs，帮助文本仅主文件内一行 |
+| 文档/帮助文本一致性 | **已补** | README / `docs/command-reference.md` / `docs/feature-reference.md` 三处已补 |
 
 ### 9.3 测试设计质量评估
 
@@ -660,7 +686,7 @@ OK
 
 4. **进程探测三态**：`is_workbuddy_running()` 返回 `True` / `False` / `None`，为什么 `None` 不能等同 `False`？什么情况下会返回 `None`，此时放行删除的后果是什么？
 
-5. **测试盲区**：`tests/test_logout.py` 的全部用例都 mock 了 `is_workbuddy_running`。请说明这带来什么未覆盖风险，以及 Linux 分支的 `pgrep -f "CodeBuddy"` 为什么可能不安全。
+5. **进程识别方式**：Linux 分支为什么不用 `pgrep -f "CodeBuddy"`，而改用 `_linux_app_pids()`？后者按 `/proc/<pid>/exe` 匹配，能避免什么误判？即使这样改，`test_17` 仍然 mock 掉了真实探测——它能证明什么、不能证明什么？
 
 6. **范围判断**：`--deep` 清理 `account-snapshot.json` 和 `sidebar-list-snapshot.json`，但刻意不动 `startup-route.json`。请说明依据，以及误删后者的实际影响。
 
@@ -693,7 +719,7 @@ OK
 
 - 功能实现与根因分析**有完整源码级证据**。
 - 工程质量与同批 #25 相比，在测试深度、文档完整性、对抗性验证三个维度上**明显偏弱**。
-- 审计发现与上游评审指出的缺陷已全部修复并补测：`-f` 别名、uid 未校验、标记双轨不统一、POSIX 安装缺失、备份同秒覆盖、未知进程状态、退出码恒 0、文档缺失、报告位置。**仅 Linux 进程探测仍未验证**。
+- 审计发现与上游评审指出的缺陷已全部修复并补测：`-f` 别名、uid 未校验、标记双轨不统一、POSIX 安装缺失、备份同秒覆盖、未知进程状态、退出码恒 0、Linux 命令模糊匹配、文档缺失、报告位置。**唯一仍未在真实环境验证的是"Linux 上能否找到客户端进程"**——本机无 Linux、WSL 被安全策略禁用，只能复用上游实现并测接线。
 - Git 使用了独立分支、完成 push 与 PR #27，但**未分阶段提交**（全程仅 2 个 commit，功能与文档各一）。
 - Worktree 与多 Agent **确认未使用**。
 - 学生主导的判断集中在"约束设定"与"优先级纠偏"，**未参与技术方案设计与代码审查**。

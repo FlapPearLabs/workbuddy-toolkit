@@ -14,6 +14,7 @@ import sys
 import json
 import shutil
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -34,7 +35,8 @@ workbuddy = importlib.util.module_from_spec(spec)
 loader.exec_module(workbuddy)
 
 
-class TestLogout(unittest.TestCase):
+class LogoutSandbox(unittest.TestCase):
+    """沙箱基类：把登出涉及的路径全部重定向到临时目录。"""
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
         self._orig = {
@@ -78,6 +80,8 @@ class TestLogout(unittest.TestCase):
                 f.write("{}")
         return sidebar, startup
 
+
+class TestLogout(LogoutSandbox):
     # ---------------- 用例
 
     def test_01_marker_path_appends_suffix(self):
@@ -283,6 +287,136 @@ class TestLogout(unittest.TestCase):
 
         self.assertFalse(ok, "删除失败必须返回 False")
         self.assertTrue(os.path.exists(workbuddy.AUTH_FILE))
+
+    def test_17_linux_branch_uses_proc_scan_not_pgrep(self):
+        """Linux 分支必须复用 _linux_app_pids，不得用 pgrep -f 做命令行模糊匹配。"""
+        with patch("sys.platform", "linux"), \
+                patch.object(workbuddy, "_linux_app_pids", return_value=[4321]) as scan:
+            self.assertTrue(workbuddy.is_workbuddy_running())
+            scan.assert_called_once()
+
+        with patch("sys.platform", "linux"), \
+                patch.object(workbuddy, "_linux_app_pids", return_value=[]):
+            self.assertFalse(workbuddy.is_workbuddy_running())
+
+
+class TestLogoutAdversarial(LogoutSandbox):
+    """刻意破坏前置条件，验证环境异常时不会误删、不会崩溃。"""
+
+    def test_a1_corrupt_credential_still_logs_out(self):
+        """凭据文件是非法二进制：登出不依赖解析它，应照常完成。"""
+        with open(workbuddy.AUTH_FILE, "wb") as f:
+            f.write(b"\x00\x01\x02 not json at all")
+        with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+            self.assertTrue(workbuddy.run_logout(["--yes"]))
+        self.assertFalse(os.path.exists(workbuddy.AUTH_FILE))
+        self.assertTrue(os.path.exists(workbuddy.get_logout_marker_path()))
+
+    def test_a2_empty_credential_file(self):
+        """0 字节凭据也应能登出。"""
+        open(workbuddy.AUTH_FILE, "wb").close()
+        with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+            self.assertTrue(workbuddy.run_logout(["--yes"]))
+        self.assertFalse(os.path.exists(workbuddy.AUTH_FILE))
+
+    def test_a3_corrupt_snapshot_does_not_crash_deep(self):
+        """account-snapshot 损坏时 --deep 不得崩溃，凭据与快照都应被清掉。"""
+        self.write_auth()
+        os.makedirs(os.path.dirname(workbuddy.ACCOUNT_SNAPSHOT_FILE), exist_ok=True)
+        with open(workbuddy.ACCOUNT_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+            f.write("{ broken json")
+        with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+            self.assertTrue(workbuddy.run_logout(["--yes", "--deep"]))
+        self.assertFalse(os.path.exists(workbuddy.AUTH_FILE))
+        self.assertFalse(os.path.exists(workbuddy.ACCOUNT_SNAPSHOT_FILE),
+                         "损坏的账号快照仍应被清理")
+
+    def test_a4_overlong_uid_does_not_escape(self):
+        """uid 超长（超出白名单上限）时不得拼出越界路径。"""
+        self.write_auth()
+        os.makedirs(os.path.dirname(workbuddy.ACCOUNT_SNAPSHOT_FILE), exist_ok=True)
+        outside = os.path.join(os.path.dirname(self.test_dir),
+                               "sidebar-list-snapshot.json")
+        with open(outside, "w", encoding="utf-8") as f:
+            f.write("sentinel")
+
+        def cleanup():
+            if os.path.exists(outside):
+                os.remove(outside)
+        self.addCleanup(cleanup)
+
+        with open(workbuddy.ACCOUNT_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+            json.dump({"primary": {"uid": "a" * 500}}, f)
+
+        with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+            self.assertTrue(workbuddy.run_logout(["--yes", "--deep"]))
+        self.assertTrue(os.path.exists(outside), "超长 uid 不得越界删除")
+
+    def test_a5_backup_root_blocked_by_file(self):
+        """备份根路径被同名普通文件占位时中止，且不删凭据、不写标记。"""
+        self.write_auth()
+        with open(workbuddy.LOGOUT_BACKUP_ROOT, "w", encoding="utf-8") as f:
+            f.write("blocked")
+        with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+            ok = workbuddy.run_logout(["--yes"])
+        self.assertFalse(ok, "无法创建备份目录时必须返回失败")
+        self.assertTrue(os.path.exists(workbuddy.AUTH_FILE), "备份失败不得删除凭据")
+        self.assertFalse(os.path.exists(workbuddy.get_logout_marker_path()),
+                         "备份失败时不应写入标记")
+
+    def test_a6_marker_path_occupied_by_directory(self):
+        """标记路径被目录占位时写入失败，应中止且不删凭据。"""
+        self.write_auth()
+        os.makedirs(workbuddy.get_logout_marker_path(), exist_ok=True)
+        with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+            ok = workbuddy.run_logout(["--yes"])
+        self.assertFalse(ok, "标记写入失败必须返回失败")
+        self.assertTrue(os.path.exists(workbuddy.AUTH_FILE), "标记失败不得删除凭据")
+
+    def test_a7_concurrent_logout_is_safe(self):
+        """多线程同时登出：不得抛未捕获异常，最终状态必须一致。"""
+        self.write_auth()
+        results = []
+
+        def worker():
+            try:
+                results.append(workbuddy.run_logout(["--yes"]))
+            except Exception as exc:  # noqa: BLE001 - 显式收集任何未捕获异常
+                results.append(exc)
+
+        with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+            threads = [threading.Thread(target=worker) for _ in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        errors = [r for r in results if isinstance(r, Exception)]
+        self.assertFalse(errors, "并发登出不应抛出未捕获异常: {}".format(errors))
+        self.assertFalse(os.path.exists(workbuddy.AUTH_FILE), "凭据最终应被删除")
+        self.assertTrue(os.path.exists(workbuddy.get_logout_marker_path()), "标记应存在")
+
+    def test_a8_repeated_logout_keeps_every_backup(self):
+        """连续多次登出，每一份凭据副本都必须保留，不得互相覆盖。"""
+        created = []
+        for i in range(3):
+            token = "tok-%d" % i
+            self.write_auth({"auth": {"accessToken": token}})
+            with patch.object(workbuddy, "is_workbuddy_running", return_value=False):
+                self.assertTrue(workbuddy.run_logout(["--yes"]))
+            created.append(token)
+
+        dirs = [d for d in os.listdir(workbuddy.LOGOUT_BACKUP_ROOT)
+                if os.path.isdir(os.path.join(workbuddy.LOGOUT_BACKUP_ROOT, d))]
+        self.assertEqual(len(dirs), 3, "三次登出应产生三个独立备份目录")
+
+        seen = set()
+        for d in dirs:
+            path = os.path.join(workbuddy.LOGOUT_BACKUP_ROOT, d,
+                                "workbuddy-desktop.info")
+            with open(path, encoding="utf-8") as f:
+                seen.add(json.load(f)["auth"]["accessToken"])
+        self.assertEqual(seen, set(created), "三份凭据副本都必须保留")
 
 
 if __name__ == "__main__":
