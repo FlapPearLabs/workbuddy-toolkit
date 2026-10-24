@@ -18,6 +18,7 @@ import os
 import sys
 import json
 import time
+import tempfile
 import sqlite3
 import subprocess
 import urllib.request
@@ -833,8 +834,34 @@ def atomic_write_text(path, text, mode=0o600):
         raise
 
 def get_logout_marker_path(auth_file=None):
-    """登出标记路径。与主程序 getLogoutMarkerPath 一致：凭据路径后追加 .logged-out。"""
+    """客户端恢复逻辑使用的登出标记：凭据路径后追加 .logged-out。"""
     return (auth_file or AUTH_FILE) + ".logged-out"
+
+def get_all_logout_markers(auth_file=None):
+    """本次登出需要写入 / 切换时需要清理的全部标记。
+
+    客户端只认 `<凭证>.logged-out`；但 switch_to_profile 历史上清理的是硬编码的
+    `workbuddy-desktop.logout-marker`。两者必须一起处理，否则登出后切号：
+    切号成功写入新凭据，残留的 .logged-out 却会让客户端继续忽略它，
+    表现为"切了号但没生效"。
+    """
+    base = auth_file or AUTH_FILE
+    return [
+        get_logout_marker_path(base),
+        os.path.join(os.path.dirname(base), "workbuddy-desktop.logout-marker"),
+    ]
+
+def _prune_logout_backups(keep=10):
+    """备份目录只保留最近 keep 份，避免长期累积凭据副本。"""
+    try:
+        entries = sorted(
+            name for name in os.listdir(LOGOUT_BACKUP_ROOT)
+            if os.path.isdir(os.path.join(LOGOUT_BACKUP_ROOT, name))
+        )
+    except OSError:
+        return
+    for name in entries[:-keep] if len(entries) > keep else []:
+        shutil.rmtree(os.path.join(LOGOUT_BACKUP_ROOT, name), ignore_errors=True)
 
 def is_workbuddy_running():
     """检测 WorkBuddy 客户端是否在运行。True/False，无法判断时返回 None。"""
@@ -889,59 +916,73 @@ def run_logout(args):
     allow_running = "--allow-running" in args
 
     auth_file = AUTH_FILE
-    marker = get_logout_marker_path(auth_file)
+    markers = get_all_logout_markers(auth_file)
 
     print("{}WorkBuddy 登出 (v{}){}".format(COLOR_BOLD, VERSION, COLOR_RESET))
     print("凭据文件: {}".format(auth_file))
 
     if not os.path.exists(auth_file):
         print("{}当前没有凭据文件，已处于未登录状态。{}".format(COLOR_YELLOW, COLOR_RESET))
-        if os.path.exists(marker):
+        if os.path.exists(markers[0]):
             print("  登出标记已存在，客户端启动时会停在登录页。")
-        return
+        return True
 
     running = is_workbuddy_running()
-    if running:
+    if running is True:
         print("{}[警告] WorkBuddy 正在运行。运行中的进程持有内存会话并监听凭据文件，".format(COLOR_YELLOW))
         print("       会把状态写回，导致登出无效。请先完全退出客户端（含托盘图标）。{}".format(COLOR_RESET))
+    elif running is None:
+        print("{}[警告] 无法确认客户端是否在运行（进程探测失败）。".format(COLOR_YELLOW))
+        print("       登出可能被运行中的进程回写覆盖，默认按\"可能运行\"处理。{}".format(COLOR_RESET))
 
     cache_targets = _logout_cache_targets() if deep else []
     print("\n将执行:")
-    print("  1. 写入登出标记 {}".format(os.path.basename(marker)))
+    print("  1. 写入登出标记 {}".format(os.path.basename(markers[0])))
     print("  2. 删除凭据文件 {}".format(os.path.basename(auth_file)))
     for i, p in enumerate(cache_targets, 3):
         print("  {}. 清理账号缓存 {}".format(i, os.path.basename(p)))
 
     if not assume_yes:
         print("\n{}预览模式，未做任何修改。确认后执行: workbuddy logout --yes{}".format(COLOR_CYAN, COLOR_RESET))
-        return
+        return True
 
-    if running and not allow_running:
-        print("{}[中止] 客户端正在运行，登出不会生效。退出后重试，或加 --allow-running 强制执行。{}".format(COLOR_RED, COLOR_RESET))
-        sys.exit(1)
+    # 探测结果为 None（未知）时同样拦截：误删活跃凭据的代价，高于多要求一次 --allow-running
+    if running is not False and not allow_running:
+        reason = "客户端正在运行" if running else "无法确认客户端是否在运行"
+        print("{}[中止] {}，登出可能不生效。退出客户端后重试，或加 --allow-running 强制执行。{}".format(COLOR_RED, reason, COLOR_RESET))
+        return False
 
-    backup_dir = os.path.join(LOGOUT_BACKUP_ROOT, time.strftime("%Y%m%d-%H%M%S"))
     try:
-        os.makedirs(backup_dir, exist_ok=True)
+        os.makedirs(LOGOUT_BACKUP_ROOT, exist_ok=True)
+    except OSError as exc:
+        print("{}[中止] 无法创建备份目录，未做任何删除: {}{}".format(COLOR_RED, exc, COLOR_RESET))
+        return False
+
+    # mkdtemp 保证目录唯一：同一秒内连续登出不会互相覆盖凭据副本
+    backup_dir = tempfile.mkdtemp(prefix=time.strftime("%Y%m%d-%H%M%S-"), dir=LOGOUT_BACKUP_ROOT)
+    try:
         shutil.copy2(auth_file, os.path.join(backup_dir, os.path.basename(auth_file)))
         print("{}[备份] {}{}".format(COLOR_CYAN, backup_dir, COLOR_RESET))
     except Exception as exc:
         print("{}[中止] 备份失败，未做任何删除: {}{}".format(COLOR_RED, exc, COLOR_RESET))
-        sys.exit(1)
+        return False
 
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     try:
-        atomic_write_text(marker, timestamp)
-        print("{}[写入] {}{}".format(COLOR_GREEN, os.path.basename(marker), COLOR_RESET))
+        for marker in markers:
+            atomic_write_text(marker, timestamp)
+            print("{}[写入] {}{}".format(COLOR_GREEN, os.path.basename(marker), COLOR_RESET))
     except Exception as exc:
         print("{}[中止] 写入登出标记失败，未删除凭据: {}{}".format(COLOR_RED, exc, COLOR_RESET))
-        sys.exit(1)
+        return False
 
+    credential_removed = True
     try:
         os.remove(auth_file)
         print("{}[删除] {}{}".format(COLOR_GREEN, os.path.basename(auth_file), COLOR_RESET))
     except Exception as exc:
-        print("{}[警告] 删除凭据失败: {}（标记已写入，启动仍会按登出处理）{}".format(COLOR_YELLOW, exc, COLOR_RESET))
+        credential_removed = False
+        print("{}[失败] 删除凭据出错: {}（标记已写入，启动仍会按登出处理）{}".format(COLOR_RED, exc, COLOR_RESET))
 
     for p in cache_targets:
         try:
@@ -950,9 +991,14 @@ def run_logout(args):
         except OSError:
             pass
 
-    if not os.path.exists(auth_file) and os.path.exists(marker):
+    _prune_logout_backups()
+
+    if credential_removed and not os.path.exists(auth_file):
         print("\n{}登出完成，启动 WorkBuddy 应停在登录页。{}".format(COLOR_GREEN, COLOR_RESET))
+    else:
+        print("\n{}登出未完全完成：凭据文件仍在，请检查文件权限后重试。{}".format(COLOR_RED, COLOR_RESET))
     print("凭据备份: {}".format(backup_dir))
+    return credential_removed
 
 def get_active_account():
     if not os.path.exists(AUTH_FILE):
@@ -2464,12 +2510,15 @@ def switch_to_profile(target_name, auto_restart=True, check_health=True):
         else:
             raise
 
-    marker_file = os.path.join(os.path.dirname(AUTH_FILE), "workbuddy-desktop.logout-marker")
-    if os.path.exists(marker_file):
-        try:
-            os.remove(marker_file)
-        except Exception:
-            pass
+    # 切号必须清掉全部登出标记：客户端只认 `.logged-out`，而这里历史上只清
+    # `workbuddy-desktop.logout-marker`。任一残留都会让新写入的凭据被客户端忽略，
+    # 表现为"切号返回成功但实际没生效"。
+    for marker_file in get_all_logout_markers(AUTH_FILE):
+        if os.path.exists(marker_file):
+            try:
+                os.remove(marker_file)
+            except Exception:
+                pass
 
     reassign_automations_owner(target["uid"])
 
@@ -4387,8 +4436,8 @@ def main():
         if any(a in ("-h", "--help", "help") for a in args):
             print("用法: wb-logout [--yes] [--deep] [--allow-running]")
             return
-        run_logout(args)
-        return
+        ok = run_logout(args)
+        sys.exit(0 if ok else 1)
     if "audit" in prog_name:
         if any(a in ("-h", "--help", "help") for a in args):
             print("用法: wb-audit [--force] [--interval HOURS | --daemon [HOURS]]")
@@ -4507,7 +4556,8 @@ def main():
         if any(a in ("-h", "--help", "help") for a in sub_args):
             print("用法: workbuddy logout [--yes] [--deep] [--allow-running]")
             return
-        run_logout(sub_args)
+        ok = run_logout(sub_args)
+        sys.exit(0 if ok else 1)
     elif cmd in ["save", "backup"]:
         sub_args = args[1:]
         if any(a in ("-h", "--help", "help") for a in sub_args):

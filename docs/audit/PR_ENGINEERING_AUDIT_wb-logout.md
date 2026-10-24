@@ -50,8 +50,8 @@
 | 报告提交 SHA | `97448ee82ce6b48d9ddd0eef877c3e00d6dba9e6` |
 | 最终 SHA | 以 PR 页面 head 为准（缺陷修复提交位于本报告更新之后） |
 | 远端状态 | 已推送至 fork `nlsans/workbuddy-toolkit`，分支 `feat/logout-command` |
-| 变更文件 | `bin/workbuddy`（logout 相关函数与两处路由）、`install.py`（别名注册）、`tests/test_logout.py`（11 项测试，新增文件）、`PR_ENGINEERING_AUDIT.md`（本报告，新增文件） |
-| 合计 | 4 files，全部为新增，无既有逻辑改写（精确行数以 PR 页面 Files changed 为准） |
+| 变更文件 | `bin/workbuddy`（logout 实现、标记统一、路由）、`install.py` / `install.sh` / `uninstall.py`（别名注册与卸载清理）、`tests/test_logout.py`（16 项测试，新增）、`README.md` / `docs/command-reference.md` / `docs/feature-reference.md`（文档）、`docs/audit/PR_ENGINEERING_AUDIT_wb-logout.md`（本报告，新增） |
+| 合计 | 9 files，约 1184 insertions / 7 deletions（精确值以 PR 页面 Files changed 为准） |
 | 功能 | 新增 `workbuddy logout` / `wb-logout`：写登出标记后删除本地凭据文件，可预览、可备份 |
 
 ### 1.1 PR 创建过程（已核验）
@@ -110,16 +110,21 @@ PR 并非一次达成，前后经历三次失败：
 
 | 级别 | 风险 | 状态 |
 |---|---|---|
-| P1 | `-f` / `--force` 被当作 `--yes` 别名，可跳过预览直接删除；与上游 #25 的 `--force` 语义冲突 | **已修复**（见 8.4） |
-| P2 | `_logout_cache_targets()` 用未校验的 uid 拼接路径，理论上可越界 | **已修复**（见 8.4） |
+| **P1** | logout 写 `.logged-out`，而 `switch_to_profile` 只清 `workbuddy-desktop.logout-marker`——登出后切号，新凭据被残留标记挡住 | **已修复**（见 8.4 第二轮） |
+| **P2** | `install.sh` 的 alias 列表与 `uninstall.py` 的 `CLI_NAMES` 未登记 `wb-logout`，POSIX 装完没有该命令、卸载留残 | **已修复**（见 8.4 第二轮） |
+| **P2** | 备份目录用秒级时间戳 + `exist_ok=True`，同一秒两次登出会覆盖前一份凭据副本 | **已修复**（见 8.4 第二轮） |
+| **P2** | 进程探测返回 `None` 时被当作"未运行"；删除凭据失败仍返回成功（退出码恒 0） | **已修复**（见 8.4 第二轮） |
+| P1 | `-f` / `--force` 被当作 `--yes` 别名，可跳过预览直接删除；与上游 #25 的 `--force` 语义冲突 | **已修复**（见 8.4 第一轮） |
+| P2 | `_logout_cache_targets()` 用未校验的 uid 拼接路径，理论上可越界 | **已修复**（见 8.4 第一轮） |
 | P2 | Linux 分支 `pgrep -f "CodeBuddy"` 为推测，未在 Linux 验证 | 未验证 |
-| P3 | 备份目录无上限清理 | 未修复 |
+| P3 | 文档缺失（README / command-reference / feature-reference 均未提 logout） | **已补**（见 8.4 第二轮） |
+| P3 | 审计报告置于仓库根目录，与同批其他 PR 同名互斥 | **已修复**（移至 `docs/audit/`） |
 
 ### 2.4 测试状态
-- 新增测试 **11/11** 通过（`tests.test_logout`）：初审时 9 项，缺陷修复后补 2 项。
-- 补充的 2 项经**先红后绿**验证：回退到修复前版本时均失败，恢复后通过（见 8.4）。
+- 新增测试 **16/16** 通过（`tests.test_logout`）：初审 9 项 → 第一轮补 2 项 → 第二轮补 5 项。
+- 两轮新增用例均做**先红后绿**验证：回退到修复前版本时失败，恢复后通过（见 8.4）。
 - 上游全量 219 项：1 项报错，单独重跑该项通过，判定为中文 Windows 编码环境问题，与本次改动无关。
-- 真实环境冒烟：预览模式验证通过，未修改任何真实凭据。
+- 真实环境冒烟：预览 / `--yes` 被中止 / `--help` 三种情形退出码分别为 `0` / `1` / `0`，且凭据未被修改。
 
 ### 2.5 当前已知局限
 - 无文档更新（未改 `README.md` / `docs/command-reference.md` / `docs/feature-reference.md`），而同批 #25 全部更新。
@@ -442,7 +447,7 @@ res = subprocess.run(["pgrep", "-f", "CodeBuddy"], ...)
 
 每次登出生成 `~/.workbuddy/logout_backup/<ts>/`，无上限。上游对日志有 log_guard 治理，此处未对齐。
 
-### 8.4 缺陷修复记录（A、B）
+### 8.4 缺陷修复记录（两轮）
 
 提交者审阅本报告后要求修复 A、B 两处缺陷。修复内容与验证如下。
 
@@ -476,7 +481,55 @@ OK
 
 这一步是本次修复中唯一能证明"测试真的有效"的证据。若只展示 `Ran 11 tests OK`，无法排除两条新用例是恒真断言。
 
-**仍未修复**：缺陷 C（Linux 进程探测未验证）、缺陷 D（备份目录无清理），保留在 §10 未解决问题中。
+**仍未修复**：缺陷 C（Linux 进程探测未验证）。
+
+### 8.4.1 第二轮修复（评审反馈后）
+
+上游评审指出一处 P1 与三项 P2，全部属实，已修复：
+
+| 问题 | 修复方式 | 位置 |
+|---|---|---|
+| **P1 标记不统一**：`logout` 写 `<凭证>.logged-out`，`switch_to_profile` 只清 `workbuddy-desktop.logout-marker`。登出后切号，残留标记会让客户端忽略新凭据 | 新增 `get_all_logout_markers()` 返回两类标记；`run_logout` 全部写入，`switch_to_profile` 全部清理 | `bin/workbuddy` `get_all_logout_markers` / `run_logout` / `switch_to_profile` |
+| **P2 POSIX 安装缺失** | `install.sh` alias 列表与安装提示、`uninstall.py` 的 `CLI_NAMES` 均补 `wb-logout` / `workbuddy-logout` | `install.sh`、`uninstall.py` |
+| **P2 备份同秒覆盖** | 备份目录改用 `tempfile.mkdtemp(prefix=<时间戳>-)`，以随机后缀保证唯一；新增 `_prune_logout_backups()` 只保留最近 10 份 | `bin/workbuddy` `run_logout` |
+| **P2 未知状态与退出码** | `is_workbuddy_running()` 返回 `None` 时不再当作"未运行"，同样拦截；`run_logout` 改为返回 `bool`，`main()` 用 `sys.exit(0 if ok else 1)`；删除失败返回 `False` | `bin/workbuddy` `run_logout` / `main` |
+
+**测试补强**（11 → 16）：
+
+| 用例 | 断言 |
+|---|---|
+| `test_12_logout_then_switch_clears_all_markers` | 登出 → 切号后，两类标记必须全部消失，且凭据已写入（覆盖 P1 完整链路） |
+| `test_13_backups_do_not_overwrite_in_same_second` | 同一秒连续两次登出，产生两个独立目录，两份副本内容都在 |
+| `test_14_unknown_process_state_blocks_without_flag` | 探测返回 `None` 且无 `--allow-running` 时返回 `False`、不删凭据 |
+| `test_15_unknown_state_allowed_with_flag` | 带 `--allow-running` 时放行 |
+| `test_16_delete_failure_returns_false` | 注入 `PermissionError` 后返回 `False`，凭据保留 |
+
+同时修正 `test_05`：原断言 `SystemExit`，退出码改为返回值后改为断言 `run_logout` 返回 `False`。
+
+**P1 的先红后绿验证**（关键）：把 `switch_to_profile` 的清理循环临时改回只清 `logout-marker` 的旧实现：
+
+```
+=== 旧实现（只清 logout-marker）下 test_12 ===
+结果: FAILED(预期)
+  FAIL: test_12_logout_then_switch_clears_all_markers
+  FAILED (failures=1)
+=== 已恢复修复版本 ===
+  Ran 16 tests in 0.642s
+  OK
+```
+
+**真实 CLI 退出码验证**：
+
+```
+预览            exit=0
+--yes（客户端在跑）exit=1
+--help          exit=0
+凭据文件仍在     1
+```
+
+**第二轮中的一次自造回归（必须记录）**：上述红绿验证脚本用 `open(path, "w")` 重写文件，在 Windows 上把 `bin/workbuddy` 的 4594 个 LF 全转成 CRLF，导致 `git diff --stat` 一度显示 8978 行改动、4385 deletions。经二进制比对确认（HEAD 为 0 CRLF / 4544 LF）后，用 `replace(b"\r\n", b"\n")` 恢复，真实改动回到 216 insertions / 6 deletions。
+
+**这个教训说明**：`git diff --stat` 的异常放大是发现换行符污染的可靠信号；若未检查直接提交，会把整份文件标记为改动，review 成本暴增。
 
 ---
 
@@ -489,6 +542,9 @@ OK
 | T1 | 新增测试（初审时） | `python -m unittest tests.test_logout` | `Ran 9 tests … OK` | 标记路径/预览零写/写标删凭/备份/进程拦截/覆盖/幂等/deep 边界 | 会话输出 |
 | T1b | 新增测试（缺陷修复后） | 同上 | `Ran 11 tests … OK` | 增加 `-f`/`--force` 拒绝、uid 越界拒绝 | 会话输出 |
 | T1c | 先红后绿校验 | 将 `bin/workbuddy` 回退到修复前，重跑新增 2 项 | `FAILED (failures=2)` | 证明两个用例非恒真断言 | 会话输出 |
+| T1d | 新增测试（第二轮） | `python -m unittest tests.test_logout` | `Ran 16 tests … OK` | 增加 logout→switch 联动、备份唯一、未知进程状态、删除失败退出码 | 会话输出 |
+| T1e | P1 先红后绿 | `switch` 清理循环回退为只清 `logout-marker`，重跑 test_12 | `FAILED (failures=1)` | 证明 test_12 能捕获 P1 | 会话输出 |
+| T1f | 真实 CLI 退出码 | 预览 / `--yes`（客户端运行中）/ `--help` | `exit 0` / `1` / `0` | `main()` 的返回值转换生效，凭据未被修改 | 会话输出 |
 | T2 | 上游全量回归 | `python -m unittest discover -s tests -t .` | `Ran 219 tests`，1 error，skipped=14 | 全仓 | 会话输出 |
 | T3 | 失败项单独重跑 | 同 T2 指定单测 | `Ran 1 test … OK` | log_guard | 会话输出 |
 | T4 | 真实环境冒烟 | `python bin/workbuddy logout`（预览） | 正确识别命令、定位真实凭据、进程占用告警、零修改 | 端到端路径 | 会话输出 |
@@ -505,7 +561,8 @@ OK
 | `-f` / `--force` 别名（缺陷 A） | **已补测** | `test_10_force_is_not_accepted_as_confirm`，先红后绿见 8.4 |
 | 备份失败路径（磁盘满 / 权限） | **未覆盖** | 无对应测试 |
 | 并发调用登出 | **未覆盖** | 上游 #25 做了 5 线程并发测试，此处没有 |
-| 与 `wb-switch` 联合的凭据同步 | **未覆盖** | 登出后切号的行为未验证 |
+| 与 `wb-switch` 联合的凭据同步 | **已补测** | `test_12` 覆盖 logout → switch → 标记清理链路 |
+| 并发调用登出（多线程同时执行） | **未覆盖** | 备份目录已改为唯一命名，但未做真并发测试；上游 #25 做了 5 线程并发用例 |
 | 文档/帮助文本一致性 | **未验证** | 未改 README 与 docs，帮助文本仅主文件内一行 |
 
 ### 9.3 测试设计质量评估
@@ -568,7 +625,11 @@ OK
 | 结论 | 证据类型 | 位置 |
 |---|---|---|
 | 登出标记路径规则 | 代码 | `bin/workbuddy:835` `get_logout_marker_path` |
-| 顺序：先标记后删除 | 代码 | `bin/workbuddy:895-907`（`atomic_write_text` 调用先于 `os.remove`） |
+| 顺序：先标记后删除 | 代码 | `bin/workbuddy` `run_logout`（`atomic_write_text` 调用先于 `os.remove`） |
+| 标记双轨统一 | 代码 | `bin/workbuddy` `get_all_logout_markers`、`run_logout`、`switch_to_profile` |
+| 备份唯一化 | 代码 | `bin/workbuddy` `run_logout` 中的 `tempfile.mkdtemp` |
+| POSIX 安装入口 | 代码 | `install.sh` alias 列表、`uninstall.py` `CLI_NAMES` |
+| 文档覆盖 | 代码 | `README.md`、`docs/command-reference.md`、`docs/feature-reference.md` |
 | 原子写实现 | 代码 | `bin/workbuddy:814-833` |
 | 进程探测 | 代码 | `bin/workbuddy:839-854` |
 | deep 清理范围 | 代码 | `bin/workbuddy:856-873` |
@@ -589,17 +650,21 @@ OK
 
 ## 12. 供老师复核的问题
 
-以下问题针对本次真实实现，用于检验学生是否理解自己提交的代码：
+以下问题针对本次真实实现，用于检验是否理解自己提交的代码。前四条对应评审给出的答辩重点。
 
-1. **顺序问题**：如果把 `run_logout` 中"写标记"和"删凭据"两步顺序对调，会出现什么现象？请结合 WB-44172 说明原因。
+1. **顺序问题**：把 `run_logout` 中"写标记"和"删凭据"两步对调会出现什么现象？请结合 WB-44172 说明。
 
-2. **缺陷 A 的修复依据**：`bin/workbuddy:887` 最初把 `-f` / `--force` 当作 `--yes` 的别名，现已移除。请说明：为什么 `--force` 在本仓库其他命令里的语义与"跳过确认"相反？若一个用户从 #25 的 `wb-remove --force` 迁移过来，他会预期什么、实际会发生什么？
+2. **标记双轨**：`logout` 现在会写两类标记（`<凭证>.logged-out` 与 `workbuddy-desktop.logout-marker`），为什么两套都要处理？如果 `logout` 只写新标记、`switch_to_profile` 只清旧标记，登出后切号会发生什么？请描述用户可见的现象。
 
-3. **测试盲区**：`tests/test_logout.py` 中 9 个用例全部 mock 了 `is_workbuddy_running`。请说明这个函数为什么"客户端在运行"时必须返回 True，以及当前 Linux 分支的实现为什么可能不安全。
+3. **备份唯一性**：为什么"秒级时间戳目录 + `exist_ok=True`"不能保证备份不覆盖？`tempfile.mkdtemp` 具体保证了什么？换成 `uuid` 是否等价？
 
-4. **范围判断**：`--deep` 清理 `account-snapshot.json` 和 `sidebar-list-snapshot.json`，但刻意不动 `startup-route.json`。请说明判断依据，以及如果误删后者会有什么实际影响。
+4. **进程探测三态**：`is_workbuddy_running()` 返回 `True` / `False` / `None`，为什么 `None` 不能等同 `False`？什么情况下会返回 `None`，此时放行删除的后果是什么？
 
-5. **与同批 PR 的关系**：上游 #23/#24/#25 都在做"删除账号"，你的 `wb-logout` 与它们的边界是什么？如果维护者认为重复，你如何论证不重复？
+5. **测试盲区**：`tests/test_logout.py` 的全部用例都 mock 了 `is_workbuddy_running`。请说明这带来什么未覆盖风险，以及 Linux 分支的 `pgrep -f "CodeBuddy"` 为什么可能不安全。
+
+6. **范围判断**：`--deep` 清理 `account-snapshot.json` 和 `sidebar-list-snapshot.json`，但刻意不动 `startup-route.json`。请说明依据，以及误删后者的实际影响。
+
+7. **与同批 PR 的关系**：上游 #23/#24/#25 都在做"删除账号"，`wb-logout` 与它们的边界是什么？如果维护者认为重复，你如何论证？
 
 ---
 
@@ -628,7 +693,7 @@ OK
 
 - 功能实现与根因分析**有完整源码级证据**。
 - 工程质量与同批 #25 相比，在测试深度、文档完整性、对抗性验证三个维度上**明显偏弱**。
-- 审计发现的 2 处缺陷（P1 的 `-f` 别名、P2 的 uid 未校验）已在审阅后修复并补测；仍有 2 项未处理（Linux 进程探测未验证、备份目录无清理）。
+- 审计发现与上游评审指出的缺陷已全部修复并补测：`-f` 别名、uid 未校验、标记双轨不统一、POSIX 安装缺失、备份同秒覆盖、未知进程状态、退出码恒 0、文档缺失、报告位置。**仅 Linux 进程探测仍未验证**。
 - Git 使用了独立分支、完成 push 与 PR #27，但**未分阶段提交**（全程仅 2 个 commit，功能与文档各一）。
 - Worktree 与多 Agent **确认未使用**。
 - 学生主导的判断集中在"约束设定"与"优先级纠偏"，**未参与技术方案设计与代码审查**。
