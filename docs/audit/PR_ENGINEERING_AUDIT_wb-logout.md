@@ -126,6 +126,7 @@ PR 并非一次达成，前后经历三次失败：
 - 上游全量 219 项：1 项报错，单独重跑该项通过，判定为中文 Windows 编码环境问题，与本次改动无关。
 - 相关三组测试（`test_logout` / `test_toolkit` / `test_installers`）**97 项通过**，skipped=2。
 - 真实环境冒烟：预览 / `--yes` 被中止 / `--help` 三种情形退出码分别为 `0` / `1` / `0`，且凭据未被修改。
+- 原版 vs 改后版逐命令对比：4 条只读命令输出**逐字节一致**，2 条差异仅限帮助文本多一行（见 9.4）。
 
 ### 2.5 当前已知局限
 - 无文档更新（未改 `README.md` / `docs/command-reference.md` / `docs/feature-reference.md`），而同批 #25 全部更新。
@@ -572,6 +573,7 @@ Linux 回退 pgrep      -> test_17 : FAILED(预期)
 | T1g | 新增测试（第三轮） | `python -m unittest tests.test_logout` | `Ran 25 tests … OK` | 增加 Linux 分支接线、6 项对抗、2 项并发 | 会话输出 |
 | T1h | 本轮先红后绿 | Linux 回退 pgrep、备份回退时间戳 | 3 项均 `FAILED` | 证明新用例能捕获对应缺陷 | 会话输出 |
 | T1i | 三组回归 | `test_logout` + `test_toolkit` + `test_installers` | `Ran 97 tests … OK (skipped=2)` | 确认未破坏既有功能 | 会话输出 |
+| T1j | 原版 vs 改后版逐命令对比 | 隔离 HOME 下各跑 6 条只读命令 + 1 条新增命令 | 4 条逐字节一致；2 条仅帮助多一行 | 数据读取路径未受影响，详见 9.4 | 会话输出 |
 | T2 | 上游全量回归 | `python -m unittest discover -s tests -t .` | `Ran 219 tests`，1 error，skipped=14 | 全仓 | 会话输出 |
 | T3 | 失败项单独重跑 | 同 T2 指定单测 | `Ran 1 test … OK` | log_guard | 会话输出 |
 | T4 | 真实环境冒烟 | `python bin/workbuddy logout`（预览） | 正确识别命令、定位真实凭据、进程占用告警、零修改 | 端到端路径 | 会话输出 |
@@ -595,10 +597,32 @@ Linux 回退 pgrep      -> test_17 : FAILED(预期)
 
 - **优点**：使用 `tempfile` + 模块级常量替换，隔离真实凭据（已核验：跑完后真实凭据仍为 7158 B、无标记残留）。
 - **不足**：
-  1. 全部 9 项均 mock 掉 `is_workbuddy_running`，该函数本身零覆盖。
-  2. 无对抗性用例（对比 #25 的 12 项对抗 + 20 场景 × 3 轮）。
-  3. 无"原版 vs 改后版"逐命令回归对比（#25 做了 8 条命令的逐字节比对）。
-  4. 未测试新命令对既有快捷切换分支的影响（例如某账号若命名为 `logout`）。
+  1. `is_workbuddy_running` 在绝大多数用例中被 mock，仅 `test_17` 验证了 Linux 分支的调用接线。
+  2. 未测试新命令对既有快捷切换分支的影响（例如某账号若命名为 `logout`）。
+
+> 注：初版此处曾记录"无对抗性用例"与"无逐命令回归对比"，两项目前已补齐，分别见 8.4.2 与 9.4。
+
+### 9.4 原版 vs 改后版：逐命令回归对比
+
+**方法**：把 `main`（`4e832c0`）的 `bin/workbuddy` 导出为同目录临时文件，两个版本各自在**独立隔离**的 `USERPROFILE` / `APPDATA` / `LOCALAPPDATA` 下运行（空账号库、`NO_COLOR=1`），输出做路径归一化后逐字节比对。
+
+| 命令 | 输出一致 | 退出码（旧/新） | 结论 |
+|---|---|---|---|
+| `workbuddy list` | 是 | 0 / 0 | 一致 |
+| `workbuddy status` | 是 | 0 / 0 | 一致 |
+| `workbuddy models --list` | 是 | 0 / 0 | 一致 |
+| `workbuddy usage --today` | 是 | 0 / 0 | 一致 |
+| `workbuddy --help` | 否 | 0 / 0 | 仅多一行 `logout`（预期） |
+| `workbuddy nosuchcmd` | 否 | 0 / 0 | 未知命令回显帮助，多一行 `logout`（预期） |
+| `workbuddy logout` | — | 0 / 0 | 旧版报"未知命令或账号: logout"，新版进入登出流程（预期新增） |
+
+**结论**：4 条只读命令（`list` / `status` / `models --list` / `usage --today`）输出**逐字节相同**，数据读取路径未被本次改动影响；2 条差异均仅限帮助文本多一行。
+
+**首次对比曾出现假差异**：把原版放到临时目录时，`models --list` 与 `usage --today` 双双 `exit 1`、输出为空，一度像是"新命令破坏了模型清单"。实际原因是这两个命令通过 `__file__` 定位 `../sidecar`，临时目录下找不到依赖。把原版导出到 `bin/` 同目录后差异消失。
+
+**这类假差异值得记一笔**：测试装置的缺陷会伪装成被测代码的缺陷。若不复核失败原因就下结论，会得出"新增 logout 破坏了 models"这种完全错误的自责。
+
+**退出码差异说明**：上游对未知命令返回 `0`；本次 `logout` 在中止或删除失败时返回 `1`，属有意改进（便于脚本用 `&&` 判断），非回归。
 
 ---
 
