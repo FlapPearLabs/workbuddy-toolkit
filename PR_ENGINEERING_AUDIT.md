@@ -43,24 +43,35 @@
 | 项目 | 内容 |
 |---|---|
 | 目标仓库 | `FlapPearLabs/workbuddy-toolkit`（MIT，Python 3.8+） |
-| PR 链接 | **不存在。本次未创建任何 PR。** |
+| PR 链接 | https://github.com/FlapPearLabs/workbuddy-toolkit/pull/27 |
 | 本地分支 | `feat/logout-command` |
 | 基准 SHA | `4e832c07bf35ffcae12fe42d2c71ffcf674cbabe`（origin/main） |
-| 最终 SHA | `e8e83e8c9419f20de57225f03e2183214430b1ee` |
-| 远端状态 | 未 push；`nlsans` 账号下无 fork |
-| 变更文件 | `bin/workbuddy` (+155)、`install.py` (+3)、`tests/test_logout.py` (+163，新增) |
-| 合计 | **321 insertions, 0 deletions** |
+| 功能提交 SHA | `e8e83e8c9419f20de57225f03e2183214430b1ee` |
+| 最终 SHA | `97448ee82ce6b48d9ddd0eef877c3e00d6dba9e6`（含本审计报告） |
+| 远端状态 | 已推送至 fork `nlsans/workbuddy-toolkit`，分支 `feat/logout-command` |
+| 变更文件 | `bin/workbuddy` (+155)、`install.py` (+3)、`tests/test_logout.py` (+163，新增)、`PR_ENGINEERING_AUDIT.md` (+581，新增) |
+| 合计 | **902 insertions, 0 deletions, 4 files, 2 commits** |
 | 功能 | 新增 `workbuddy logout` / `wb-logout`：写登出标记后删除本地凭据文件，可预览、可备份 |
 
-### 1.1 PR 未创建的具体原因（已核验）
+### 1.1 PR 创建过程（已核验）
 
-| 阻塞点 | 证据 |
-|---|---|
-| GitHub connector 仅只读 | `create_repository` → 403 `Resource not accessible by integration`；`fork_repository` → 同 |
-| 本机无 GitHub 凭据 | `cmdkey /list` 无 github 记录；GCM 非交互模式返回 `Cannot prompt because user interactivity has been disabled` |
-| 无 `gh` CLI | `gh: command not found` |
+PR 并非一次达成，前后经历三次失败：
 
-**结论：代码已提交到本地分支，但从未推送，也未在 GitHub 上创建 PR 或 fork。任何声称「PR 已提交」的说法与事实不符。**
+| 阶段 | 阻塞点 | 证据 |
+|---|---|---|
+| 首次尝试 | GitHub connector 仅只读 | `create_repository` / `fork_repository` 均返回 403 `Resource not accessible by integration` |
+| 二次尝试 | 本机无 GitHub 凭据 | `cmdkey /list` 无 github 记录；GCM 非交互模式返回 `Cannot prompt because user interactivity has been disabled` |
+| 三次尝试 | 无 `gh` CLI、PATH 指向精简版 PortableGit | `gh: command not found`；`bin/` 下无 credential helper |
+
+**最终解决路径（已核验）**：
+
+1. 确认系统安装的 Git for Windows 自带 `git-credential-manager` 2.9.1，且系统级 gitconfig 已配 `credential.helper = manager`——此前误判"无法推送"实为用错了 git 二进制。
+2. 由提交者在真实终端完成一次 OAuth 授权，凭据写入 Windows 凭据管理器（`cmdkey` 出现 1 条 github 记录，`GCM get` 可返回 `username=nlsans`）。
+3. 通过 GitHub REST API 完成 fork（`nlsans/workbuddy-toolkit`，首次轮询即就绪）。
+4. `git push fork feat/logout-command` 成功。
+5. REST API 创建 PR #27，base `main` @ `4e832c0`。
+
+**必须说明的一点**：本次 PR 的创建**完全依赖提交者手动完成 OAuth 授权这一不可省略的人工步骤**。Agent 曾尝试三种方式试图自动化（`GCM_INTERACTIVE=always` 拉 GUI、`never` 非交互、`GCM_GITHUB_AUTHMODE=devicecode`），全部失败：GUI 进程存在但取不到窗口标题且 5 分 29 秒无进展；非交互模式直接拒绝；devicecode 模式 stdout 零输出（GCM 2.9 的提示全部走 GUI）。
 
 ### 1.2 上游同类 PR 对照（本次审计新发现）
 
@@ -111,7 +122,7 @@
 ### 2.5 当前已知局限
 - 无文档更新（未改 `README.md` / `docs/command-reference.md` / `docs/feature-reference.md`），而同批 #25 全部更新。
 - 无对抗性测试，无回归逐命令对比。
-- 未推送、未创建 PR。
+- PR 的创建依赖提交者手动完成一次 OAuth 授权，Agent 无法全自动完成（见 1.1）。
 
 ---
 
@@ -135,6 +146,8 @@
 | 14:18 | **需求纠偏** | **学生** | 要求先解决主文件读取问题 | 消息原文 |
 | 14:19–14:31 | 定位 + 实现 | Agent | `git clone --depth 1`（1.5M）成功；grep 定位结构；实现 `wb-logout`；9 项测试；全量回归；冒烟；commit `e8e83e8` | 命令输出、Git |
 | 14:55 | 审计 | 学生 | 要求独立审计 | 消息原文 |
+| 15:05 | 提交要求 | 学生 | 要求把审计报告附加到 PR 并提交上游 | 消息原文 |
+| 15:06 | **PR 创建完成** | Agent 执行 + 学生人工授权 | fork `nlsans/workbuddy-toolkit` → push `feat/logout-command` → REST API 建 PR #27 | PR 元数据、`git push` 输出 |
 
 **阶段跳过的记录**：全程**没有**出现"方案讨论—学生确认—再实现"的显式环节；**没有** Worktree；**没有**多 Agent 分工；**没有**独立审查者（无论人或 Agent）。
 
@@ -258,7 +271,7 @@
 | 分阶段 Commit | 技能仓库 1 个 commit；上游 1 个 commit | ⚠️ 未拆分子阶段 |
 | Diff 检查 | 生成了 `format-patch`（19.9 KB） | ✅ 有检查动作 |
 | 改动范围控制 | 321 insertions / **0 deletions** | ✅ 纯新增，未改既有逻辑 |
-| Push / PR | 均未发生 | ❌ |
+| Push / PR | 15:06 完成：push 至 fork，创建 PR #27 | ✅（依赖人工授权） |
 | 回退操作 | 无（未出现需要回退的情形） | — |
 
 `reflog` 完整记录（上游仓库）：
@@ -554,7 +567,7 @@ res = subprocess.run(["pgrep", "-f", "CodeBuddy"], ...)
 |---|---|
 | 13:47–13:52 对话上下文不可访问 | 该时段的学生指令与 Agent 决策无法核验，仅有 Agent 自写日志 |
 | 无独立第三方代码审查记录 | 全部 PASS 结论出自实现者自身 |
-| 无 PR 评审意见 | PR 未创建，无维护者反馈 |
+| 无 PR 评审意见 | PR #27 为本报告提交后新开，尚无维护者反馈与 CI 结论 |
 
 ### 13.2 未验证事项
 
@@ -572,7 +585,7 @@ res = subprocess.run(["pgrep", "-f", "CodeBuddy"], ...)
 - 功能实现与根因分析**有完整源码级证据**。
 - 工程质量与同批 #25 相比，在测试深度、文档完整性、对抗性验证三个维度上**明显偏弱**。
 - 存在 2 处未修复缺陷（1 个 P1、1 个 P2），且其中 P1 与上游语义冲突。
-- Git 使用了分支但未分阶段提交、未 push、未创建 PR。
+- Git 使用了独立分支、完成 push 与 PR #27，但**未分阶段提交**（全程仅 2 个 commit，功能与文档各一）。
 - Worktree 与多 Agent **确认未使用**。
 - 学生主导的判断集中在"约束设定"与"优先级纠偏"，**未参与技术方案设计与代码审查**。
 
