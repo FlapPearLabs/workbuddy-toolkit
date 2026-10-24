@@ -2922,12 +2922,23 @@ class _TrashLock:
         self.fd = None
 
     def __enter__(self):
-        _ensure_trash_dir()
-        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-        if os.fstat(self.fd).st_size == 0:
-            os.write(self.fd, b"\0")          # Windows 字节锁需要文件至少 1 字节
-            os.lseek(self.fd, 0, os.SEEK_SET)
-        deadline = time.time() + self.timeout
+        # 杀软/实时扫描会对"刚创建的文件"短暂拒绝打开（PermissionError，
+        # Windows 上很常见），对打开锁文件做有界重试；真实 ACL 问题在
+        # 超时后照常抛出，不吞错。
+        deadline = time.time() + 2.0
+        while True:
+            try:
+                _ensure_trash_dir()
+                self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+                if os.fstat(self.fd).st_size == 0:
+                    os.write(self.fd, b"\0")          # Windows 字节锁需要文件至少 1 字节
+                    os.lseek(self.fd, 0, os.SEEK_SET)
+                break
+            except PermissionError:
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.05)
+        lock_deadline = time.time() + self.timeout
         while True:
             try:
                 if sys.platform == "win32":
@@ -2939,7 +2950,7 @@ class _TrashLock:
                     fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return self
             except OSError:
-                if time.time() >= deadline:
+                if time.time() >= lock_deadline:
                     os.close(self.fd)
                     self.fd = None
                     raise TimeoutError("等待删除锁超时（另一个删除/清空操作正在进行）")
