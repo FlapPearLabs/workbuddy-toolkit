@@ -1,30 +1,23 @@
-"""tests/test_trash_lock.py — 直接验证 _TrashLock 的跨进程互斥。
+"""tests/test_trash_lock.py — 验证 _TrashLock 的跨进程互斥。
 
-对抗审查指出：`test_concurrent_remove_same_alias` 在没有锁时也可能全绿
-（失败方的 os.replace 抛 FileNotFoundError，断言照样成立）。这里不依赖
-业务路径，直接让两个子进程持锁写同一份日志：
+两套测法，按平台各取所长（维护者评审建议）：
 
-- 有锁：enter / exit / enter / exit（严格串行）
-- 无锁：enter / enter / exit / exit（重叠）
+- POSIX：**进程内**连续两次获取 `_TrashLock`——两个实例各自 open 出独立的
+  open file description，第二个 `flock(LOCK_EX|LOCK_NB)` 必然 EWOULDBLOCK，
+  与调度完全无关、确定性失败；释放后必须能再次获取。零子进程、零文件
+  导入抖动、既不会假绿也不会 skip。拆掉 flock 该用例必红。
+- Windows：msvcrt 字节锁的语义与 flock 不同（同进程/同句柄行为有差异），
+  保留**两个子进程**的多轮屏障用例——子进程代码由父进程 AST 抽取锁实现
+  后经 `python -c` 内嵌传入，零模块文件读取，对 runner/杀软的进程启动
+  抖动免疫（完整踩坑史见 git log 814c215/268b759/0a42f7d/78221f9）。
 
-就绪屏障：每轮两个子进程各写一条 ready 并轮询到"本轮双方就绪"后才进
-临界区，保证两者一定在锁门口相遇——无锁时必然 enter/enter 重叠。
-
-对 runner/杀软抖动的免疫设计（GitHub windows runner 四轮踩坑的结论：
-进程创建与文件读取可能被拖慢数分钟，任何"单次场景定胜负"的写法都会
-偶发误报）：
-- 子进程在**单次场景内循环 3 轮**，启动慢只推迟轮次、不消灭轮次；
-  第 1 轮屏障给 240s（吸收启动抖动），后续轮 60s；
-- 断言的是不变量：enter/exit 严格交替、至少完成一轮完整临界区、
-  双方至少各到过场一次（ready >= 2）。坏锁在第一次相遇就留下
-  enter/enter，与启动快慢无关；
-- 只有"双方始终未能相遇"（ready < 2，环境确实跑不起来）才 skipTest；
-  其他一切异常照常 FAIL。变异校验的"拆锁"= 确定性重叠，不会被 skip 掩护。
-- 子进程代码由父进程 AST 抽取锁实现后经 `python -c` 内嵌传入——
-  不 importlib 读任何模块文件（此前在 runner 上被拖住数分钟的根源），
-  也不读/写 pyc。
+屏障/多轮的原理：每轮两个子进程各写一条 ready 并轮询到"本轮双方就绪"
+后才进临界区，保证两者一定在锁门口相遇——无锁时必然 enter/enter 重叠，
+与启动快慢无关；只有"双方始终未相遇"（环境确实跑不起来）才 skip。
 """
 import ast
+import importlib.machinery
+import importlib.util
 import os
 import subprocess
 import sys
@@ -33,6 +26,42 @@ import unittest
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN_PATH = os.environ.get("WB_BIN") or os.path.join(REPO_DIR, "bin", "workbuddy")
+
+# 从 bin/workbuddy 抽出的锁实现 + 其依赖（供 Windows 子进程内嵌使用）
+LOCK_MODULE_TEMPLATE = '''"""由 tests/test_trash_lock.py 从 bin/workbuddy 抽取的锁实现，勿手改。"""
+import os
+import sys
+import time
+
+PROFILES_DIR = None  # 由子进程注入
+
+
+{code}
+'''
+
+
+def _extract_lock_module(source):
+    """从工具箱源码里抽出 _TrashLock 与它的两个依赖函数的源码文本。"""
+    defs = {n.name: ast.get_source_segment(source, n)
+            for n in ast.parse(source).body
+            if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    missing = {"_TrashLock", "get_trash_dir", "_ensure_trash_dir"} - set(defs)
+    if missing:
+        raise RuntimeError(f"bin/workbuddy 里找不到: {sorted(missing)}")
+    # 用占位符替换而非 str.format：抽取的源码里可能出现花括号
+    return LOCK_MODULE_TEMPLATE.replace("{code}", "\n\n\n".join(
+        defs[n] for n in ("get_trash_dir", "_ensure_trash_dir", "_TrashLock")))
+
+
+def _load_wb_module(profiles_dir):
+    """进程内加载 bin/workbuddy（POSIX 用例用）。"""
+    loader = importlib.machinery.SourceFileLoader("wb_lock_under_test", BIN_PATH)
+    spec = importlib.util.spec_from_loader("wb_lock_under_test", loader)
+    m = importlib.util.module_from_spec(spec)
+    loader.exec_module(m)
+    m.PROFILES_DIR = profiles_dir
+    return m
+
 
 WORKER = '''
 
@@ -83,6 +112,7 @@ for _round in range(ROUNDS):
 '''
 
 CHILD_ENV = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+ORDER_OK = ["ready", "ready", "enter", "exit", "enter", "exit"]
 
 
 def _popen_kwargs():
@@ -91,20 +121,6 @@ def _popen_kwargs():
     if sys.platform == "win32":
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW
     return kw
-
-
-def _extract_lock_code(source):
-    """从工具箱源码里抽出 _TrashLock 与它的两个依赖函数的源码文本。"""
-    defs = {n.name: ast.get_source_segment(source, n)
-            for n in ast.parse(source).body
-            if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
-    missing = {"_TrashLock", "get_trash_dir", "_ensure_trash_dir"} - set(defs)
-    if missing:
-        raise RuntimeError(f"bin/workbuddy 里找不到: {sorted(missing)}")
-    header = "import os\nimport sys\nimport time\n\nPROFILES_DIR = None\n"
-    # 用占位符替换而非 str.format：抽取的源码里可能出现花括号
-    return header + "\n\n" + "\n\n\n".join(
-        defs[n] for n in ("get_trash_dir", "_ensure_trash_dir", "_TrashLock"))
 
 
 def _run_scenario():
@@ -119,7 +135,7 @@ def _run_scenario():
         log = os.path.join(base, "lock.log")
 
         with open(BIN_PATH, "r", encoding="utf-8") as f:
-            child_src = _extract_lock_code(f.read()) + WORKER
+            child_src = _extract_lock_module(f.read()) + WORKER
         compile(child_src, "<lock child>", "exec")   # 语法自检，尽早报错
 
         procs = [subprocess.Popen([sys.executable, "-c", child_src, profiles, log],
@@ -139,6 +155,28 @@ def _run_scenario():
 
 
 class TestTrashLock(unittest.TestCase):
+    @unittest.skipUnless(sys.platform != "win32",
+                         "POSIX flock 语义；Windows 的 msvcrt 由子进程用例覆盖")
+    def test_lock_excludes_second_holder_same_process(self):
+        """同进程两个 _TrashLock 实例 = 两个 open file description：
+
+        第二个 LOCK_EX|LOCK_NB 必然超时——与调度无关的确定性互斥证明，
+        拆掉 flock 该用例必红（变异校验「拆锁(POSIX)」的目标）。
+        """
+        base = tempfile.mkdtemp(prefix="wb_lock_posix_")
+        self.addCleanup(lambda: __import__("shutil").rmtree(base, ignore_errors=True))
+        profiles = os.path.join(base, "auth_profiles")
+        wb = _load_wb_module(profiles)
+
+        with wb._TrashLock(timeout=2.0):
+            with self.assertRaises(TimeoutError):
+                with wb._TrashLock(timeout=2.0):
+                    pass   # 持锁期间第二个持有者必须被拒
+        with wb._TrashLock(timeout=2.0):
+            pass           # 释放之后必须能再次获取
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "Windows msvcrt 语义与 flock 不同，用两个真实子进程验证")
     def test_lock_serializes_two_processes(self):
         lines, results = _run_scenario()
 
@@ -156,7 +194,7 @@ class TestTrashLock(unittest.TestCase):
             # 只要相遇一次就会留下 enter/enter 重叠并 FAIL。
             self.skipTest(
                 f"两个子进程始终未能相遇（ready={ready}, giveup={giveups}），"
-                f"runner/杀软拖慢进程创建；互斥语义由 POSIX CI 与本机验证")
+                f"runner/杀软拖慢进程创建；互斥语义由本机与变异校验验证")
             return
 
         # 不变量 1：至少完成一轮完整临界区

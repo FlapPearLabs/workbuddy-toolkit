@@ -40,6 +40,12 @@ jobs:
         run: |
           python scripts/ci_test_report.py tests
 
+      # 变异校验进 CI（维护者建议）：把每处修复改坏证明用例真的会红。
+      # 脚本按平台自动选择变异——Windows 上会验证 msvcrt 拆锁那条。
+      - name: Mutation Check (every fix must be provably covered)
+        run: |
+          python scripts/mutation_check.py
+
       # 显式一步：在真实的 macOS / Linux 文件系统上跑删除路径（真实的
       # os.replace、真实的 st_dev），而不是只依赖汇总脚本里的隐式执行。
       - name: POSIX delete path (real os.replace, no mocks)

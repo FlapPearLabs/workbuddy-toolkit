@@ -99,10 +99,22 @@ class TestProfileRemove(unittest.TestCase):
             return f.read()
 
     def _trash_names(self):
-        # 只看凭据文件：.trash 里还有跨进程锁 .ops.lock，不是回收站条目
+        # 只看凭据文件：跨进程锁 .trash.lock 在 auth_profiles 下，不在 .trash 里
         if not os.path.isdir(self.trash):
             return []
         return sorted(n for n in os.listdir(self.trash) if n.endswith(".info"))
+
+    def _load_wb(self):
+        """进程内加载 bin/workbuddy 并指向本用例的临时目录（不走子进程）。"""
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("wb_inline_test", WB)
+        spec = importlib.util.spec_from_loader("wb_inline_test", loader)
+        wb = importlib.util.module_from_spec(spec)
+        loader.exec_module(wb)
+        wb.PROFILES_DIR = self.prof
+        wb.AUTH_FILE = os.path.join(self.base, ".workbuddy", "auth", "workbuddy-desktop.info")
+        return wb
 
     # ------------------------------------------------------------------
 
@@ -429,6 +441,201 @@ class TestProfileRemove(unittest.TestCase):
         self.assertIn("缺少账号 uid", r.stdout)
         self.assertTrue(os.path.exists(p))
 
+    # ---------------- 交叉审查必修 1：确认集合 == 删除集合 ----------------
+
+    def test_empty_trash_spares_entries_added_during_confirm(self):
+        """确认期间新增的条目从未被展示，绝不能随确认一起销毁（必修 1，已实机复现）"""
+        import io
+        from unittest import mock
+        self._make("alpha", "uid-a")
+        self._make("beta", "uid-b")
+        self.assertEqual(self._run("remove", "alpha", "-y").returncode, 0)
+        self.assertEqual(self._run("remove", "beta", "-y").returncode, 0)
+        shown, late = self._trash_names()
+        wb = self._load_wb()
+        listings = [[shown], [shown, late]]   # 展示时只见 shown，锁内多了 late
+        with mock.patch.object(wb, "_trash_files", side_effect=lambda: listings.pop(0)), \
+             mock.patch.object(wb, "get_trashed_uids", return_value={"uid-a"}), \
+             mock.patch("builtins.input", return_value="y"), \
+             mock.patch("sys.stdout", new=io.StringIO()) as fake_out:
+            self.assertTrue(wb.empty_trash())
+        self.assertFalse(os.path.exists(os.path.join(self.trash, shown)),
+                         "已确认的条目没有被删除")
+        self.assertTrue(os.path.exists(os.path.join(self.trash, late)),
+                        "确认期间新增的条目被销毁了——用户从未见过它")
+        self.assertIn("新增", fake_out.getvalue())
+
+    def test_empty_trash_reports_when_shown_already_gone(self):
+        import io
+        from unittest import mock
+        self._make("alpha", "uid-a")
+        self.assertEqual(self._run("remove", "alpha", "-y").returncode, 0)
+        shown = self._trash_names()[0]
+        wb = self._load_wb()
+        with mock.patch.object(wb, "_trash_files", side_effect=[[shown], []]), \
+             mock.patch.object(wb, "get_trashed_uids", return_value=set()), \
+             mock.patch("builtins.input", return_value="y"), \
+             mock.patch("sys.stdout", new=io.StringIO()) as fake_out:
+            self.assertTrue(wb.empty_trash())
+        self.assertIn("未删除任何内容", fake_out.getvalue())
+
+    # ---------------- 交叉审查必修 3：目录级 fail closed ----------------
+
+    def test_trash_strict_raises_when_dir_unreadable(self):
+        """_trash_files 把 listdir 的 OSError 吞成 [] 时，墓碑会整体失效（必修 3）"""
+        from unittest import mock
+        wb = self._load_wb()
+        os.makedirs(self.trash, exist_ok=True)
+        with mock.patch("os.listdir", side_effect=PermissionError(13, "denied")):
+            with self.assertRaises(OSError):
+                wb.get_trashed_uids(strict=True)
+            self.assertEqual(wb.get_trashed_uids(), set(),
+                             "非 strict 调用方（status 等排障命令）不应崩栈")
+
+    # ---------------- 交叉审查必修 4：别名无损还原 ----------------
+
+    def test_restore_preserves_alias_exactly(self):
+        """别名不经过任何改写：a.b 删除再恢复还是 a.b（此前会被洗成 a_b）"""
+        self._make("a.b", "uid-dot")
+        self.assertEqual(self._run("remove", "a.b", "-y").returncode, 0)
+        stamped = self._trash_names()[0]
+        self.assertTrue(stamped.startswith("a.b."))
+        r = self._run("remove", "--restore", stamped)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "a.b.info")),
+                        "别名被改写，不再是删除前的 a.b")
+        self.assertEqual(self._trash_names(), [])
+
+    def test_restore_preserves_alias_with_space(self):
+        self._make("a b", "uid-sp")
+        self.assertEqual(self._run("remove", "a b", "-y").returncode, 0)
+        stamped = self._trash_names()[0]
+        r = self._run("remove", "--restore", stamped)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "a b.info")))
+
+    def test_restore_keeps_underscores_exactly(self):
+        """_a_ 不能被 strip 成 a——那是另一个别名"""
+        self._make("_a_", "uid-us")
+        self.assertEqual(self._run("remove", "_a_", "-y").returncode, 0)
+        stamped = self._trash_names()[0]
+        r = self._run("remove", "--restore", stamped)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "_a_.info")))
+
+    @unittest.skipUnless(sys.platform != "win32", "Windows 文件名不允许 :；POSIX 上 a:b 合法")
+    def test_restore_preserves_colon_alias_posix(self):
+        self._make("a:b", "uid-colon")
+        self.assertEqual(self._run("remove", "a:b", "-y").returncode, 0)
+        stamped = self._trash_names()[0]
+        r = self._run("remove", "--restore", stamped)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "a:b.info")))
+
+    def test_restore_rejects_aliasless_name(self):
+        os.makedirs(self.trash, exist_ok=True)
+        p = os.path.join(self.trash, ".info")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"account": {"uid": "uid-x"}}, f)
+        r = self._run("remove", "--restore", ".info")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("无法还原出合法账号别名", r.stdout)
+        self.assertTrue(os.path.exists(p))
+
+    # ---------------- 交叉审查必修 5：--purge 单条销毁 ----------------
+
+    def test_purge_removes_single_entry_only(self):
+        self._make("alpha", "uid-a")
+        self._make("beta", "uid-b")
+        self.assertEqual(self._run("remove", "alpha", "-y").returncode, 0)
+        self.assertEqual(self._run("remove", "beta", "-y").returncode, 0)
+        first, second = self._trash_names()
+        r = self._run("remove", "--purge", first, stdin="y\n")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("已彻底销毁", r.stdout)
+        self.assertEqual(self._trash_names(), [second], "把别的条目也删了")
+
+    def test_purge_skips_confirm_with_yes(self):
+        os.makedirs(self.trash, exist_ok=True)
+        p = os.path.join(self.trash, "residue.20261025-000000-000000.info")
+        open(p, "wb").close()
+        r = self._run("remove", "--purge", "residue.20261025-000000-000000.info", "-y")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn("确认销毁", r.stdout)
+        self.assertFalse(os.path.exists(p))
+
+    def test_purge_zero_byte_residue_hinted(self):
+        os.makedirs(self.trash, exist_ok=True)
+        p = os.path.join(self.trash, "residue.20261025-000000-000000.info")
+        open(p, "wb").close()
+        r = self._run("remove", "--purge", "residue.20261025-000000-000000.info", stdin="y\n")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("0 字节", r.stdout)
+
+    def test_purge_rejects_traversal_and_missing(self):
+        r = self._run("remove", "--purge", "../victim")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("非法的回收站文件名", r.stdout)
+        r2 = self._run("remove", "--purge", "ghost.info")
+        self.assertEqual(r2.returncode, 1)
+        self.assertIn("回收站里没有", r2.stdout)
+
+    def test_purge_rejects_extra_positional_and_mode_mix(self):
+        r = self._run("remove", "--purge", "a.info", "b.info")
+        self.assertEqual(r.returncode, 1)
+        r2 = self._run("remove", "--purge", "a.info", "--restore", "b.info")
+        self.assertEqual(r2.returncode, 1)
+        self.assertIn("不能同时使用", r2.stdout)
+
+    # ---------------- 交叉审查 P2：参数解析吞位置参数 / -- 支持 ----------------
+
+    def test_remove_rejects_positional_before_restore(self):
+        """remove alpha --restore x 此前静默忽略 alpha（已实机复现）"""
+        self._make("alpha", "uid-a")
+        r = self._run("remove", "alpha", "--restore", "whatever.info")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("只接受一个文件名", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "alpha.info")),
+                        "alpha 被静默跳过，用户却以为它被删了")
+
+    def test_remove_rejects_duplicate_mode_flag(self):
+        r = self._run("remove", "--restore", "a.info", "--restore")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("重复出现", r.stdout)
+
+    def test_remove_double_dash_allows_dash_alias(self):
+        """首评必修 2：工具能造出 -old 这种别名，remove -- -old 必须能删"""
+        self._make("-old", "uid-old")
+        r = self._run("remove", "-old", "-y")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("未知选项", r.stdout)
+        r2 = self._run("remove", "-y", "--", "-old")
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.prof, "-old.info")))
+
+    def test_remove_double_dash_requires_alias(self):
+        r = self._run("remove", "--")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("'--' 之后要跟账号别名", r.stdout)
+
+    def test_remove_double_dash_rejected_with_modes(self):
+        r = self._run("remove", "--restore", "--", "x.info")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("不能与回收站模式同用", r.stdout)
+
+    # ---------------- 交叉审查 P3：AUTH_FILE 合法 JSON 非对象 ----------------
+
+    def test_remove_tolerates_non_dict_auth_json(self):
+        self._make("alpha", "uid-a")
+        auth_dir = os.path.join(self.base, ".workbuddy", "auth")
+        os.makedirs(auth_dir, exist_ok=True)
+        with open(os.path.join(auth_dir, "workbuddy-desktop.info"), "w", encoding="utf-8") as f:
+            f.write("[]")
+        r = self._run("remove", "alpha", "-y")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.prof, "alpha.info")))
+
     def test_restore_restores_alias_with_suffix_on_collision(self):
         """原别名被其他账号占用时用 _1，绝不覆盖既有凭据"""
         self._make("alpha", "uid-a")
@@ -458,6 +665,7 @@ class TestProfileRemove(unittest.TestCase):
 
         r = self._run("checkin")
         self.assertIn("跳过自动入库", r.stdout)
+        self.assertIn("--purge", r.stdout, "警告必须给出单条清除的补救命令")
         self.assertFalse(os.path.exists(os.path.join(self.prof, "新号.info")),
                          "墓碑读不出时仍然把账号自动入库了")
 
@@ -537,7 +745,7 @@ class TestProfileRemove(unittest.TestCase):
         stamped = self._trash_names()[0]
         r = self._run("remove", "--restore", stamped, "beta")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("一次只能恢复一个文件", r.stdout)
+        self.assertIn("只接受一个文件名", r.stdout)
         self.assertIn(stamped, self._trash_names())
 
     def test_status_json_has_trash_count(self):
@@ -548,12 +756,17 @@ class TestProfileRemove(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout)["trash_count"], 1)
 
     def test_restore_handles_broken_trash_gracefully(self):
-        """.trash 被换成普通文件时，锁目录创建失败也要优雅报错，不抛栈"""
+        """.trash 被换成普通文件时，恢复也要优雅报错，不抛栈。
+
+        锁文件已移到 auth_profiles/.trash.lock（不在 .trash 里，避免目录
+        删除/重建导致换 inode）——锁能正常获取，失败发生在"条目不存在"
+        这一步，同样必须优雅、不许崩栈。
+        """
         with open(self.trash, "w", encoding="utf-8") as f:
             f.write("not a dir")
         r = self._run("remove", "--restore", "anything")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("恢复失败", r.stdout)
+        self.assertIn("回收站里没有", r.stdout)
         self.assertNotIn("Traceback", r.stdout + r.stderr)
 
     @unittest.skipIf(sys.platform == "win32", "POSIX 权限位")

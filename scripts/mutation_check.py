@@ -68,9 +68,13 @@ MUTATIONS = [
         why="不去重时恢复出第二份副本，checkin 会对同一账号签两次",
     ),
     dict(
+        # 删除与恢复现在各有一处 O_EXCL 占位（交叉审查必修 2 之后），
+        # 成对改坏：任意一处失去防覆盖，对应用例必红
         name="回收站文件名防覆盖",
-        old='os.O_CREAT | os.O_EXCL | os.O_WRONLY',
-        new='os.O_CREAT | os.O_WRONLY',
+        old=['trash_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY',
+             'os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY'],
+        new=['trash_path, os.O_CREAT | os.O_WRONLY',
+             'os.open(dst, os.O_CREAT | os.O_WRONLY'],
         test="tests.test_trash_collision.TestTrashCollision.test_collision_keeps_existing_bytes",
         why="去掉 O_EXCL 后同名占位会覆盖既有回收站文件，软删除静默失效",
     ),
@@ -94,8 +98,9 @@ MUTATIONS = [
         name="删除互斥锁(POSIX)",
         old='fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)',
         new='pass  # mutated',
-        test="tests.test_trash_lock.TestTrashLock.test_lock_serializes_two_processes",
-        why="去掉 flock 后两个进程会同时进入临界区，回收站互斥失效",
+        test="tests.test_trash_lock.TestTrashLock."
+             "test_lock_excludes_second_holder_same_process",
+        why="去掉 flock 后第二个持有者不再被拒，回收站互斥失效",
         platform=("linux", "darwin"),
     ),
 ]

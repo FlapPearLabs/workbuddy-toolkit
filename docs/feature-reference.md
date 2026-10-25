@@ -35,8 +35,10 @@
 把不再使用的本地账号备份移入 `auth_profiles/.trash/`，可随时恢复：
 
 - `wb-remove <别名>` 删除（交互确认）
+- `wb-remove -y -- -<别名>` 删除以 `-` 开头的别名
 - `wb-remove --list-trash` 查看回收站
 - `wb-remove --restore <文件名>` 恢复，自动还原删除前的别名
+- `wb-remove --purge <文件名>` 单条销毁（不可恢复，清理残留占位）
 - `wb-remove --empty-trash` 彻底销毁（不可恢复）
 
 删除的是备份文件，不影响客户端当前登录。`-y/--yes` 只跳过普通确认；删除当前登录账号的备份属高危操作，仍需二次确认，只有 `--force` 才放宽该保护。
