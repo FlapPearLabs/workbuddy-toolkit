@@ -636,6 +636,22 @@ class TestProfileRemove(unittest.TestCase):
         self.assertNotIn("Traceback", r.stdout + r.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.prof, "alpha.info")))
 
+    # ---------------- 复核必修 3：无 uid 凭据删除侧对称拒绝 ----------------
+
+    def test_remove_refuses_uidless_profile(self):
+        """无 uid 的凭据此前能删但打印的恢复命令必然失败——现在删除侧拒绝：
+
+        没有 uid 就建不了删除墓碑（checkin 会重新收录），恢复命令也过不了
+        fail-closed 校验。两头的坑一起堵上，文件原样保留待手工处理。
+        """
+        self._make("legacy", "")
+        r = self._run("remove", "legacy", "-y")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("缺少账号 uid", r.stdout)
+        self.assertIn("无法安全删除", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.prof, "legacy.info")),
+                        "无 uid 凭据被静默删掉了")
+
     def test_restore_restores_alias_with_suffix_on_collision(self):
         """原别名被其他账号占用时用 _1，绝不覆盖既有凭据"""
         self._make("alpha", "uid-a")

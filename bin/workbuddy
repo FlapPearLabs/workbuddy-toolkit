@@ -3396,6 +3396,16 @@ def remove_profile(target_name, assume_yes=False, force=False):
         return False
     target_name = matched_name
 
+    # 删除侧对称拒绝（复核必修 3）：无 uid 的凭据删了之后——
+    # ① 建不了删除墓碑，仍登录的账号下次签到会被重新收录；
+    # ② 成功消息里打印的 --restore 命令必然失败（恢复也校验 uid）。
+    # 请手工处理，或先修好凭据内容再删。
+    if not str(target.get("uid") or "").strip():
+        print(f"{COLOR_RED}错误: '{target_name}' 的凭据缺少账号 uid（文件损坏或手工构造），无法安全删除。{COLOR_RESET}")
+        print(f"{COLOR_RED}  没有 uid 就建不了删除墓碑：删掉的账号会在下次签到时被重新收录，{COLOR_RESET}")
+        print(f"{COLOR_RED}  打印的恢复命令也会因缺 uid 失败。请手工处理: {target['path']}{COLOR_RESET}")
+        return False
+
     exp_text = format_timestamp(target["expiresAt"])
     ref_text = format_timestamp(target["refreshExpiresAt"])
     uid_disp = f"...{target['uid'][-8:]}" if target["uid"] else "未知"
