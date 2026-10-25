@@ -155,13 +155,14 @@ def _run_scenario():
 
 
 class TestTrashLock(unittest.TestCase):
-    @unittest.skipUnless(sys.platform != "win32",
-                         "POSIX flock 语义；Windows 的 msvcrt 由子进程用例覆盖")
     def test_lock_excludes_second_holder_same_process(self):
         """同进程两个 _TrashLock 实例 = 两个 open file description：
 
-        第二个 LOCK_EX|LOCK_NB 必然超时——与调度无关的确定性互斥证明，
-        拆掉 flock 该用例必红（变异校验「拆锁(POSIX)」的目标）。
+        POSIX：第二个 flock(LOCK_EX|LOCK_NB) 必然 EWOULDBLOCK；Windows：
+        msvcrt 字节锁对同进程的另一个 fd 同样拒绝（实测 Errno 13，锁属于
+        文件区域而非句柄）。与调度完全无关的确定性互斥证明——拆掉任一
+        平台锁该用例必红（变异校验「拆锁」两条的目标），零子进程、零
+        文件导入抖动、既不会假绿也不会 skip。
         """
         base = tempfile.mkdtemp(prefix="wb_lock_posix_")
         self.addCleanup(lambda: __import__("shutil").rmtree(base, ignore_errors=True))

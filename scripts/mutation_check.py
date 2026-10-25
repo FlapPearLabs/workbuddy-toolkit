@@ -90,8 +90,9 @@ MUTATIONS = [
         name="删除互斥锁(Windows)",
         old='msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)',
         new='pass  # mutated',
-        test="tests.test_trash_lock.TestTrashLock.test_lock_serializes_two_processes",
-        why="去掉字节锁后两个进程会同时进入临界区，回收站互斥失效",
+        test="tests.test_trash_lock.TestTrashLock."
+             "test_lock_excludes_second_holder_same_process",
+        why="去掉字节锁后第二个持有者不再被拒，回收站互斥失效",
         platform="win32",
     ),
     dict(
