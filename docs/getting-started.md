@@ -98,6 +98,23 @@ wb-switch
 
 Toolkit 会在切换前同步当前登录态，降低旧账号配置覆盖新 Token 的风险。
 
+### 可选：让多个账号共用记忆
+
+默认不开启。确认要让各账号共享长期记忆时：
+
+```bash
+workbuddy memory on
+```
+
+开启后切号时会自动汇总并渲染；也可以手动执行 `workbuddy memory collect` + `workbuddy memory apply` 先看效果。
+
+它不会覆盖你的原文：日常渲染是“你文件里现在的内容 + 追加段落”，原文逐字保留在开头；首次接入时会另存一份快照，只给 `restore` 用。
+疑似重复的条目只保留质量更高的一条，落选版本留档。想还原（同时摘掉分诊写入 SOUL / USER 的段落）：
+
+```bash
+workbuddy memory restore <账号>
+```
+
 ## 5. 自动签到与账号巡检
 
 手动运行一次签到：

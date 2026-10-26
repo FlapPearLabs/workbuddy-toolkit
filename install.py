@@ -47,6 +47,7 @@ COLOR_RESET = "\033[0m" if _USE_COLOR else ""
 # Windows 垫片: 别名 -> 子命令
 WINDOWS_SUBCOMMAND_SHIMS = {
     "switch": ["wb-switch", "workbuddy-switch"],
+    "memory": ["wb-memory", "workbuddy-memory"],
     "checkin": ["wb-checkin", "workbuddy-checkin"],
     "chat": ["wb-chat", "workbuddy-chat"],
     "doctor": ["wb-doctor", "workbuddy-doctor"],

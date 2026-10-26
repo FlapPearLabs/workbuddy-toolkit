@@ -8,6 +8,7 @@ WorkBuddy Toolkit provides zero-touch local automation for WorkBuddy & CodeBuddy
 ## Core Capabilities & CLI Commands
 - `workbuddy login [alias]` (`wb-login`): Terminal 1:1 ANSI QR-code independent login without opening the Electron UI.
 - `workbuddy switch [alias]` (`wb-switch`): Instant multi-account profile switching in <1s without WeChat re-scanning.
+- `workbuddy memory` (`wb-memory`): Aggregate `MEMORY.md` entries across accounts into a shared library, dedupe near-duplicates keeping the higher-quality version (losers archived), and append a managed block to each account without rewriting its current text. Only rules are published (P0 redline / P1 explicit instruction / P2 project convention); habits and inferred facts (P3/P4), entries containing local paths/emails/URLs/UUIDs, and Markdown fragments (lines starting with `>`, `*`, `_`, `|`) never cross accounts. `apply` renders against the account's **current** own content, so deleted lines stay deleted; snapshots only serve `restore`. `rebalance` moves whole `##` sections (when ≥2 headings) into `SOUL.md` / `USER.md` and prints per-section keep/move; `restore` also strips those managed sections. `compact` shards oversized or habit/fact entries into `cache/shared_memory/shards/<id>.md` and injects at most 8 index lines (shard text itself is never injected). Rendered output stays within the 4000-char window with the account's own text first. Default shared-block budget is 800 chars (`apply --budget N`). Subcommands: `collect` / `compact [--shard-min N]` / `apply [account]` / `rebalance [--apply]` / `forget <keyword> [--apply]` / `conflicts` / `status` / `restore <account>` / `on` / `off`; snapshots under `cache/shared_memory/originals/`, backups under `cache/shared_memory/backups/`, shards under `cache/shared_memory/shards/`.
 - `workbuddy checkin` (`wb-checkin`): Automated silent daily check-in and low-cost/free model conversation keepalive.
 - `workbuddy status` / `list` (`wb-status` / `wb-list`): Account inventory, token expiry inspection, and JSON output for agents.
 - `workbuddy doctor` (`wb-doctor`): Inspect credential encryption (Suite 1 / $wbEncrypted), runtime compatibility, and Seatbelt rule health.
@@ -25,6 +26,7 @@ workbuddy doctor
 
 ## Documentation & White-box Incident Reports
 - [README.md](README.md): Comprehensive documentation, architecture breakdown, and full CLI manual.
+- [docs/memory-sharing.md](docs/memory-sharing.md): Cross-account memory channels, publish tiers, workflow, failure modes, and rollback.
 - [INCIDENT_01](docs/incidents/INCIDENT_01_SANDBOX_LOG_SNAPSHOT_EXHAUSTION.md): PTY log growth and session snapshot exhaustion.
 - [INCIDENT_02](docs/incidents/INCIDENT_02_CARGO_MULTI_AGENT_SCCACHE.md): Multi-agent cargo compilation storm and sccache reuse.
 - [INCIDENT_04](docs/incidents/INCIDENT_04_SEATBELT_RULE_EXPLOSION_AND_PTY_FREEZE.md): Seatbelt rule explosion, SBPL O(N^2) deadlock, and PTY drop hang.
