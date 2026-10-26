@@ -14,6 +14,8 @@ import tempfile
 import unittest
 import subprocess
 import base64
+import io
+import errno
 from unittest.mock import patch, MagicMock
 
 if sys.platform == "win32":
@@ -1530,6 +1532,339 @@ class TestWorkBuddyCore(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=http_err):
             with self.assertRaises(urllib.error.HTTPError):
                 workbuddy.robust_urlopen(req, timeout=5)
+
+class TestRemoveMemory(unittest.TestCase):
+    """删除账号时的人格/记忆清理：与 #24 的回收站共用一套交互。"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.orig = {
+            "AUTH_FILE": workbuddy.AUTH_FILE,
+            "PROFILES_DIR": workbuddy.PROFILES_DIR,
+            "DB_FILE": workbuddy.DB_FILE,
+            "AUDIT_CACHE_FILE": getattr(workbuddy, "AUDIT_CACHE_FILE", None),
+        }
+        workbuddy.AUTH_FILE = os.path.join(self.test_dir, "auth", "a.info")
+        workbuddy.PROFILES_DIR = os.path.join(self.test_dir, "auth_profiles")
+        workbuddy.DB_FILE = os.path.join(self.test_dir, "workbuddy.db")
+        if "AUDIT_CACHE_FILE" in dir(workbuddy):
+            workbuddy.AUDIT_CACHE_FILE = os.path.join(self.test_dir, "cache", "audit.json")
+        os.makedirs(os.path.dirname(workbuddy.AUTH_FILE), exist_ok=True)
+        os.makedirs(workbuddy.PROFILES_DIR, exist_ok=True)
+        self.root = os.path.dirname(workbuddy.PROFILES_DIR)
+
+    def tearDown(self):
+        for key, value in self.orig.items():
+            if value is not None and hasattr(workbuddy, key):
+                setattr(workbuddy, key, value)
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _profile(self, alias, uid, nickname=None):
+        path = os.path.join(workbuddy.PROFILES_DIR, f"{alias}.info")
+        workbuddy.atomic_write_json(path, {
+            "account": {"uid": uid, "nickname": nickname or alias},
+            "auth": {"accessToken": "tok", "expiresAt": 1800000000000,
+                     "refreshExpiresAt": 1900000000000},
+        })
+        return path
+
+    def _memory(self, uid):
+        acct = os.path.join(self.root, f"user-{uid}-personal")
+        os.makedirs(acct)
+        for name, text in (("MEMORY.md", "mem"), ("SOUL.md", "soul"), ("USER.md", "user")):
+            with open(os.path.join(acct, name), "w", encoding="utf-8") as f:
+                f.write(text)
+        with open(os.path.join(acct, "AGENT.md"), "w", encoding="utf-8") as f:
+            f.write("agent-rules")
+        with open(os.path.join(acct, "workspace-state.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        cloud = os.path.join(self.root, "memory")
+        os.makedirs(cloud, exist_ok=True)
+        with open(os.path.join(cloud, f"{uid}_memory.md"), "w", encoding="utf-8") as f:
+            f.write("cloud-mem")
+        hub = os.path.join(self.root, "cache", "shared_memory", "originals", uid)
+        os.makedirs(hub)
+        with open(os.path.join(hub, "MEMORY.md"), "w", encoding="utf-8") as f:
+            f.write("hub-mem")
+        return acct
+
+    def test_t101_purge_memory_archives_files_and_keeps_agent(self):
+        self._profile("acc1", "uid1")
+        acct = self._memory("uid1")
+        with patch("sys.stdout", io.StringIO()):
+            ok = workbuddy.remove_profile("acc1", assume_yes=True, purge_memory=True)
+        self.assertTrue(ok)
+        self.assertFalse(os.path.exists(os.path.join(acct, "MEMORY.md")))
+        self.assertTrue(os.path.exists(os.path.join(acct, "AGENT.md")), "工作准则被顺手删了")
+        self._d, bundles = workbuddy._memory_bundle_items()
+        self.assertEqual(len(bundles), 1)
+        self.assertGreaterEqual(bundles[0]["items"], 4)
+
+    def test_t102_remove_without_flag_keeps_memory(self):
+        self._profile("acc2", "uid2")
+        acct = self._memory("uid2")
+        with patch("sys.stdout", io.StringIO()):
+            ok = workbuddy.remove_profile("acc2", assume_yes=True)
+        self.assertTrue(ok)
+        self.assertTrue(os.path.exists(os.path.join(acct, "MEMORY.md")), "没加参数却动了记忆")
+
+    def test_t103_restore_brings_memory_back(self):
+        self._profile("acc3", "uid3")
+        acct = self._memory("uid3")
+        with patch("sys.stdout", io.StringIO()):
+            workbuddy.remove_profile("acc3", assume_yes=True, purge_memory=True)
+        _d, bundles = workbuddy._memory_bundle_items()
+        name = bundles[0]["name"]
+        with patch("sys.stdout", io.StringIO()):
+            ok = workbuddy.restore_profile(name + ".info")
+            self.assertTrue(ok)
+            self.assertTrue(os.path.exists(os.path.join(acct, "MEMORY.md")), "账号回来了记忆没回来")
+
+    def test_t104_restore_memory_standalone(self):
+        self._profile("acc4", "uid4")
+        acct = self._memory("uid4")
+        with patch("sys.stdout", io.StringIO()):
+            workbuddy.remove_profile("acc4", assume_yes=True, purge_memory=True)
+        _d, bundles = workbuddy._memory_bundle_items()
+        stem = bundles[0]["name"]
+        with patch("sys.stdout", io.StringIO()):
+            rc = workbuddy.restore_memory_cmd(stem)
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(os.path.join(acct, "MEMORY.md")))
+
+    def test_t105_partial_bundle_blocks_purge_without_force_partial(self):
+        self._profile("acc5", "uid5")
+        acct = self._memory("uid5")
+        real_remove = os.remove
+        real_replace = os.replace
+
+        def stuck(src, *args, **kwargs):
+            if str(src).endswith("MEMORY.md"):
+                raise OSError("模拟被占用")
+            return real_remove(src, *args, **kwargs)
+
+        def cross_device(src, dst):
+            s, d = str(src), str(dst)
+            if os.path.join(".trash", "memory") in d and os.path.join(".trash", "memory") not in s:
+                raise OSError(errno.EXDEV, "simulated cross-device")
+            return real_replace(src, dst)
+
+        with patch.object(workbuddy.os, "replace", side_effect=cross_device):
+            with patch.object(workbuddy.os, "remove", side_effect=stuck):
+                with patch("sys.stdout", io.StringIO()):
+                    ok = workbuddy.remove_profile("acc5", assume_yes=True, purge_memory=True)
+        self.assertTrue(ok)
+        self.assertEqual(workbuddy._LAST_REMOVE_EXIT, 3, "只搬走一部分却报成功")
+        _d, bundles = workbuddy._memory_bundle_items()
+        self.assertTrue(bundles[0]["partial"])
+        cred = os.path.basename(workbuddy._trash_files()[0])
+        with patch("sys.stdout", io.StringIO()):
+            refused = workbuddy.purge_trash(cred, force=True)
+        self.assertFalse(refused, "唯一完整副本被删了")
+        self.assertTrue(os.path.isdir(bundles[0]["path"]))
+
+        with patch("sys.stdout", io.StringIO()):
+            allowed = workbuddy.purge_trash(cred, force=True, force_partial=True)
+        self.assertTrue(allowed)
+        self.assertFalse(os.path.isdir(bundles[0]["path"]))
+
+    def test_t106_empty_trash_keeps_partial(self):
+        self._profile("acc6", "uid6")
+        self._memory("uid6")
+        real_remove = os.remove
+        real_replace = os.replace
+
+        def stuck(src, *args, **kwargs):
+            if str(src).endswith("SOUL.md"):
+                raise OSError("模拟被占用")
+            return real_remove(src, *args, **kwargs)
+
+        def cross_device(src, dst):
+            s, d = str(src), str(dst)
+            if os.path.join(".trash", "memory") in d and os.path.join(".trash", "memory") not in s:
+                raise OSError(errno.EXDEV, "simulated cross-device")
+            return real_replace(src, dst)
+
+        with patch.object(workbuddy.os, "replace", side_effect=cross_device):
+            with patch.object(workbuddy.os, "remove", side_effect=stuck):
+                with patch("sys.stdout", io.StringIO()):
+                    workbuddy.remove_profile("acc6", assume_yes=True, purge_memory=True)
+        _d, bundles = workbuddy._memory_bundle_items()
+        self.assertTrue(bundles[0]["partial"])
+        with patch("sys.stdout", io.StringIO()):
+            ok = workbuddy.empty_trash(force=True)
+        self.assertTrue(ok)
+        self.assertTrue(os.path.isdir(bundles[0]["path"]), "清空回收站把唯一副本也删了")
+
+    def test_t107_legacy_root_memory_is_reported_not_moved(self):
+        self._profile("acc7", "uid7")
+        self._memory("uid7")
+        legacy = os.path.join(self.root, "MEMORY.md")
+        with open(legacy, "w", encoding="utf-8") as f:
+            f.write("legacy")
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            workbuddy.remove_profile("acc7", assume_yes=True, purge_memory=True)
+        self.assertTrue(os.path.exists(legacy), "旧代全局文件被当成本账号记忆搬走了")
+        self.assertIn("旧代全局人格文件", buf.getvalue())
+
+    def test_t110_purge_keeps_bundle_when_credential_delete_fails(self):
+        """T110: 凭证删不掉时，配对归档必须留着（否则人格永久丢失）"""
+        self._profile("acc10", "uid10")
+        self._memory("uid10")
+        with patch("sys.stdout", io.StringIO()):
+            workbuddy.remove_profile("acc10", assume_yes=True, purge_memory=True)
+        _d, bundles = workbuddy._memory_bundle_items()
+        bundle = bundles[0]["path"]
+        cred = os.path.basename(workbuddy._trash_files()[0])
+        real_remove = os.remove
+
+        def stuck(src, *args, **kwargs):
+            if str(src).endswith(".info"):
+                raise OSError("模拟被占用")
+            return real_remove(src, *args, **kwargs)
+
+        with patch.object(workbuddy.os, "remove", side_effect=stuck):
+            with patch("sys.stdout", io.StringIO()):
+                ok = workbuddy.purge_trash(cred, force=True)
+        self.assertFalse(ok)
+        self.assertTrue(os.path.isdir(bundle), "凭证没删掉，归档却先被删了")
+
+    def test_t111_orphan_bundle_is_listed_and_purgeable(self):
+        """T111: 凭证已清空、只剩归档时，必须能看见也能销毁"""
+        stem = "acc11.20260101-000000-000000"
+        bundle = os.path.join(workbuddy.get_memory_trash_dir(), stem)
+        os.makedirs(os.path.join(bundle, "files"))
+        with open(os.path.join(bundle, "files", "0-MEMORY.md"), "w", encoding="utf-8") as f:
+            f.write("mem")
+        workbuddy.atomic_write_json(os.path.join(bundle, "manifest.json"), {
+            "version": 1, "uid": "uid11", "alias": "acc11",
+            "items": [{"kind": "profile_file", "type": "file",
+                       "src": os.path.join(self.root, "user-uid11-personal", "MEMORY.md"),
+                       "rel": "files/0-MEMORY.md"}],
+        })
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            workbuddy.list_trash()
+        self.assertIn("人格/记忆归档", buf.getvalue())
+        with patch("sys.stdout", io.StringIO()):
+            ok = workbuddy.purge_trash(stem, force=True)
+        self.assertTrue(ok, "孤儿归档删不掉")
+        self.assertFalse(os.path.isdir(bundle))
+
+    def test_t112_invalid_uid_is_reported_and_exits_3(self):
+        """T112: uid 非法时不能静默跳过，必须说明且退出码 3"""
+        path = os.path.join(workbuddy.PROFILES_DIR, "acc12.info")
+        workbuddy.atomic_write_json(path, {
+            "account": {"uid": "../evil", "nickname": "Evil"},
+            "auth": {"accessToken": "t", "expiresAt": 1800000000000,
+                     "refreshExpiresAt": 1900000000000},
+        })
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            with self.assertRaises(SystemExit) as ctx:
+                workbuddy.remove_main(["acc12", "-y", "--purge-memory"])
+        self.assertEqual(ctx.exception.code, 3)
+        self.assertIn("明文记忆仍在磁盘上", buf.getvalue())
+
+    def test_t113_shared_uid_does_not_move_other_alias_memory(self):
+        """T113: 同 uid 还有别的别名时，不能把人家的人格搬走"""
+        self._profile("one13", "uid13")
+        self._profile("two13", "uid13")
+        acct = self._memory("uid13")
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            with self.assertRaises(SystemExit) as ctx:
+                workbuddy.remove_main(["one13", "-y", "--purge-memory"])
+        self.assertEqual(ctx.exception.code, 3)
+        self.assertTrue(os.path.exists(os.path.join(acct, "MEMORY.md")),
+                        "把同 uid 另一个别名的记忆搬走了")
+        self.assertIn("还有别的别名", buf.getvalue())
+
+    def test_t114_manifest_shrinks_after_restore(self):
+        """T114: 还原成功后清单要跟着缩，第二次还原不能报'归档文件缺失'"""
+        self._profile("acc14", "uid14")
+        self._memory("uid14")
+        with patch("sys.stdout", io.StringIO()):
+            workbuddy.remove_profile("acc14", assume_yes=True, purge_memory=True)
+        _d, bundles = workbuddy._memory_bundle_items()
+        stem = bundles[0]["name"]
+        with patch("sys.stdout", io.StringIO()):
+            workbuddy.restore_memory_cmd(stem)
+        if os.path.isdir(bundles[0]["path"]):
+            manifest = workbuddy._read_archive_manifest(bundles[0]["path"]) or {}
+            self.assertEqual(manifest.get("items"), [], "清单没跟着磁盘更新")
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            workbuddy.restore_memory_cmd(stem)
+        self.assertNotIn("归档文件缺失", buf.getvalue())
+
+    def test_t116_empty_trash_partial_only_message(self):
+        """T116: 只剩 partial 归档时，不能说成'被其他进程清空'"""
+        stem = "acc16.20260101-000000-000000"
+        bundle = os.path.join(workbuddy.get_memory_trash_dir(), stem)
+        os.makedirs(os.path.join(bundle, "files"))
+        with open(os.path.join(bundle, "files", "0-MEMORY.md"), "w", encoding="utf-8") as f:
+            f.write("mem")
+        workbuddy.atomic_write_json(os.path.join(bundle, "manifest.json"), {
+            "version": 1, "uid": "uid16", "alias": "acc16", "partial": True, "items": [],
+        })
+        with open(os.path.join(bundle, "PARTIAL"), "w", encoding="utf-8"):
+            pass
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            ok = workbuddy.empty_trash(force=True)
+        self.assertTrue(ok)
+        self.assertTrue(os.path.isdir(bundle))
+        self.assertNotIn("其他进程清空", buf.getvalue())
+        self.assertIn("partial 归档已按约定保留", buf.getvalue())
+
+    def test_t115_empty_trash_removes_orphan_bundle(self):
+        """T115: 清空回收站要连孤儿归档一起清，否则明文残留永远删不掉"""
+        stem = "acc15.20260101-000000-000000"
+        bundle = os.path.join(workbuddy.get_memory_trash_dir(), stem)
+        os.makedirs(os.path.join(bundle, "files"))
+        with open(os.path.join(bundle, "files", "0-MEMORY.md"), "w", encoding="utf-8") as f:
+            f.write("mem")
+        workbuddy.atomic_write_json(os.path.join(bundle, "manifest.json"), {
+            "version": 1, "uid": "uid15", "alias": "acc15", "items": [],
+        })
+        with patch("sys.stdout", io.StringIO()):
+            ok = workbuddy.empty_trash(force=True)
+        self.assertTrue(ok)
+        self.assertFalse(os.path.isdir(bundle))
+
+    def test_t109_partial_memory_makes_cli_exit_3(self):
+        """T109: 账号删了但档案没搬干净，CLI 必须给 3 而不是 0"""
+        self._profile("acc9", "uid9")
+        self._memory("uid9")
+        real_remove = os.remove
+        real_replace = os.replace
+
+        def stuck(src, *args, **kwargs):
+            if str(src).endswith("USER.md"):
+                raise OSError("模拟被占用")
+            return real_remove(src, *args, **kwargs)
+
+        def cross_device(src, dst):
+            s, d = str(src), str(dst)
+            if os.path.join(".trash", "memory") in d and os.path.join(".trash", "memory") not in s:
+                raise OSError(errno.EXDEV, "simulated cross-device")
+            return real_replace(src, dst)
+
+        with patch.object(workbuddy.os, "replace", side_effect=cross_device):
+            with patch.object(workbuddy.os, "remove", side_effect=stuck):
+                with patch("sys.stdout", io.StringIO()):
+                    with self.assertRaises(SystemExit) as ctx:
+                        workbuddy.remove_main(["acc9", "-y", "--purge-memory"])
+        self.assertEqual(ctx.exception.code, 3)
+
+    def test_t108_remove_memory_rejects_trash_modes(self):
+        with patch("sys.stdout", io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                workbuddy.remove_main(["--purge-memory", "--list-trash"])
+        self.assertEqual(ctx.exception.code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

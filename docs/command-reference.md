@@ -78,12 +78,13 @@ wb-switch
 ### 删除账号
 
 ```bash
-wb-remove <账号别名> [-y] [--force]   # 删除（移入回收站）
+wb-remove <账号别名> [-y] [--force] [--purge-memory]   # 删除（移入回收站）
 wb-remove [-y] -- -<别名>             # 删除以 - 开头的别名
-wb-remove --list-trash               # 查看回收站
-wb-remove --restore <文件名>         # 恢复单个账号
-wb-remove --purge <文件名> [-y]      # 单条销毁（不可恢复，清残留占位用）
-wb-remove --empty-trash [-y]         # 清空回收站（不可恢复）
+wb-remove --list-trash               # 查看回收站（凭证 + 人格/记忆归档）
+wb-remove --restore <文件名>         # 恢复单个账号（连同配对的人格/记忆）
+wb-remove --restore-memory <归档名>  # 凭证已删/改名时，单独还原人格/记忆
+wb-remove --purge <文件名> [-y] [--force-partial]  # 单条销毁（不可恢复）
+wb-remove --empty-trash [-y] [--force-partial]     # 清空回收站（不可恢复）
 ```
 
 顶层别名 `rm` / `del` / `delete` 与 `remove` 等价（如 `workbuddy rm <别名>`），仅为习惯兼容；脚本里建议写全 `remove`，避免与 shell 的 `rm` 混淆。
@@ -98,6 +99,28 @@ wb-remove --empty-trash [-y]         # 清空回收站（不可恢复）
 - 别名必须唯一匹配（支持别名/昵称，歧义时拒绝执行）；退出码 0/1 可用于脚本
 - `-y/--yes` 只跳过普通确认；删除**当前登录账号的备份**属高危，即使带 `-y` 也会再问一次，只有 `--force` 才放宽该保护（`--force` 不用于跳过普通确认，与 `save --force` 语义区分）
 - `wb-status` 会显示回收站条目数；「删除 = 移入回收站」，凭据仍在磁盘上，彻底销毁请 `--empty-trash`，只销毁某一条请 `--purge <文件名>`（0 字节占位等工具残留可用它清掉）
+
+#### 连同人格/记忆一起清理
+
+默认只删凭证，人格/记忆原样留在原地。加 `--purge-memory` 会把这些**一起移入回收站**（与凭证同一个 stem，恢复时自动配对）：
+
+| 会搬走 | 不会动 |
+|---|---|
+| 账号目录里的 `MEMORY.md` / `SOUL.md` / `USER.md` / `IDENTITY.md` / `BOOTSTRAP.md` | `AGENT.md`（工作准则）、`workspace-state.json`（界面状态） |
+| `memory/<uid>_memory.md` 与 `.bak`（云端记忆缓存） | 会话历史 `workbuddy.db`、`storage/user-<uid>*` |
+| `cache/shared_memory/{originals,backups}/<uid>/`（工具箱记忆副本） | 数据根下旧代全局 `MEMORY.md` 等（不属于任何单个账号，只报告） |
+
+- 目录名按白名单匹配：`user-<uid>-personal`、`user-<uid>-enterprise[-*]`、裸 `user-<uid>`；`user-<uid>-extra-personal` 这类长得像但不是的目录只报告、不搬
+- 账号目录里只搬指定的几个文件，不整目录删，所以删账号不会顺手带走工作准则；`cache/shared_memory/{originals,backups}/<uid>/` 这类按账号独立的副本目录整体搬走（清单里标 `dir`）
+- 档案进 `auth_profiles/.trash/memory/<同一个 stem>/`，里面有 `manifest.json`（原路径清单）与 `files/`；`--list-trash` 会显示项数与是否「(部分)」
+- `--purge` / `--empty-trash` 会连带销毁配对归档；凭证删不掉时归档**不会**先删（避免"账号还能恢复、人格已经没了"）
+- `--empty-trash` 按确认时看到的清单销毁：确认期间新增的凭证或归档不会被删，会单独列出来，重跑一次再确认
+- 凭证已被清空、只剩归档（孤儿）时，`--list-trash` 仍会列出，可用 `--purge <归档名>` 销毁；`--empty-trash` 也会一并清理
+- 只搬走一部分（源文件被占用/跨卷复制后删源失败）时，归档标 `partial`（`manifest.partial` + 空标记 `PARTIAL`），`--list-trash` 标「(部分)」，`--purge` / `--empty-trash` **默认拒绝**销毁它——那可能是唯一完整副本，确认不要才加 `--force-partial`
+- 退出码：`0` 完成；`1` 失败或未执行（含参数错误；凭证可能已经销毁、只是档案没删掉，具体看输出）；`3` 账号已删除但档案没搬干净（只搬走一部分、归档读不出、UID 非法、同 UID 还有别的别名）。`3` 时凭证仍在回收站，可用 `--restore` 回滚
+- UID 非法（含 `../`、盘符、超长）时**不会**搬数据根之外的任何目录：拒绝并打印原因，退出码 3，明文记忆留在原处等手工处理
+- 同一 UID 有多个别名时，`--purge-memory` 不会搬动记忆目录（否则会把另一个别名的人格一起带走）：只删凭证并给出提示，退出码 3
+- `--force-partial` 与 `--force` 不是一回事：`--force` 只放宽「删除当前登录账号备份」的保护，不能与回收站模式同用；`--force-partial` 只用于 `--purge` / `--empty-trash`，用来销毁 partial 归档
 - 回收站目录本身不可读时，签到会**放弃自动入库**并给出 `--purge` / `--empty-trash` 补救提示，绝不会把已删账号复活
 
 ## 健康检查与诊断
