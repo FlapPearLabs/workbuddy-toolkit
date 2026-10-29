@@ -31,7 +31,7 @@ set "CONNECTED=0"
 
 :CHECK_NET
 rem 双重探测：curl 探测 https 连通，回退 ping 公共 DNS
-curl -I -s --connect-timeout 2 "https://copilot.tencent.com" >nul 2>&1
+curl -I -s --connect-timeout 2 --max-time 3 "https://copilot.tencent.com" >nul 2>&1
 if !errorlevel! equ 0 (
     set "CONNECTED=1"
     goto NET_READY

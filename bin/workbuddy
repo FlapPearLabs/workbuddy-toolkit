@@ -2752,7 +2752,7 @@ def run_checkin(target_name=None, with_chat=True):
                 checked_already += 1
                 print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}今日已签到{COLOR_RESET} | 连续 {streak_days} 天 | 累计签到奖励 {total_credits} 积分")
             else:
-                # 2. 执行签到领取 (失败重试：最多重试 3 次，间隔 2~5 秒；max_retries=0 保持总请求数严格 <= 4)
+                # 2. 执行签到领取 (失败重试：最多重试 3 次，间隔 2~5 秒；显式 max_retries=0 避免网络层倍数重试)
                 claim_req = urllib.request.Request(
                     "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
                     data=b"{}",
@@ -2760,7 +2760,6 @@ def run_checkin(target_name=None, with_chat=True):
                 )
 
                 max_retries = 3
-                claim_success = False
                 for claim_attempt in range(max_retries + 1):
                     try:
                         with robust_urlopen(claim_req, timeout=10, max_retries=0) as resp:
@@ -2771,14 +2770,12 @@ def run_checkin(target_name=None, with_chat=True):
                                 credit = cd.get("credit", 100)
                                 new_streak = cd.get("streak_days", streak_days + 1)
                                 print(f" {COLOR_GREEN}🎉 {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_BOLD}{COLOR_GREEN}签到成功！+{credit} 积分{COLOR_RESET} | 连续签到 {new_streak} 天")
-                                claim_success = True
                                 break
                             else:
                                 msg = claim_res.get("msg", "")
                                 if "已签到" in msg:
                                     checked_already += 1
                                     print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
-                                    claim_success = True
                                     break
                                 if claim_attempt < max_retries:
                                     wait_sec = round(random.uniform(2.0, 5.0), 1)
@@ -2798,7 +2795,6 @@ def run_checkin(target_name=None, with_chat=True):
                         if "已签到" in msg:
                             checked_already += 1
                             print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
-                            claim_success = True
                             break
                         # 对 5xx 服务端错误 (如 500 签到失败，请稍后重试) 或 429 限流进行退避重试
                         if (e.code >= 500 or e.code == 429) and claim_attempt < max_retries:

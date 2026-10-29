@@ -647,7 +647,7 @@ def _configure_windows_checkin(mode, bin_path, runner):
     _remove_windows_startup_fallback(calendar_task)
     boot_cmd = os.path.join(WORKBUDDY_DIR, "scripts", "boot-checkin.cmd")
     log_path = os.path.join(LOGS_DIR, "boot_checkin.log")
-    cmd = f'cmd /c "{boot_cmd}"'
+    cmd = f'cmd /c ""{boot_cmd}""'
     res = subprocess.run(["schtasks", "/create", "/tn", boot_task, "/tr", cmd,
                           "/sc", "onlogon", "/f"],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

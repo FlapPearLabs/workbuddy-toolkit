@@ -690,6 +690,43 @@ class TestDualTrackCheckin(unittest.TestCase):
         self.assertIn('set "CHECKIN_EXIT=!errorlevel!"', content)
         self.assertIn('exit /b !CHECKIN_EXIT!', content)
 
+    @unittest.skipIf(sys.platform == "win32", "boot-checkin.sh 仅用于 macOS / Linux")
+    def test_boot_script_failure_does_not_write_flag_and_propagates_exit_code(self):
+        """当签到失败时，boot-checkin.sh 必须透传非 0 退出码，且不得写入单日防重标记"""
+        installer = os.path.join(REPO_DIR, "install.py")
+        res = subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                             env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+
+        scripts_dir = os.path.join(self.temp_home, ".workbuddy", "scripts")
+        sh_path = os.path.join(scripts_dir, "boot-checkin.sh")
+        flag_path = os.path.join(self.temp_home, ".workbuddy", ".last_boot_checkin")
+        log_path = os.path.join(self.temp_home, ".workbuddy", "logs", "boot_checkin.log")
+        if os.path.exists(flag_path):
+            os.remove(flag_path)
+        if os.path.exists(log_path):
+            os.remove(log_path)
+
+        # 放置桩 wb-checkin：模拟签到因服务端异常退出 7
+        bin_dir = os.path.join(self.temp_home, ".local", "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        stub_checkin = os.path.join(bin_dir, "wb-checkin")
+        with open(stub_checkin, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 7\n")
+        os.chmod(stub_checkin, 0o755)
+
+        run_env = dict(self.env)
+        run_env["PATH"] = f"{bin_dir}:{run_env.get('PATH', '')}"
+
+        sh_res = subprocess.run(["bash", sh_path], env=run_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+        self.assertEqual(sh_res.returncode, 7, f"应透传签到脚本的退出码 7，实际: {sh_res.returncode}")
+        self.assertFalse(os.path.exists(flag_path), "签到失败时绝不得写入单日防重标记")
+        self.assertTrue(os.path.exists(log_path), "应记录失败日志")
+        with open(log_path, "r", encoding="utf-8") as f:
+            log_content = f.read()
+            self.assertIn("Exit Code: 7", log_content)
+
 
 if __name__ == "__main__":
     unittest.main()
