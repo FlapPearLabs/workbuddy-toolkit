@@ -238,7 +238,9 @@ class TestUninstallKeepsCheckout(unittest.TestCase):
 
     def test_uninstall_restores_models_json_and_keeps_source_checkout(self):
         clone = os.path.join(self.home, ".workbuddy", "toolkit")
-        shutil.copytree(REPO_DIR, clone, ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache"))
+        # .codegraph 是本机代码索引（含 unix socket），copytree 复制 socket 会直接失败
+        shutil.copytree(REPO_DIR, clone, ignore=shutil.ignore_patterns(
+            "__pycache__", ".ruff_cache", ".codegraph"))
         os.makedirs(os.path.join(clone, ".git"), exist_ok=True)
         wb = os.path.join(self.home, ".workbuddy")
         original = [{"id": "space-bunny-free", "url": "https://upstream.example/v1", "apiKey": "user-own-key"}]

@@ -39,7 +39,7 @@ PATTERNS: List[Tuple[str, str]] = [
     (r"(?<!\d)1[3-9]\d{9}(?!\d)", "Mainland China 11-digit phone number"),
 ]
 
-SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules"}
+SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", ".agents", ".scratch", ".codegraph"}
 
 
 def _is_allowed(desc: str, match: str) -> bool:

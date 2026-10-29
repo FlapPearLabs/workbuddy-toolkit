@@ -92,7 +92,15 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "wb-tool")))
             self.assertTrue(os.path.exists(os.path.join(bin_dir, "workbuddy-tool")))
 
+        # 验证开机网络就绪辅助脚本已部署
+        scripts_dir = os.path.join(self.temp_home, ".workbuddy", "scripts")
+        self.assertTrue(os.path.exists(os.path.join(scripts_dir, "boot-checkin.sh")))
+        self.assertTrue(os.path.exists(os.path.join(scripts_dir, "boot-checkin.cmd")))
+
         # 3. 运行卸载器（输入 n 回答不回滚数据库）
+        flag_file = os.path.join(self.temp_home, ".workbuddy", ".last_boot_checkin")
+        with open(flag_file, "w", encoding="utf-8") as f:
+            f.write("2026-01-01")
         unres = subprocess.run([sys.executable, uninstaller], input="n\n", cwd=REPO_DIR, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(unres.returncode, 0, f"uninstall.py 失败: {unres.stderr}\n{unres.stdout}")
         self.assertIn("卸载完成", unres.stdout)
@@ -123,6 +131,11 @@ class TestInstallersE2E(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-sandbox")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "wb-tool")))
             self.assertFalse(os.path.exists(os.path.join(bin_dir, "workbuddy-tool")))
+
+        # 验证开机打卡脚本与标记也被卸载器彻底清理
+        self.assertFalse(os.path.exists(os.path.join(scripts_dir, "boot-checkin.sh")))
+        self.assertFalse(os.path.exists(os.path.join(scripts_dir, "boot-checkin.cmd")))
+        self.assertFalse(os.path.exists(flag_file))
 
         # 验证 ~/.workbuddy/toolkit 伴随组件目录已物理 100% 移除
         toolkit_path = os.path.join(self.temp_home, ".workbuddy", "toolkit")
@@ -367,7 +380,9 @@ class TestInstallersE2E(unittest.TestCase):
 
 
 def _copy_repo(dest):
-    shutil.copytree(REPO_DIR, dest, ignore=shutil.ignore_patterns(".git", "__pycache__", ".ruff_cache"))
+    # .codegraph 是本机代码索引（含 unix socket），copytree 复制 socket 会直接失败
+    shutil.copytree(REPO_DIR, dest, ignore=shutil.ignore_patterns(
+        ".git", "__pycache__", ".ruff_cache", ".codegraph"))
     return dest
 
 
@@ -508,5 +523,211 @@ class TestAliasConsistency(unittest.TestCase):
             self.assertIn(f"workbuddy-{cmd}", self.shim_aliases, f"子命令 {cmd} 缺全拼形式")
 
 
+class TestDualTrackCheckin(unittest.TestCase):
+    """双轨打卡：参数解析、轨道互斥与 boot 脚本幂等性。"""
+
+    def setUp(self):
+        self.temp_home = tempfile.mkdtemp()
+        self.env = os.environ.copy()
+        self.env.update({
+            "HOME": self.temp_home,
+            "USERPROFILE": self.temp_home,
+            "APPDATA": os.path.join(self.temp_home, "AppData", "Roaming"),
+            "LOCALAPPDATA": os.path.join(self.temp_home, "AppData", "Local"),
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+        })
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_home, ignore_errors=True)
+
+    def _load_installer(self, name):
+        spec = importlib.util.spec_from_file_location(name, os.path.join(REPO_DIR, "install.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_parse_options_supports_dual_track_flags(self):
+        """--checkin-mode / --with-boot-checkin 与 PR 17 的 --no-input 必须共存"""
+        installer = self._load_installer("install_flags")
+
+        opts = installer.parse_options(["--no-input", "--checkin-mode=boot"])
+        self.assertTrue(opts["checkin"])
+        self.assertEqual(opts["checkin_mode"], "boot")
+
+        opts = installer.parse_options(["--no-input", "--with-boot-checkin"])
+        self.assertTrue(opts["checkin"])
+        self.assertEqual(opts["checkin_mode"], "boot")
+
+        opts = installer.parse_options(["--no-input", "--with-checkin"])
+        self.assertTrue(opts["checkin"])
+        self.assertEqual(opts["checkin_mode"], "calendar")
+
+        opts = installer.parse_options(["--no-input", "--with-services"])
+        self.assertTrue(opts["checkin"] and opts["log_guard"] and opts["router"])
+        self.assertEqual(opts["checkin_mode"], "calendar")
+
+        opts = installer.parse_options(["--no-input", "--with-services", "--checkin-mode=boot"])
+        self.assertTrue(opts["checkin"])
+        self.assertEqual(opts["checkin_mode"], "boot")
+
+        opts = installer.parse_options(["--no-input", "--checkin-mode=none"])
+        self.assertFalse(opts["checkin"])
+        self.assertEqual(opts["checkin_mode"], "none")
+
+        # 完全没提到签到：保持「不碰已有配置」的增量语义
+        opts = installer.parse_options(["--no-input"])
+        self.assertFalse(opts["checkin"])
+        self.assertIsNone(opts["checkin_mode"])
+
+        with self.assertRaises(SystemExit):
+            installer.parse_options(["--no-input", "--checkin-mode=weekly"])
+
+    def test_macos_scheduler_switches_track_exclusively(self):
+        """boot 与 calendar 必须互斥：装载一轨就注销另一轨，避免一天打两次卡"""
+        installer = self._load_installer("install_mac_track")
+        agents_dir = os.path.join(self.temp_home, "Library", "LaunchAgents")
+        boot_plist = os.path.join(agents_dir, "com.workbuddy.bootcheckin.plist")
+        cal_plist = os.path.join(agents_dir, "com.workbuddy.dailycheckin.plist")
+
+        with mock.patch.object(installer, "HOME", self.temp_home), \
+                mock.patch("sys.platform", "darwin"), \
+                mock.patch.object(installer.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+
+            installer.setup_scheduler("/tmp/bin", "/tmp",
+                                      {"checkin": True, "checkin_mode": "boot", "checkin_mode_set": True})
+            self.assertTrue(os.path.exists(boot_plist), "boot 轨必须写入 bootcheckin plist")
+            self.assertFalse(os.path.exists(cal_plist), "boot 轨必须注销 dailycheckin")
+            with open(boot_plist, "r", encoding="utf-8") as f:
+                boot_body = f.read()
+            self.assertIn("RunAtLoad", boot_body)
+            self.assertIn("boot-checkin.sh", boot_body)
+            self.assertNotIn("{{HOME}}", boot_body)
+
+            installer.setup_scheduler("/tmp/bin", "/tmp",
+                                      {"checkin": True, "checkin_mode": "calendar", "checkin_mode_set": True})
+            self.assertTrue(os.path.exists(cal_plist), "calendar 轨必须写入 dailycheckin plist")
+            self.assertFalse(os.path.exists(boot_plist), "calendar 轨必须注销 bootcheckin")
+            with open(cal_plist, "r", encoding="utf-8") as f:
+                self.assertIn("StartCalendarInterval", f.read())
+
+    def test_windows_scheduler_registers_boot_onlogon(self):
+        """Windows 的 boot 轨用 onlogon 触发器调 boot-checkin.cmd，并清掉 daily 任务"""
+        installer = self._load_installer("install_win_track")
+        with mock.patch.dict(os.environ, {"APPDATA": self.env["APPDATA"]}), \
+                mock.patch("sys.platform", "win32"), \
+                mock.patch.object(installer.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            installer.setup_scheduler("/tmp/bin", "/tmp",
+                                      {"checkin": True, "checkin_mode": "boot", "checkin_mode_set": True})
+            calls = [" ".join(call.args[0]) for call in run.call_args_list if call.args]
+            self.assertTrue(
+                any("/create" in c and "WorkBuddyBootCheckin" in c and "onlogon" in c for c in calls),
+                calls,
+            )
+            self.assertTrue(
+                any("/delete" in c and "WorkBuddyDailyCheckin" in c for c in calls),
+                calls,
+            )
+            self.assertFalse(
+                any("/create" in c and "WorkBuddyDailyCheckin" in c for c in calls),
+                calls,
+            )
+
+    @unittest.skipIf(sys.platform == "win32", "boot-checkin.sh 仅用于 macOS / Linux")
+    def test_boot_script_exits_immediately_when_already_checked_in_today(self):
+        """单日幂等锁：当天已打卡时必须在网络探测前退出，不能重复打扰且不得调用签到"""
+        installer = os.path.join(REPO_DIR, "install.py")
+        res = subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                             env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+
+        scripts_dir = os.path.join(self.temp_home, ".workbuddy", "scripts")
+        sh_path = os.path.join(scripts_dir, "boot-checkin.sh")
+        self.assertTrue(os.path.exists(sh_path))
+        self.assertTrue(os.path.exists(os.path.join(scripts_dir, "boot-checkin.cmd")))
+
+        import datetime
+        flag_path = os.path.join(self.temp_home, ".workbuddy", ".last_boot_checkin")
+        with open(flag_path, "w", encoding="utf-8") as f:
+            f.write(datetime.date.today().isoformat())
+
+        # 放置桩 wb-checkin：若幂等锁失效执行了签到命令，该桩会写入 canary 文件
+        bin_dir = os.path.join(self.temp_home, ".local", "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        canary = os.path.join(self.temp_home, "checkin_called.canary")
+        stub_checkin = os.path.join(bin_dir, "wb-checkin")
+        with open(stub_checkin, "w", encoding="utf-8") as f:
+            f.write(f"#!/bin/sh\ntouch '{canary}'\nexit 0\n")
+        os.chmod(stub_checkin, 0o755)
+
+        log_path = os.path.join(self.temp_home, ".workbuddy", "logs", "boot_checkin.log")
+        if os.path.exists(log_path):
+            os.remove(log_path)
+
+        # 若幂等锁失效，脚本会进入最长 90 秒的网络等待或调用 wb-checkin
+        sh_res = subprocess.run(["bash", sh_path], env=self.env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+        self.assertEqual(sh_res.returncode, 0, sh_res.stderr)
+        self.assertFalse(os.path.exists(canary), "单日防重幂等锁生效时，绝对不能调用 wb-checkin 命令")
+        self.assertFalse(os.path.exists(log_path), "单日防重幂等锁生效时，不得写入任何日志")
+
+    def test_boot_cmd_script_syntax_and_errorlevel_contract(self):
+        """静态断言 Windows boot-checkin.cmd 语法与返回值契约：
+        1. 写入 flag 必须带括号避免数字被 cmd 当做句柄解析 (如 (echo !TODAY!)> "%FLAG_FILE%")
+        2. 必须在 call 后立即暂存 errorlevel，避免后置 echo 清空退出码导致异常被静默掩盖
+        """
+        cmd_path = os.path.join(REPO_DIR, "scripts", "boot-checkin.cmd")
+        with open(cmd_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        # 检查防重标记重定向：不能有 "!TODAY!>" 这种紧邻 > 的写法
+        self.assertNotIn("!TODAY!>", content, "cmd 语法缺陷：!TODAY!> 会将末尾数字解析为文件句柄")
+        self.assertIn('(echo !TODAY!)> "%FLAG_FILE%"', content)
+
+        # 检查 call 后立即暂存 errorlevel 并在退出时使用
+        self.assertIn('set "CHECKIN_EXIT=!errorlevel!"', content)
+        self.assertIn('exit /b !CHECKIN_EXIT!', content)
+
+    @unittest.skipIf(sys.platform == "win32", "boot-checkin.sh 仅用于 macOS / Linux")
+    def test_boot_script_failure_does_not_write_flag_and_propagates_exit_code(self):
+        """当签到失败时，boot-checkin.sh 必须透传非 0 退出码，且不得写入单日防重标记"""
+        installer = os.path.join(REPO_DIR, "install.py")
+        res = subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
+                             env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+
+        scripts_dir = os.path.join(self.temp_home, ".workbuddy", "scripts")
+        sh_path = os.path.join(scripts_dir, "boot-checkin.sh")
+        flag_path = os.path.join(self.temp_home, ".workbuddy", ".last_boot_checkin")
+        log_path = os.path.join(self.temp_home, ".workbuddy", "logs", "boot_checkin.log")
+        if os.path.exists(flag_path):
+            os.remove(flag_path)
+        if os.path.exists(log_path):
+            os.remove(log_path)
+
+        # 放置桩 wb-checkin：模拟签到因服务端异常退出 7
+        bin_dir = os.path.join(self.temp_home, ".local", "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        stub_checkin = os.path.join(bin_dir, "wb-checkin")
+        with open(stub_checkin, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 7\n")
+        os.chmod(stub_checkin, 0o755)
+
+        run_env = dict(self.env)
+        run_env["PATH"] = f"{bin_dir}:{run_env.get('PATH', '')}"
+
+        sh_res = subprocess.run(["bash", sh_path], env=run_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+        self.assertEqual(sh_res.returncode, 7, f"应透传签到脚本的退出码 7，实际: {sh_res.returncode}")
+        self.assertFalse(os.path.exists(flag_path), "签到失败时绝不得写入单日防重标记")
+        self.assertTrue(os.path.exists(log_path), "应记录失败日志")
+        with open(log_path, "r", encoding="utf-8") as f:
+            log_content = f.read()
+            self.assertIn("Exit Code: 7", log_content)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -14,6 +14,9 @@ import tempfile
 import unittest
 import subprocess
 import base64
+import io
+import urllib.request
+import urllib.error
 from unittest.mock import patch, MagicMock
 
 if sys.platform == "win32":
@@ -1530,6 +1533,188 @@ class TestWorkBuddyCore(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=http_err):
             with self.assertRaises(urllib.error.HTTPError):
                 workbuddy.robust_urlopen(req, timeout=5)
+
+    def _create_testuser_profile(self):
+        fake = {
+            "account": {"uid": "mock-uid-test", "nickname": "TestUser"},
+            "auth": {"accessToken": "mock_token_test"}
+        }
+        with open(os.path.join(workbuddy.PROFILES_DIR, "testuser.info"), "w", encoding="utf-8") as f:
+            json.dump(fake, f)
+
+    def test_checkin_retries_on_500_and_succeeds(self):
+        """测试签到接口遭遇 500 抖动时自动退避重试，并在下次尝试成功"""
+        self._create_testuser_profile()
+        status_resp = MagicMock()
+        status_resp.read.return_value = json.dumps({
+            "code": 0, "data": {"today_checked_in": False, "streak_days": 10, "total_credits": 1000}
+        }).encode("utf-8")
+        status_resp.__enter__.return_value = status_resp
+
+        err_500 = urllib.error.HTTPError(
+            "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
+            500, "Internal Server Error", {},
+            io.BytesIO(b'{"code": 500, "msg": "\\xe7\\xad\\xbe\\xe5\\x88\\xb0\\xe5\\xa4\\xb1\\xe8\\xb4\\xa5\\xef\\xbc\\x8c\\xe8\\xaf\\xb7\\xe7\\xa8\\x8d\\xe5\\x90\\x8e\\xe9\\x87\\x8d\\xe8\\xaf\\x95"}')
+        )
+
+        success_resp = MagicMock()
+        success_resp.read.return_value = json.dumps({
+            "code": 0, "msg": "ok", "data": {"credit": 100, "streak_days": 11}
+        }).encode("utf-8")
+        success_resp.__enter__.return_value = success_resp
+
+        sleep_calls = []
+        with patch.object(workbuddy, "time") as mock_time:
+            mock_time.sleep.side_effect = lambda s: sleep_calls.append(s)
+            with patch("urllib.request.urlopen", side_effect=[status_resp, err_500, success_resp]):
+                ok = workbuddy.run_checkin(target_name="testuser", with_chat=False)
+                self.assertTrue(ok)
+                self.assertEqual(len(sleep_calls), 1)
+                self.assertGreaterEqual(sleep_calls[0], 2.0)
+                self.assertLessEqual(sleep_calls[0], 5.0)
+
+    def test_checkin_retries_on_429_and_succeeds(self):
+        """测试签到接口遭遇 429 限流时自动退避重试，并在下次尝试成功"""
+        self._create_testuser_profile()
+        status_resp = MagicMock()
+        status_resp.read.return_value = json.dumps({
+            "code": 0, "data": {"today_checked_in": False, "streak_days": 10, "total_credits": 1000}
+        }).encode("utf-8")
+        status_resp.__enter__.return_value = status_resp
+
+        err_429 = urllib.error.HTTPError(
+            "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
+            429, "Too Many Requests", {},
+            io.BytesIO(b'{"code": 429, "msg": "rate limit exceeded"}')
+        )
+
+        success_resp = MagicMock()
+        success_resp.read.return_value = json.dumps({
+            "code": 0, "msg": "ok", "data": {"credit": 100, "streak_days": 11}
+        }).encode("utf-8")
+        success_resp.__enter__.return_value = success_resp
+
+        sleep_calls = []
+        with patch.object(workbuddy, "time") as mock_time:
+            mock_time.sleep.side_effect = lambda s: sleep_calls.append(s)
+            with patch("urllib.request.urlopen", side_effect=[status_resp, err_429, success_resp]):
+                ok = workbuddy.run_checkin(target_name="testuser", with_chat=False)
+                self.assertTrue(ok)
+                self.assertEqual(len(sleep_calls), 1)
+                self.assertGreaterEqual(sleep_calls[0], 2.0)
+                self.assertLessEqual(sleep_calls[0], 5.0)
+
+    def test_checkin_retries_exhausted_on_500(self):
+        """测试签到接口持续 500 时最多重试 3 次后优雅失败并返回 False"""
+        self._create_testuser_profile()
+        status_resp = MagicMock()
+        status_resp.read.return_value = json.dumps({
+            "code": 0, "data": {"today_checked_in": False, "streak_days": 5, "total_credits": 500}
+        }).encode("utf-8")
+        status_resp.__enter__.return_value = status_resp
+
+        def _make_500():
+            return urllib.error.HTTPError(
+                "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
+                500, "Internal Server Error", {},
+                io.BytesIO(b'{"code": 500, "msg": "fail"}')
+            )
+
+        sleep_calls = []
+        with patch.object(workbuddy, "time") as mock_time:
+            mock_time.sleep.side_effect = lambda s: sleep_calls.append(s)
+            # 1 次 status_req + 4 次 claim_req (1 初始 + 3 重试)
+            with patch("urllib.request.urlopen", side_effect=[status_resp, _make_500(), _make_500(), _make_500(), _make_500()]):
+                ok = workbuddy.run_checkin(target_name="testuser", with_chat=False)
+                self.assertFalse(ok)
+                self.assertEqual(len(sleep_calls), 3)
+
+    def test_checkin_does_not_retry_on_401(self):
+        """测试 401 等非 5xx/429 错误不进行重试并返回 False"""
+        self._create_testuser_profile()
+        status_resp = MagicMock()
+        status_resp.read.return_value = json.dumps({
+            "code": 0, "data": {"today_checked_in": False, "streak_days": 5, "total_credits": 500}
+        }).encode("utf-8")
+        status_resp.__enter__.return_value = status_resp
+
+        err_401 = urllib.error.HTTPError(
+            "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
+            401, "Unauthorized", {},
+            io.BytesIO(b'{"code": 401, "msg": "token expired"}')
+        )
+
+        sleep_calls = []
+        with patch.object(workbuddy, "time") as mock_time:
+            mock_time.sleep.side_effect = lambda s: sleep_calls.append(s)
+            with patch("urllib.request.urlopen", side_effect=[status_resp, err_401]):
+                ok = workbuddy.run_checkin(target_name="testuser", with_chat=False)
+                self.assertFalse(ok)
+                self.assertEqual(len(sleep_calls), 0)
+
+    def test_checkin_multi_account_inter_wait_jitter(self):
+        """测试多账号连续签到时，账号之间自动执行 1.0~2.0 秒随机延迟"""
+        p1 = {
+            "account": {"uid": "mock-uid-1", "nickname": "User1"},
+            "auth": {"accessToken": "mock_token_1"}
+        }
+        with open(os.path.join(workbuddy.PROFILES_DIR, "user1.info"), "w", encoding="utf-8") as f:
+            json.dump(p1, f)
+
+        p2 = {
+            "account": {"uid": "mock-uid-2", "nickname": "User2"},
+            "auth": {"accessToken": "mock_token_2"}
+        }
+        with open(os.path.join(workbuddy.PROFILES_DIR, "user2.info"), "w", encoding="utf-8") as f:
+            json.dump(p2, f)
+
+        dummy_resp = MagicMock()
+        dummy_resp.read.return_value = b'{"code": 0, "data": {"today_checked_in": true, "streak_days": 5, "total_credits": 500}}'
+        dummy_resp.__enter__.return_value = dummy_resp
+
+        sleep_calls = []
+        with patch.object(workbuddy, "time") as mock_time:
+            mock_time.sleep.side_effect = lambda s: sleep_calls.append(s)
+            with patch("urllib.request.urlopen", return_value=dummy_resp):
+                ok = workbuddy.run_checkin(with_chat=False)
+                self.assertTrue(ok)
+                # 2 个账号之间应触发 1 次账号间 sleep (范围 1.0~2.0s)
+                self.assertEqual(len(sleep_calls), 1)
+                self.assertGreaterEqual(sleep_calls[0], 1.0)
+                self.assertLessEqual(sleep_calls[0], 2.0)
+
+    def test_checkin_multi_account_inter_wait_runs_even_on_failure(self):
+        """测试即便前一个账号在解析或网络阶段异常，账号间防刷延迟依然在 finally 中执行"""
+        # user1 缺少 token (直接 failed += 1; continue)
+        p1 = {
+            "account": {"uid": "mock-uid-1", "nickname": "User1"},
+            "auth": {}
+        }
+        with open(os.path.join(workbuddy.PROFILES_DIR, "user1.info"), "w", encoding="utf-8") as f:
+            json.dump(p1, f)
+
+        p2 = {
+            "account": {"uid": "mock-uid-2", "nickname": "User2"},
+            "auth": {"accessToken": "mock_token_2"}
+        }
+        with open(os.path.join(workbuddy.PROFILES_DIR, "user2.info"), "w", encoding="utf-8") as f:
+            json.dump(p2, f)
+
+        dummy_resp = MagicMock()
+        dummy_resp.read.return_value = b'{"code": 0, "data": {"today_checked_in": true, "streak_days": 5, "total_credits": 500}}'
+        dummy_resp.__enter__.return_value = dummy_resp
+
+        sleep_calls = []
+        with patch.object(workbuddy, "time") as mock_time:
+            mock_time.sleep.side_effect = lambda s: sleep_calls.append(s)
+            with patch("urllib.request.urlopen", return_value=dummy_resp):
+                ok = workbuddy.run_checkin(with_chat=False)
+                # user1 失败故整体返回 False
+                self.assertFalse(ok)
+                # 依然保证账号间间隔
+                self.assertEqual(len(sleep_calls), 1)
+                self.assertGreaterEqual(sleep_calls[0], 1.0)
+                self.assertLessEqual(sleep_calls[0], 2.0)
 
 if __name__ == "__main__":
     unittest.main()

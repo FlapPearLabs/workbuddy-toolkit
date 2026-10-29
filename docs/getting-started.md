@@ -34,7 +34,9 @@ python install.py
 | 参数 | 作用 |
 |---|---|
 | `--init-workspace` | 开启多账号工作区共享（等同 `workbuddy init`，可用 `workbuddy rollback` 恢复） |
-| `--with-checkin` | 注册每日 09:00 自动签到（会给每个已保存账号发送一次保活对话）。Windows 上若任务计划程序不可用，自动降级为登录时执行（仅签到，不含保活对话） |
+| `--with-checkin` | 注册自动签到（默认轨 A：每天 09:00，会给每个已保存账号发送一次保活对话）。Windows 上若任务计划程序不可用，自动降级为登录时执行（仅签到，不含保活对话） |
+| `--with-boot-checkin` | 注册开机即签（轨 B）：登录且网络就绪后 5 秒内打卡，当天已签自动跳过 |
+| `--checkin-mode=calendar\|boot\|none` | 显式选择打卡轨道；`none` 会移除已有的双轨调度。两轨互斥 |
 | `--with-log-guard` | 注册日志 / 沙盒看门狗（每 30 分钟） |
 | `--with-router` | 注册容灾路由常驻服务 127.0.0.1:8047（仅 macOS LaunchAgent） |
 | `--with-services` | 以上三项后台任务全部开启 |
@@ -112,11 +114,13 @@ wb-checkin
 wb-audit
 ```
 
-后台调度默认不开启。需要时重新运行安装程序并加上 `--with-checkin` / `--with-log-guard`，会按系统接入原生调度：
+后台调度默认不开启。需要时重新运行安装程序并加上 `--with-checkin`（轨 A）/ `--with-boot-checkin`（轨 B）/ `--with-log-guard`，会按系统接入原生调度：
 
 - macOS：`launchd`
-- Linux：`systemd --user`，必要时降级到 `cron`
-- Windows：任务计划程序
+- Linux：`systemd --user`，必要时降级到 `cron`（开机轨使用 `cron @reboot`）
+- Windows：任务计划程序（开机轨使用登录触发器），不可用时降级到「启动」文件夹
+
+双轨互斥：安装器切换轨道时会先注销另一轨；`--checkin-mode=none` 会同时移除两轨。
 
 > 自动签到与保活对话会以客户端身份批量访问 WorkBuddy 服务。多账号自动化可能触发平台风控或违反服务条款，请自行评估后再开启。
 
@@ -132,7 +136,10 @@ wb-audit
 3. 依次运行 workbuddy init、workbuddy doctor、workbuddy status。
 4. 不要修改 WorkBuddy 应用包本体。
 5. 如果 doctor 报告不兼容，停止后续写操作并告诉我具体诊断结果。
-6. 如果环境支持任务调度，再询问我是否启用每日 wb-checkin；我确认后再运行 `install.py --with-checkin`，不要擅自创建我没有确认的后台任务。
+6. 如果环境支持任务调度，请先询问我的使用习惯再推进调度配置（不要擅自创建未经我确认的后台任务）：
+   - 习惯 A：电脑常开机（台式机/服务器）-> 配置每天 09:00 定时打卡（install.py --checkin-mode=calendar）
+   - 习惯 B：经常合盖休眠或关机（笔记本）-> 配置开机且连上网后 5 秒内自动打卡（install.py --checkin-mode=boot）
+   - 习惯 C：不需要后台任务 -> 仅保留手动命令（install.py --checkin-mode=none）
 7. 最后汇报：安装位置、doctor 结果、当前账号状态、后台调度是否启用。
 ```
 
