@@ -2664,7 +2664,8 @@ def run_checkin(target_name=None, with_chat=True):
     new_checked = 0
     failed = 0
 
-    for name, p in targets.items():
+    targets_list = list(targets.items())
+    for idx, (name, p) in enumerate(targets_list):
         data = p["data"]
         raw_token = data.get("auth", {}).get("accessToken") if isinstance(data, dict) and isinstance(data.get("auth"), dict) else None
         uid = p["uid"]
@@ -2699,18 +2700,29 @@ def run_checkin(target_name=None, with_chat=True):
             "User-Agent": "WorkBuddy/5.5.3"
         }
 
-        # 1. 幂等探测签到状态
+        # 1. 幂等探测签到状态 (最多尝试 2 次以吸收偶发网络抖动)
         status_req = urllib.request.Request(
             "https://copilot.tencent.com/v2/billing/meter/checkin-activity-status",
             data=b"{}",
             headers=base_headers
         )
 
-        try:
-            with robust_urlopen(status_req, timeout=10) as resp:
-                status_res = json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 查询签到状态失败: {e}")
+        status_res = None
+        for s_attempt in range(2):
+            try:
+                with robust_urlopen(status_req, timeout=10) as resp:
+                    status_res = json.loads(resp.read().decode("utf-8"))
+                    if status_res.get("code") == 0:
+                        break
+            except Exception as e:
+                if s_attempt < 1:
+                    time.sleep(1.0)
+                    continue
+                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 查询签到状态失败: {e}")
+                status_res = None
+                break
+
+        if not status_res:
             failed += 1
             continue
 
@@ -2728,41 +2740,74 @@ def run_checkin(target_name=None, with_chat=True):
             checked_already += 1
             print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}今日已签到{COLOR_RESET} | 连续 {streak_days} 天 | 累计签到奖励 {total_credits} 积分")
         else:
-            # 2. 执行签到领取
+            # 2. 执行签到领取 (失败重试：最多重试 3 次，间隔 2~5 秒)
             claim_req = urllib.request.Request(
                 "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
                 data=b"{}",
                 headers=base_headers
             )
 
-            try:
-                with robust_urlopen(claim_req, timeout=10) as resp:
-                    claim_res = json.loads(resp.read().decode("utf-8"))
-                    if claim_res.get("code") == 0:
-                        new_checked += 1
-                        cd = claim_res.get("data", {})
-                        credit = cd.get("credit", 100)
-                        new_streak = cd.get("streak_days", streak_days + 1)
-                        print(f" {COLOR_GREEN}🎉 {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_BOLD}{COLOR_GREEN}签到成功！+{credit} 积分{COLOR_RESET} | 连续签到 {new_streak} 天")
+            max_retries = 3
+            claim_success = False
+            for claim_attempt in range(max_retries + 1):
+                try:
+                    with robust_urlopen(claim_req, timeout=10) as resp:
+                        claim_res = json.loads(resp.read().decode("utf-8"))
+                        if claim_res.get("code") == 0:
+                            new_checked += 1
+                            cd = claim_res.get("data", {})
+                            credit = cd.get("credit", 100)
+                            new_streak = cd.get("streak_days", streak_days + 1)
+                            print(f" {COLOR_GREEN}🎉 {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_BOLD}{COLOR_GREEN}签到成功！+{credit} 积分{COLOR_RESET} | 连续签到 {new_streak} 天")
+                            claim_success = True
+                            break
+                        else:
+                            msg = claim_res.get("msg", "")
+                            if "已签到" in msg:
+                                checked_already += 1
+                                print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
+                                claim_success = True
+                                break
+                            if claim_attempt < max_retries:
+                                wait_sec = round(random.uniform(2.0, 5.0), 1)
+                                print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {msg}，正在重试 ({claim_attempt + 1}/{max_retries}) 等待 {wait_sec}s...")
+                                time.sleep(wait_sec)
+                                continue
+                            else:
+                                failed += 1
+                                print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {msg}")
+                except urllib.error.HTTPError as e:
+                    err_body = e.read().decode("utf-8", errors="ignore")
+                    try:
+                        err_json = json.loads(err_body)
+                        msg = err_json.get("msg", err_body)
+                    except Exception:
+                        msg = err_body
+                    if "已签到" in msg:
+                        checked_already += 1
+                        print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
+                        claim_success = True
+                        break
+                    # 对 5xx 服务端错误 (如 500 签到失败，请稍后重试) 或 429 限流进行退避重试
+                    if (e.code >= 500 or e.code == 429) and claim_attempt < max_retries:
+                        wait_sec = round(random.uniform(2.0, 5.0), 1)
+                        print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到遇到服务端抖动 ({e.code}): {msg}，正在重试 ({claim_attempt + 1}/{max_retries}) 等待 {wait_sec}s...")
+                        time.sleep(wait_sec)
+                        continue
                     else:
                         failed += 1
-                        print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {claim_res.get('msg')}")
-            except urllib.error.HTTPError as e:
-                err_body = e.read().decode("utf-8", errors="ignore")
-                try:
-                    err_json = json.loads(err_body)
-                    msg = err_json.get("msg", err_body)
-                except Exception:
-                    msg = err_body
-                if "已签到" in msg:
-                    checked_already += 1
-                    print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
-                else:
-                    failed += 1
-                    print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到失败 ({e.code}): {msg}")
-            except Exception as e:
-                failed += 1
-                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}")
+                        print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到失败 ({e.code}): {msg}")
+                        break
+                except Exception as e:
+                    if claim_attempt < max_retries:
+                        wait_sec = round(random.uniform(2.0, 5.0), 1)
+                        print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}，正在重试 ({claim_attempt + 1}/{max_retries}) 等待 {wait_sec}s...")
+                        time.sleep(wait_sec)
+                        continue
+                    else:
+                        failed += 1
+                        print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}")
+                        break
 
         # 3. 自动触发每日连续对话任务 (获取每日连续对话奖励)
         if with_chat:
@@ -2774,6 +2819,11 @@ def run_checkin(target_name=None, with_chat=True):
                 print(f"    💬 {COLOR_CYAN}[每日对话]{COLOR_RESET} 模型: {chat_res['model']} (低倍率/免费) -> 回复: \"{rep}\" ✔")
             else:
                 print(f"    💬 {COLOR_YELLOW}[每日对话]{COLOR_RESET} 触发未成功: {chat_res.get('error')}")
+
+        # 多账号切换间随机 sleep 1~2 秒，避免高频并发触发腾讯防刷
+        if idx < len(targets_list) - 1:
+            inter_wait = round(random.uniform(1.0, 2.0), 1)
+            time.sleep(inter_wait)
 
     print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}\n")
 
