@@ -380,7 +380,9 @@ class TestInstallersE2E(unittest.TestCase):
 
 
 def _copy_repo(dest):
-    shutil.copytree(REPO_DIR, dest, ignore=shutil.ignore_patterns(".git", "__pycache__", ".ruff_cache"))
+    # .codegraph 是本机代码索引（含 unix socket），copytree 复制 socket 会直接失败
+    shutil.copytree(REPO_DIR, dest, ignore=shutil.ignore_patterns(
+        ".git", "__pycache__", ".ruff_cache", ".codegraph"))
     return dest
 
 
