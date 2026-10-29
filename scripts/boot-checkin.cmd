@@ -73,11 +73,12 @@ if "%CHECKIN_BIN%"=="" (
 
 echo [%TODAY% %time%] [WorkBuddy Boot Gate] 网络已就绪，正在触发自动签到与保活对话...>> "%LOG_FILE%"
 call "%CHECKIN_BIN%" >> "%LOG_FILE%" 2>&1
-if !errorlevel! equ 0 (
-    echo !TODAY!> "%FLAG_FILE%"
+set "CHECKIN_EXIT=!errorlevel!"
+if !CHECKIN_EXIT! equ 0 (
+    (echo !TODAY!)> "%FLAG_FILE%"
     echo [%TODAY% %time%] [WorkBuddy Boot Gate] ✔ 今日签到流程执行完成，已写入单日防重标记。>> "%LOG_FILE%"
     exit /b 0
 ) else (
-    echo [%TODAY% %time%] [WorkBuddy Boot Gate] ▲ 签到命令退出异常。>> "%LOG_FILE%"
-    exit /b !errorlevel!
+    echo [%TODAY% %time%] [WorkBuddy Boot Gate] ▲ 签到命令退出异常 (Exit Code: !CHECKIN_EXIT!)。>> "%LOG_FILE%"
+    exit /b !CHECKIN_EXIT!
 )

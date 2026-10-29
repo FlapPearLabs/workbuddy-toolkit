@@ -2646,14 +2646,14 @@ def run_checkin(target_name=None, with_chat=True):
 
     if not profiles:
         print(f"{COLOR_RED}未在 ~/.workbuddy/auth_profiles 中发现任何保存的账号凭证。{COLOR_RESET}")
-        return
+        return False
 
     targets = {}
     if target_name:
         t_name, t_prof = resolve_profile_target(profiles, target_name, allow_uid_prefix=False)
         if not t_prof:
             print(f"{COLOR_RED}未找到账号: {target_name}{COLOR_RESET}")
-            return
+            return False
         targets[t_name] = t_prof
     else:
         targets = profiles
@@ -2666,164 +2666,176 @@ def run_checkin(target_name=None, with_chat=True):
 
     targets_list = list(targets.items())
     for idx, (name, p) in enumerate(targets_list):
-        data = p["data"]
-        raw_token = data.get("auth", {}).get("accessToken") if isinstance(data, dict) and isinstance(data.get("auth"), dict) else None
-        uid = p["uid"]
-        nickname = p["nickname"]
-
-        if not raw_token or not uid:
-            print(f" {COLOR_YELLOW}• {name:<12}{COLOR_RESET} [昵称: {nickname}] 缺少有效 Token 或 UID，跳过")
-            failed += 1
-            continue
-
         try:
-            token = resolve_credential_field(raw_token, field_name="accessToken")
-        except CredentialError as ce:
-            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析失败: {ce.message}")
-            failed += 1
-            continue
-        except Exception as e:
-            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析异常: {e}")
-            failed += 1
-            continue
+            data = p["data"]
+            raw_token = data.get("auth", {}).get("accessToken") if isinstance(data, dict) and isinstance(data.get("auth"), dict) else None
+            uid = p["uid"]
+            nickname = p["nickname"]
 
-        if not isinstance(token, str) or not is_valid_token_string(token):
-            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据无法解析为有效令牌，跳过")
-            failed += 1
-            continue
+            if not raw_token or not uid:
+                print(f" {COLOR_YELLOW}• {name:<12}{COLOR_RESET} [昵称: {nickname}] 缺少有效 Token 或 UID，跳过")
+                failed += 1
+                continue
 
-        base_headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-            "X-User-Id": str(uid),
-            "User-Agent": "WorkBuddy/5.5.3"
-        }
-
-        # 1. 幂等探测签到状态 (最多尝试 2 次以吸收偶发网络抖动)
-        status_req = urllib.request.Request(
-            "https://copilot.tencent.com/v2/billing/meter/checkin-activity-status",
-            data=b"{}",
-            headers=base_headers
-        )
-
-        status_res = None
-        for s_attempt in range(2):
             try:
-                with robust_urlopen(status_req, timeout=10) as resp:
-                    status_res = json.loads(resp.read().decode("utf-8"))
-                    if status_res.get("code") == 0:
-                        break
+                token = resolve_credential_field(raw_token, field_name="accessToken")
+            except CredentialError as ce:
+                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析失败: {ce.message}")
+                failed += 1
+                continue
             except Exception as e:
-                if s_attempt < 1:
-                    time.sleep(1.0)
-                    continue
-                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 查询签到状态失败: {e}")
-                status_res = None
-                break
+                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据解析异常: {e}")
+                failed += 1
+                continue
 
-        if not status_res:
-            failed += 1
-            continue
+            if not isinstance(token, str) or not is_valid_token_string(token):
+                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 凭据无法解析为有效令牌，跳过")
+                failed += 1
+                continue
 
-        if status_res.get("code") != 0:
-            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 接口错误: {status_res.get('msg')}")
-            failed += 1
-            continue
+            base_headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+                "X-User-Id": str(uid),
+                "User-Agent": "WorkBuddy/5.5.3"
+            }
 
-        status_data = status_res.get("data", {})
-        today_checked_in = status_data.get("today_checked_in", False)
-        streak_days = status_data.get("streak_days", 0)
-        total_credits = status_data.get("total_credits", 0)
-
-        if today_checked_in:
-            checked_already += 1
-            print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}今日已签到{COLOR_RESET} | 连续 {streak_days} 天 | 累计签到奖励 {total_credits} 积分")
-        else:
-            # 2. 执行签到领取 (失败重试：最多重试 3 次，间隔 2~5 秒)
-            claim_req = urllib.request.Request(
-                "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
+            # 1. 幂等探测签到状态 (最多尝试 2 次以吸收偶发网络抖动；max_retries=0 避免乘数重试)
+            status_req = urllib.request.Request(
+                "https://copilot.tencent.com/v2/billing/meter/checkin-activity-status",
                 data=b"{}",
                 headers=base_headers
             )
 
-            max_retries = 3
-            claim_success = False
-            for claim_attempt in range(max_retries + 1):
+            status_res = None
+            for s_attempt in range(2):
                 try:
-                    with robust_urlopen(claim_req, timeout=10) as resp:
-                        claim_res = json.loads(resp.read().decode("utf-8"))
-                        if claim_res.get("code") == 0:
-                            new_checked += 1
-                            cd = claim_res.get("data", {})
-                            credit = cd.get("credit", 100)
-                            new_streak = cd.get("streak_days", streak_days + 1)
-                            print(f" {COLOR_GREEN}🎉 {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_BOLD}{COLOR_GREEN}签到成功！+{credit} 积分{COLOR_RESET} | 连续签到 {new_streak} 天")
-                            claim_success = True
+                    with robust_urlopen(status_req, timeout=10, max_retries=0) as resp:
+                        status_res = json.loads(resp.read().decode("utf-8"))
+                        if status_res.get("code") == 0:
                             break
-                        else:
-                            msg = claim_res.get("msg", "")
-                            if "已签到" in msg:
-                                checked_already += 1
-                                print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
+                except urllib.error.HTTPError as e:
+                    if e.code in (401, 403):
+                        print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 账号认证失败 ({e.code})")
+                        status_res = None
+                        break
+                    if s_attempt < 1:
+                        time.sleep(1.0)
+                        continue
+                    print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 查询签到状态失败 ({e.code})")
+                    status_res = None
+                    break
+                except Exception as e:
+                    if s_attempt < 1:
+                        time.sleep(1.0)
+                        continue
+                    print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 查询签到状态失败: {e}")
+                    status_res = None
+                    break
+
+            if not status_res:
+                failed += 1
+                continue
+
+            if status_res.get("code") != 0:
+                print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 接口错误: {status_res.get('msg')}")
+                failed += 1
+                continue
+
+            status_data = status_res.get("data", {})
+            today_checked_in = status_data.get("today_checked_in", False)
+            streak_days = status_data.get("streak_days", 0)
+            total_credits = status_data.get("total_credits", 0)
+
+            if today_checked_in:
+                checked_already += 1
+                print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}今日已签到{COLOR_RESET} | 连续 {streak_days} 天 | 累计签到奖励 {total_credits} 积分")
+            else:
+                # 2. 执行签到领取 (失败重试：最多重试 3 次，间隔 2~5 秒；max_retries=0 保持总请求数严格 <= 4)
+                claim_req = urllib.request.Request(
+                    "https://copilot.tencent.com/v2/billing/meter/daily-checkin",
+                    data=b"{}",
+                    headers=base_headers
+                )
+
+                max_retries = 3
+                claim_success = False
+                for claim_attempt in range(max_retries + 1):
+                    try:
+                        with robust_urlopen(claim_req, timeout=10, max_retries=0) as resp:
+                            claim_res = json.loads(resp.read().decode("utf-8"))
+                            if claim_res.get("code") == 0:
+                                new_checked += 1
+                                cd = claim_res.get("data", {})
+                                credit = cd.get("credit", 100)
+                                new_streak = cd.get("streak_days", streak_days + 1)
+                                print(f" {COLOR_GREEN}🎉 {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_BOLD}{COLOR_GREEN}签到成功！+{credit} 积分{COLOR_RESET} | 连续签到 {new_streak} 天")
                                 claim_success = True
                                 break
-                            if claim_attempt < max_retries:
-                                wait_sec = round(random.uniform(2.0, 5.0), 1)
-                                print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {msg}，正在重试 ({claim_attempt + 1}/{max_retries}) 等待 {wait_sec}s...")
-                                time.sleep(wait_sec)
-                                continue
                             else:
-                                failed += 1
-                                print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {msg}")
-                except urllib.error.HTTPError as e:
-                    err_body = e.read().decode("utf-8", errors="ignore")
-                    try:
-                        err_json = json.loads(err_body)
-                        msg = err_json.get("msg", err_body)
-                    except Exception:
-                        msg = err_body
-                    if "已签到" in msg:
-                        checked_already += 1
-                        print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
-                        claim_success = True
-                        break
-                    # 对 5xx 服务端错误 (如 500 签到失败，请稍后重试) 或 429 限流进行退避重试
-                    if (e.code >= 500 or e.code == 429) and claim_attempt < max_retries:
-                        wait_sec = round(random.uniform(2.0, 5.0), 1)
-                        print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到遇到服务端抖动 ({e.code}): {msg}，正在重试 ({claim_attempt + 1}/{max_retries}) 等待 {wait_sec}s...")
-                        time.sleep(wait_sec)
-                        continue
-                    else:
-                        failed += 1
-                        print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到失败 ({e.code}): {msg}")
-                        break
-                except Exception as e:
-                    if claim_attempt < max_retries:
-                        wait_sec = round(random.uniform(2.0, 5.0), 1)
-                        print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}，正在重试 ({claim_attempt + 1}/{max_retries}) 等待 {wait_sec}s...")
-                        time.sleep(wait_sec)
-                        continue
-                    else:
-                        failed += 1
-                        print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}")
-                        break
+                                msg = claim_res.get("msg", "")
+                                if "已签到" in msg:
+                                    checked_already += 1
+                                    print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
+                                    claim_success = True
+                                    break
+                                if claim_attempt < max_retries:
+                                    wait_sec = round(random.uniform(2.0, 5.0), 1)
+                                    print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {msg}，正在重试 ({claim_attempt + 1}/{max_retries}) 等待 {wait_sec}s...")
+                                    time.sleep(wait_sec)
+                                    continue
+                                else:
+                                    failed += 1
+                                    print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到返回: {msg}")
+                    except urllib.error.HTTPError as e:
+                        err_body = e.read().decode("utf-8", errors="ignore")
+                        try:
+                            err_json = json.loads(err_body)
+                            msg = err_json.get("msg", err_body)
+                        except Exception:
+                            msg = err_body
+                        if "已签到" in msg:
+                            checked_already += 1
+                            print(f" {COLOR_GREEN}✔ {name:<12}{COLOR_RESET} [昵称: {nickname}] {COLOR_GREEN}{msg}{COLOR_RESET}")
+                            claim_success = True
+                            break
+                        # 对 5xx 服务端错误 (如 500 签到失败，请稍后重试) 或 429 限流进行退避重试
+                        if (e.code >= 500 or e.code == 429) and claim_attempt < max_retries:
+                            wait_sec = round(random.uniform(2.0, 5.0), 1)
+                            print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到遇到服务端抖动 ({e.code}): {msg}，正在重试 ({claim_attempt + 1}/{max_retries}) 等待 {wait_sec}s...")
+                            time.sleep(wait_sec)
+                            continue
+                        else:
+                            failed += 1
+                            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 签到失败 ({e.code}): {msg}")
+                            break
+                    except Exception as e:
+                        if claim_attempt < max_retries:
+                            wait_sec = round(random.uniform(2.0, 5.0), 1)
+                            print(f" {COLOR_YELLOW}▲ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}，正在重试 ({claim_attempt + 1}/{max_retries}) 等待 {wait_sec}s...")
+                            time.sleep(wait_sec)
+                            continue
+                        else:
+                            failed += 1
+                            print(f" {COLOR_RED}✖ {name:<12}{COLOR_RESET} [昵称: {nickname}] 请求异常: {e}")
+                            break
 
-        # 3. 自动触发每日连续对话任务 (获取每日连续对话奖励)
-        if with_chat:
-            chat_res = send_chat_message(token, str(uid), prompt="请回复：你好")
-            if chat_res.get("success"):
-                rep = chat_res["reply"].replace("\n", " ").strip()
-                if len(rep) > 30:
-                    rep = rep[:27] + "..."
-                print(f"    💬 {COLOR_CYAN}[每日对话]{COLOR_RESET} 模型: {chat_res['model']} (低倍率/免费) -> 回复: \"{rep}\" ✔")
-            else:
-                print(f"    💬 {COLOR_YELLOW}[每日对话]{COLOR_RESET} 触发未成功: {chat_res.get('error')}")
-
-        # 多账号切换间随机 sleep 1~2 秒，避免高频并发触发腾讯防刷
-        if idx < len(targets_list) - 1:
-            inter_wait = round(random.uniform(1.0, 2.0), 1)
-            time.sleep(inter_wait)
+            # 3. 自动触发每日连续对话任务 (获取每日连续对话奖励)
+            if with_chat:
+                chat_res = send_chat_message(token, str(uid), prompt="请回复：你好")
+                if chat_res.get("success"):
+                    rep = chat_res["reply"].replace("\n", " ").strip()
+                    if len(rep) > 30:
+                        rep = rep[:27] + "..."
+                    print(f"    💬 {COLOR_CYAN}[每日对话]{COLOR_RESET} 模型: {chat_res['model']} (低倍率/免费) -> 回复: \"{rep}\" ✔")
+                else:
+                    print(f"    💬 {COLOR_YELLOW}[每日对话]{COLOR_RESET} 触发未成功: {chat_res.get('error')}")
+        finally:
+            # 多账号切换间随机 sleep 1~2 秒，避免高频并发触发腾讯防刷（即便当前账号异常也确保间隔）
+            if idx < len(targets_list) - 1:
+                inter_wait = round(random.uniform(1.0, 2.0), 1)
+                time.sleep(inter_wait)
 
     print(f"{COLOR_CYAN}----------------------------------------------{COLOR_RESET}\n")
 
@@ -2837,6 +2849,9 @@ def run_checkin(target_name=None, with_chat=True):
             summary_parts.append(f"{failed}个失败")
         summary_text = "，".join(summary_parts) if summary_parts else "签到完成"
         notify_desktop("WorkBuddy 每日签到", f"共 {len(targets)} 个账号：{summary_text}")
+
+    return (failed == 0 and len(targets) > 0)
+
 
 def interactive_menu():
     profiles = get_profiles()
@@ -4988,8 +5003,8 @@ def main():
         with_chat = ("--no-chat" not in args)
         clean_args = [a for a in args if a != "--no-chat"]
         target = clean_args[0] if clean_args else None
-        run_checkin(target, with_chat=with_chat)
-        return
+        ok = run_checkin(target, with_chat=with_chat)
+        sys.exit(0 if ok else 1)
     if "remove" in prog_name:
         # wb-remove / workbuddy-remove 软链（macOS/Linux）：argv[0] 携带子命令语义，
         # 等价于 `workbuddy remove ...`。缺了这条分发，wb-remove <别名> 会落进
@@ -5070,7 +5085,8 @@ def main():
         with_chat = ("--no-chat" not in args)
         clean_args = [a for a in args[1:] if a != "--no-chat"]
         target = clean_args[0] if clean_args else None
-        run_checkin(target, with_chat=with_chat)
+        ok = run_checkin(target, with_chat=with_chat)
+        sys.exit(0 if ok else 1)
     elif cmd in ["chat", "ask", "tell"]:
         parse_and_run_chat(args[1:])
     elif cmd in ["status", "info", "whoami", "list", "ls"]:

@@ -31,20 +31,23 @@ fi
 
 # 2. 网络就绪轮询门禁（最多等待 90 秒，每次间隔 2 秒）
 MAX_WAIT_SECONDS=90
-ELAPSED=0
+START_TIME=$(date +%s)
 CONNECTED=0
 
-while [ "$ELAPSED" -lt "$MAX_WAIT_SECONDS" ]; do
+while true; do
+    NOW=$(date +%s)
+    if [ $((NOW - START_TIME)) -ge "$MAX_WAIT_SECONDS" ]; then
+        break
+    fi
     # 双重探针：优先 HTTP HEAD 连通（防 ICMP 拦截），回退公共 DNS 探针
-    if curl -I -s --connect-timeout 2 "https://copilot.tencent.com" >/dev/null 2>&1 || \
-       curl -I -s --connect-timeout 2 "https://www.baidu.com" >/dev/null 2>&1 || \
+    if curl -I -s --connect-timeout 2 --max-time 3 "https://copilot.tencent.com" >/dev/null 2>&1 || \
+       curl -I -s --connect-timeout 2 --max-time 3 "https://www.baidu.com" >/dev/null 2>&1 || \
        ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1 || \
        ping -c 1 -W 2 119.29.29.29 >/dev/null 2>&1; then
         CONNECTED=1
         break
     fi
     sleep 2
-    ELAPSED=$((ELAPSED + 2))
 done
 
 if [ "$CONNECTED" -eq 0 ]; then

@@ -637,7 +637,7 @@ class TestDualTrackCheckin(unittest.TestCase):
 
     @unittest.skipIf(sys.platform == "win32", "boot-checkin.sh 仅用于 macOS / Linux")
     def test_boot_script_exits_immediately_when_already_checked_in_today(self):
-        """单日幂等锁：当天已打卡时必须在网络探测前退出，不能重复打扰"""
+        """单日幂等锁：当天已打卡时必须在网络探测前退出，不能重复打扰且不得调用签到"""
         installer = os.path.join(REPO_DIR, "install.py")
         res = subprocess.run([sys.executable, installer, "--no-input"], cwd=REPO_DIR,
                              env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -653,11 +653,44 @@ class TestDualTrackCheckin(unittest.TestCase):
         with open(flag_path, "w", encoding="utf-8") as f:
             f.write(datetime.date.today().isoformat())
 
-        # 若幂等锁失效，脚本会进入最长 90 秒的网络等待并超时，故 20 秒即可证明走了快路径
+        # 放置桩 wb-checkin：若幂等锁失效执行了签到命令，该桩会写入 canary 文件
+        bin_dir = os.path.join(self.temp_home, ".local", "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        canary = os.path.join(self.temp_home, "checkin_called.canary")
+        stub_checkin = os.path.join(bin_dir, "wb-checkin")
+        with open(stub_checkin, "w", encoding="utf-8") as f:
+            f.write(f"#!/bin/sh\ntouch '{canary}'\nexit 0\n")
+        os.chmod(stub_checkin, 0o755)
+
+        log_path = os.path.join(self.temp_home, ".workbuddy", "logs", "boot_checkin.log")
+        if os.path.exists(log_path):
+            os.remove(log_path)
+
+        # 若幂等锁失效，脚本会进入最长 90 秒的网络等待或调用 wb-checkin
         sh_res = subprocess.run(["bash", sh_path], env=self.env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
         self.assertEqual(sh_res.returncode, 0, sh_res.stderr)
+        self.assertFalse(os.path.exists(canary), "单日防重幂等锁生效时，绝对不能调用 wb-checkin 命令")
+        self.assertFalse(os.path.exists(log_path), "单日防重幂等锁生效时，不得写入任何日志")
+
+    def test_boot_cmd_script_syntax_and_errorlevel_contract(self):
+        """静态断言 Windows boot-checkin.cmd 语法与返回值契约：
+        1. 写入 flag 必须带括号避免数字被 cmd 当做句柄解析 (如 (echo !TODAY!)> "%FLAG_FILE%")
+        2. 必须在 call 后立即暂存 errorlevel，避免后置 echo 清空退出码导致异常被静默掩盖
+        """
+        cmd_path = os.path.join(REPO_DIR, "scripts", "boot-checkin.cmd")
+        with open(cmd_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        # 检查防重标记重定向：不能有 "!TODAY!>" 这种紧邻 > 的写法
+        self.assertNotIn("!TODAY!>", content, "cmd 语法缺陷：!TODAY!> 会将末尾数字解析为文件句柄")
+        self.assertIn('(echo !TODAY!)> "%FLAG_FILE%"', content)
+
+        # 检查 call 后立即暂存 errorlevel 并在退出时使用
+        self.assertIn('set "CHECKIN_EXIT=!errorlevel!"', content)
+        self.assertIn('exit /b !CHECKIN_EXIT!', content)
 
 
 if __name__ == "__main__":
     unittest.main()
+
